@@ -94,15 +94,24 @@ public sealed class RetainedOrderEvidenceReplayController(
                 .ToList();
 
             var archivedForRefresh = 0;
-            if (request.RefreshUnamendedPending != false && keys.Count > 0)
+            if (request.RefreshUnamendedPending != false &&
+                !string.IsNullOrWhiteSpace(mailboxRequest.MessageId))
             {
-                var existingPending = await db.StagedImports
+                // The old parser's source key can differ from the canonical parser's
+                // source key. Match retained message evidence in memory after a
+                // bounded pending-review query so replay always replaces the stale
+                // import without relying on provider-specific JSON string translation.
+                var pendingCandidates = await db.StagedImports
                     .Where(item => item.EntityType == "order" &&
                                    item.Status == StagingStatus.PendingReview &&
-                                   (keys.Contains(item.IdempotencyKey) ||
-                                    item.PayloadJson.Contains(mailboxRequest.MessageId)) &&
+                                   item.ReceivedAtUtc >= receivedFromUtc &&
                                    (item.Source == null || !item.Source.StartsWith("Info mailbox replay")))
                     .ToListAsync(ct);
+
+                var existingPending = pendingCandidates
+                    .Where(item => keys.Contains(item.IdempotencyKey) ||
+                                   item.PayloadJson.Contains(mailboxRequest.MessageId, StringComparison.Ordinal))
+                    .ToList();
 
                 foreach (var pending in existingPending)
                 {
