@@ -26,6 +26,7 @@ jobs:
           git clone --depth 1 --branch "migration/v2-clean-api" \
             https://github.com/Stuart-Lyons-Haulage/slh-tms-api.git /tmp/source
           rm -rf /tmp/source/.git
+          rm -rf /tmp/source/.github/workflows
           rm -rf /tmp/source/v2
 
       - name: Replace repository contents
