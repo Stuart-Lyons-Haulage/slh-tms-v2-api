@@ -99,7 +99,8 @@ public sealed class RetainedOrderEvidenceReplayController(
                 var existingPending = await db.StagedImports
                     .Where(item => item.EntityType == "order" &&
                                    item.Status == StagingStatus.PendingReview &&
-                                   keys.Contains(item.IdempotencyKey) &&
+                                   (keys.Contains(item.IdempotencyKey) ||
+                                    item.PayloadJson.Contains(mailboxRequest.MessageId)) &&
                                    (item.Source == null || !item.Source.StartsWith("Info mailbox replay")))
                     .ToListAsync(ct);
 
