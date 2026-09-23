@@ -1,0 +1,63 @@
+name: CI - Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-dotnet-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-dotnet-
+
+      - name: Restore dependencies
+        run: |
+          dotnet restore Slh.Tms.Api.csproj
+          dotnet restore Slh.Tms.Jobs/Slh.Tms.Jobs.csproj
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
+
+      - name: Build API project (Release)
+        run: dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
+
+      - name: Build scheduled Jobs project (Release)
+        run: dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj --configuration Release --no-restore
+
+      - name: Validate Container Apps Jobs Bicep
+        run: az bicep build --file infra/container-app-jobs.bicep --stdout > /dev/null
+
+      - name: Validate Info mailbox intake workflow
+        run: |
+          python power-automate/info-mailbox-order-intake/validate_workflow.py
+          python power-automate/info-mailbox-order-intake/test_validate_workflow.py
+
+      - name: Validate customer load-plan outbound workflow
+        run: |
+          python power-automate/customer-load-plan-dispatch/validate_workflow.py
+          python power-automate/customer-load-plan-dispatch/test_validate_workflow.py
+
+      - name: Run tests
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
