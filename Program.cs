@@ -318,7 +318,11 @@ static bool ReadBool(IConfiguration configuration, bool fallback, params string[
 
 var app = builder.Build();
 
-if (!app.Environment.IsEnvironment("Testing"))
+// Production must never modify the operational schema or master data merely because
+// a replica starts.  A controlled release may opt in only after a verified restore
+// point, schema review and record-count check.
+var applySchemaChangesOnStartup = builder.Configuration.GetValue<bool>("Database:ApplySchemaChangesOnStartup");
+if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
 {
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
