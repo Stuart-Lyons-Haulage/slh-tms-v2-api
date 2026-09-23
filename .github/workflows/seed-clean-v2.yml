@@ -1,4 +1,5 @@
 name: Seed Clean V2 API
+# one-off canonical V2 migration
 
 on:
   push:
