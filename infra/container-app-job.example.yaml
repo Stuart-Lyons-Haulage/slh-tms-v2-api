@@ -1,0 +1,32 @@
+# Azure Container Apps Job ARM/YAML shape. Create four resources from this template
+# with TMS_JOB_KIND and schedule changed to tachomaster, fleetio, sagehr and eta.
+name: slh-tms-job-fleetio
+location: uksouth
+type: Microsoft.App/jobs
+properties:
+  environmentId: /subscriptions/<sub>/resourceGroups/slh-tms-prod-rg/providers/Microsoft.App/managedEnvironments/<environment>
+  configuration:
+    triggerType: Schedule
+    replicaTimeout: 3300
+    replicaRetryLimit: 1
+    scheduleTriggerConfig:
+      cronExpression: '5 * * * *'
+      parallelism: 1
+      replicaCompletionCount: 1
+  template:
+    containers:
+      - name: tms-job
+        image: slhtmsacrprod.azurecr.io/slh-tms-jobs:<tested-sha>
+        env:
+          - name: TMS_JOB_KIND
+            value: fleetio
+          - name: ConnectionStrings__TmsDb
+            secretRef: tms-db
+          - name: Integrations__Fleetio__Enabled
+            value: 'true'
+          - name: Integrations__Fleetio__BaseUrl
+            secretRef: fleetio-base-url
+          - name: Integrations__Fleetio__ApiKey
+            secretRef: fleetio-api-key
+          - name: Integrations__Fleetio__AccountToken
+            secretRef: fleetio-account-token

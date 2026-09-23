@@ -1,0 +1,42 @@
+# Add this path to the existing SLH TMS Power Automate custom connector definition.
+# It uses the connector's existing OAuth2 / Tms.Access security definition.
+/order-intake/duplicate-check:
+  post:
+    operationId: CheckInfoMailboxOrderDuplicate
+    summary: Classify an Info mailbox order candidate against staged and live TMS orders
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            customer: { type: string }
+            po: { type: string }
+            purchaseOrder: { type: string }
+            orderReference: { type: string }
+            collectionDate: { type: string, format: date }
+            deliveryDate: { type: string, format: date }
+            collectionLocation: { type: string }
+            deliveryLocation: { type: string }
+            pallets: { type: integer }
+            sourceMessageId: { type: string }
+            sourceAttachmentName: { type: string }
+    responses:
+      '200':
+        description: Duplicate classification. This operation is read-only.
+        schema:
+          type: object
+          properties:
+            classification:
+              type: string
+              enum: [New order, Exact duplicate, Possible duplicate, Amendment/update]
+            confidence: { type: string }
+            primaryIdentifier: { type: string }
+            matchCount: { type: integer }
+            matches:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+            rule: { type: string }

@@ -1,0 +1,91 @@
+{
+  "checkedAtUtc": "2026-09-14T19:19:40Z",
+  "tachoExecution": {
+    "name": "slh-tms-job-tachomaster-urk42jf",
+    "status": "Failed"
+  },
+  "etaExecution": {
+    "name": "",
+    "status": ""
+  },
+  "driverMaster": {
+    "status": "attention",
+    "activeDrivers": 564,
+    "sourceWorkers": 262,
+    "populationAligned": false,
+    "activeWithMember": 393,
+    "activeWithCard": 371,
+    "duplicateMemberGroups": 114,
+    "duplicateCardGroups": 109,
+    "activeWithoutMember": 171,
+    "activeWithoutCard": 193,
+    "latestCanonicalSyncUtc": "2026-09-12T22:05:43.5418728+00:00"
+  },
+  "tachomaster": {
+    "status": "healthy",
+    "configured": true,
+    "usesSharedRoadTechCredentials": false,
+    "operatingDate": "2026-09-14",
+    "driverProfiles": 1486,
+    "dayDutyRecords": 11,
+    "dayDutyVehicles": 8,
+    "dayDutiesWithEnd": 11,
+    "dayDutiesWithoutEnd": 0,
+    "latestDutyStartUtc": "2026-09-14T15:45:00+00:00",
+    "latestDutyEndUtc": "2026-09-14T18:11:00+00:00",
+    "currentVehicleDuties": 0,
+    "openVehicleDuties": 0,
+    "connectionFreshness": "live",
+    "lastSuccessfulPollUtc": "2026-09-14T19:19:38.0466745+00:00",
+    "scheduledSync": {
+      "expectedIntervalMinutes": 5,
+      "latestPersistedSyncUtc": "2026-09-14T19:16:39.9180787+00:00",
+      "ageMinutes": 3,
+      "freshness": "live",
+      "stale": false,
+      "warning": null
+    },
+    "metricsFreshness": "stale",
+    "newestMetricsTimestampUtc": "2026-09-14T18:14:00+00:00",
+    "metricsAgeMinutes": 65.6,
+    "metricsStale": true,
+    "sourceFreshness": "stale",
+    "newestSourceTimestampUtc": "2026-09-14T18:14:00+00:00",
+    "sourceAgeMinutes": 65.6,
+    "stale": false,
+    "sourceDataStale": true,
+    "checkedAtUtc": "2026-09-14T19:19:38.0466745+00:00"
+  },
+  "tachoJob": {
+    "cron": "*/5 * * * *",
+    "envNames": [
+      "TMS_JOB_KIND",
+      "ConnectionStrings__TmsDb",
+      "Tracking__Dot__Enabled",
+      "Tracking__Dot__BaseUrl",
+      "Tracking__Dot__ApiKey",
+      "Tracking__Dot__Username",
+      "Tracking__Dot__Password",
+      "Integrations__TachoMaster__Enabled",
+      "Integrations__TachoMaster__BaseUrl",
+      "Integrations__TachoMaster__ApiKey",
+      "Integrations__TachoMaster__Username",
+      "Integrations__TachoMaster__Password",
+      "Tracking__Dot__CompanyCode",
+      "Integrations__TachoMaster__CompanyCode"
+    ],
+    "image": "slhtmsacrprod.azurecr.io/slh-tms-jobs:1e97a0e7b241f1c917f94c527f805b59728fa581",
+    "state": "Succeeded"
+  },
+  "etaJob": {
+    "cron": "*/5 * * * *",
+    "envNames": [
+      "TMS_JOB_KIND",
+      "ConnectionStrings__TmsDb",
+      "TmsApi__BaseUrl",
+      "TvWallboard__AccessKey"
+    ],
+    "image": "slhtmsacrprod.azurecr.io/slh-tms-jobs:1e97a0e7b241f1c917f94c527f805b59728fa581",
+    "state": "Succeeded"
+  }
+}
