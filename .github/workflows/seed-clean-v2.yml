@@ -1,0 +1,48 @@
+name: Seed Clean V2 API
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/seed-clean-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pull canonical clean V2 API
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "migration/v2-clean-api" \
+            https://github.com/Stuart-Lyons-Haulage/slh-tms-api.git /tmp/source
+          rm -rf /tmp/source/.git
+          rm -rf /tmp/source/v2
+
+      - name: Replace repository contents
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/keep/.github/workflows
+          cp .github/workflows/seed-clean-v2.yml /tmp/keep/.github/workflows/seed-clean-v2.yml
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/source/. .
+          mkdir -p .github/workflows
+          cp /tmp/keep/.github/workflows/seed-clean-v2.yml .github/workflows/seed-clean-v2.yml
+          rm -f SEED.md
+
+      - name: Commit clean V2 baseline
+        run: |
+          set -euo pipefail
+          git config user.name "SLH V2 Migration"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: establish clean SLH TMS V2 API baseline"
+          git push origin HEAD:main
