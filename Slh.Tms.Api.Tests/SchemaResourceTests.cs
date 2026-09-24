@@ -36,6 +36,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.073_Rejected_Order_DoNotLearn_Guard.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.074_Local_Tms_Users.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.075_Canonical_Identity_Uniqueness.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.076_Customer_Collection_Sites_Geofence_Links.sql", resources);
     }
 
     [Fact]
@@ -81,7 +82,8 @@ public sealed class SchemaResourceTests
             "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql",
             "073_Rejected_Order_DoNotLearn_Guard.sql",
             "074_Local_Tms_Users.sql",
-            "075_Canonical_Identity_Uniqueness.sql"
+            "075_Canonical_Identity_Uniqueness.sql",
+            "076_Customer_Collection_Sites_Geofence_Links.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }
