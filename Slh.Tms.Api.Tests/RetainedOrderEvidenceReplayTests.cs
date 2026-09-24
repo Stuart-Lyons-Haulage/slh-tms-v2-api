@@ -84,6 +84,14 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
             new StringContent(request, Encoding.UTF8, "application/json"));
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstPayload = await first.Content.ReadAsStringAsync();
+        using (var firstJson = JsonDocument.Parse(firstPayload))
+        {
+            Assert.True(
+                firstJson.RootElement.TryGetProperty("pendingArchivedForRefresh", out var archivedCount) &&
+                archivedCount.GetInt32() == 1,
+                $"Replay did not archive exactly one stale row. Response: {firstPayload}");
+        }
 
         using (var scope = factory.Services.CreateScope())
         {
