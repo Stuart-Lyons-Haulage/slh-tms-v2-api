@@ -220,6 +220,9 @@ fleetioOptions.ApiVersion = ReadSetting(builder.Configuration, fleetioOptions.Ap
     "Integrations:Fleetio:ApiVersion", "Integrations__Fleetio__ApiVersion", "fleetio-api-version", "Fleetio--ApiVersion");
 if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCase)) fleetioOptions.BaseUrl = fleetioOptions.BaseUrl[..^1] + "1";
 builder.Services.AddSingleton(fleetioOptions);
+var samsaraOptions = new SamsaraOptions();
+builder.Configuration.GetSection("Integrations:Samsara").Bind(samsaraOptions);
+builder.Services.AddSingleton(samsaraOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<DistributedLeaseManager>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
@@ -256,6 +259,9 @@ builder.Services.AddHttpClient("AzureMapsMatrix", client =>
 builder.Services.AddHttpClient<FleetioClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()
     .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Fleetio"));
+builder.Services.AddHttpClient<SamsaraClient>()
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Samsara"));
 
 // Provider polling and derived-data maintenance must never take the operational
 // API down. Each worker already records and retries its own failures; this is a
