@@ -13,7 +13,7 @@ public sealed class PalletPlanningControlPlanningWindowTests : IClassFixture<Cus
     public PalletPlanningControlPlanningWindowTests(CustomWebFactory factory) => this.factory = factory;
 
     [Fact]
-    public async Task Planning_control_keeps_consolidated_lanes_but_splits_am_and_pm_rows()
+    public async Task Planning_control_uses_collection_rows_and_delivery_columns_while_retaining_am_pm_metadata()
     {
         var collectionDate = new DateOnly(2026, 9, 15);
         await using var scope = factory.Services.CreateAsyncScope();
@@ -29,11 +29,14 @@ public sealed class PalletPlanningControlPlanningWindowTests : IClassFixture<Cus
 
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         var cells = document.RootElement.GetProperty("cells").EnumerateArray().ToList();
-        Assert.Contains(cells, cell => cell.GetProperty("planningGroup").GetString() == "AM Runs" && cell.GetProperty("destination").GetString() == "Barefoots AM → Leyland");
-        Assert.Contains(cells, cell => cell.GetProperty("planningGroup").GetString() == "PM Work" && cell.GetProperty("destination").GetString() == "Barefoots PM → Leyland");
+        Assert.Contains(cells, cell => cell.GetProperty("planningGroup").GetString() == "Barefoots AM" && cell.GetProperty("destination").GetString() == "Leyland");
+        Assert.Contains(cells, cell => cell.GetProperty("planningGroup").GetString() == "Barefoots PM" && cell.GetProperty("destination").GetString() == "Leyland");
+        Assert.Equal(new[] { "Leyland" }, document.RootElement.GetProperty("destinations").EnumerateArray().Select(value => value.GetString()).ToArray());
 
         var pmOrder = Assert.Single(document.RootElement.GetProperty("orders").EnumerateArray(), order => order.GetProperty("reference").GetString() == pm.Reference);
-        Assert.Equal("PM Work", pmOrder.GetProperty("planningGroup").GetString());
+        Assert.Equal("Barefoots PM", pmOrder.GetProperty("planningGroup").GetString());
+        Assert.Equal("Leyland", pmOrder.GetProperty("destination").GetString());
+        Assert.Equal("PM Work", pmOrder.GetProperty("planningSection").GetString());
         Assert.Equal("PM Overnight", pmOrder.GetProperty("suggestedRouteType").GetString());
     }
 }

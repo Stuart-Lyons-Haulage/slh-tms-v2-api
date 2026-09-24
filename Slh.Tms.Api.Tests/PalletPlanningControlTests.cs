@@ -86,8 +86,9 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
         using var response = JsonDocument.Parse(await (await client.GetAsync("/api/v1/planning-control/pallets?date=2026-08-24")).Content.ReadAsStringAsync());
         var order = Assert.Single(response.RootElement.GetProperty("orders").EnumerateArray().Where(x => x.GetProperty("reference").GetString() == reference));
         Assert.Equal("Approved collection", order.GetProperty("collection").GetString());
-        Assert.Equal("Approved collection → Approved destination", order.GetProperty("destination").GetString());
+        Assert.Equal("Approved destination", order.GetProperty("destination").GetString());
         Assert.Equal("Approved destination", order.GetProperty("originalDestination").GetString());
+        Assert.Equal("Approved collection", order.GetProperty("planningGroup").GetString());
         Assert.Equal(4, order.GetProperty("orderedPallets").GetInt32());
         Assert.Equal(JsonValueKind.Null, order.GetProperty("palletType").ValueKind);
     }

@@ -76,12 +76,14 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
             if (late) lateCount++;
 
-            var consolidatedLane = $"{group} → {destination}";
-            destinations.Add(consolidatedLane);
-            if (!matrixRows.TryGetValue(planningSection, out var byGroup))
-                matrixRows[planningSection] = byGroup = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
-            if (!byGroup.TryGetValue(consolidatedLane, out var cell))
-                byGroup[consolidatedLane] = cell = new CellAccumulator(planningSection, planningSection, consolidatedLane);
+            // Pallet Control is a collection-by-delivery matrix:
+            // collection sites run down the left and delivery sites run across the top.
+            // AM/PM remains order metadata only and must never replace either site identity.
+            destinations.Add(destination);
+            if (!matrixRows.TryGetValue(group, out var byDestination))
+                matrixRows[group] = byDestination = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
+            if (!byDestination.TryGetValue(destination, out var cell))
+                byDestination[destination] = cell = new CellAccumulator(planningSection, group, destination);
             cell.Ordered += ordered;
             cell.Planned += planned;
             cell.OrderIds.Add(order.Id);
@@ -104,9 +106,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 outstandingPallets = outstanding,
                 overplannedPallets = overplanned,
                 collection,
-                destination = consolidatedLane,
+                destination,
                 originalDestination = destination,
-                planningGroup = planningSection,
+                planningGroup = group,
                 planningSection,
                 planningWindow = planningWindow.PlanningWindow,
                 suggestedPlanningWindow = planningWindow.PlanningWindow,
@@ -179,7 +181,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 runs = loads.Count(x => x.Status != LoadStatus.Cancelled)
             },
             planningSections = new[] { "AM Runs", "PM Work" },
-            planningGroups = new[] { "AM Runs", "PM Work" }.Where(section => matrixRows.ContainsKey(section)).ToList(),
+            planningGroups = matrixRows.Keys.OrderBy(group => group, StringComparer.OrdinalIgnoreCase).ToList(),
             destinations = orderedDestinations,
             cells,
             orders = orderRows,
