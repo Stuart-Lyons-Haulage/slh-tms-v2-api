@@ -85,7 +85,7 @@ latest_version="$(docker exec "$container_name" /opt/mssql-tools18/bin/sqlcmd \
 deferred_count="$(docker exec "$container_name" /opt/mssql-tools18/bin/sqlcmd \
   -S localhost -U sa -P "$sql_password" -C -d "$database_name" -h -1 -W \
   -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM (VALUES (47), (60)) AS deferred(Version) WHERE NOT EXISTS (SELECT 1 FROM dbo.SchemaMigration applied WHERE applied.Version = deferred.Version);" | tr -d '[:space:]')"
-if [[ "$history_count" != "65" || "$latest_version" != "67" || "$deferred_count" != "2" ]]; then
+if [[ "$history_count" != "66" || "$latest_version" != "68" || "$deferred_count" != "2" ]]; then
   echo "Fresh database migration history is not contiguous: count=$history_count latest=$latest_version deferred_missing=$deferred_count" >&2
   sed -n '1,800p' "$api_log" >&2
   exit 1
