@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -14,7 +15,10 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/health/intake")]
 [AllowAnonymous]
-public sealed class IntakePipelineHealthController(TmsDbContext db) : ControllerBase
+public sealed class IntakePipelineHealthController(
+    TmsDbContext db,
+    InfoMailboxGraphOptions graphOptions,
+    InfoMailboxGraphHealthState graphHealth) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get(CancellationToken ct)
@@ -45,13 +49,25 @@ public sealed class IntakePipelineHealthController(TmsDbContext db) : Controller
         double? evidenceToOrderGapMinutes = lastEmailReceivedUtc is not null && lastOrderStagedUtc is not null
             ? Math.Round((lastEmailReceivedUtc.Value - lastOrderStagedUtc.Value).TotalMinutes, 1)
             : null;
+        // Not every retained email should create an order. The new verified-format
+        // lane deliberately keeps unrelated Info-mailbox traffic as evidence only, so
+        // an evidence-to-order gap is informational rather than a pipeline failure.
         var newestEvidenceHasNoRecentOrder = lastEmailReceivedUtc is not null
             && (lastOrderStagedUtc is null || lastEmailReceivedUtc.Value > lastOrderStagedUtc.Value.AddMinutes(15));
-        var status = evidenceEmails == 0 || newestEvidenceHasNoRecentOrder || failed > 0 ? "attention" : "healthy";
+
+        var graphPollStaleAfter = TimeSpan.FromSeconds(Math.Max(300, Math.Clamp(graphOptions.PollIntervalSeconds, 30, 3600) * 3));
+        var graphPollStale = graphOptions.Enabled &&
+            (graphHealth.LastSuccessUtc is null || now - graphHealth.LastSuccessUtc.Value > graphPollStaleAfter);
+        var graphMisconfigured = graphOptions.Enabled && !graphOptions.IsConfigured;
+
+        var status = graphOptions.Enabled
+            ? graphMisconfigured || graphPollStale || graphHealth.LastError is not null || failed > 0 ? "attention" : "healthy"
+            : evidenceEmails == 0 || failed > 0 ? "attention" : "healthy";
 
         return Ok(new
         {
             status,
+            source = graphOptions.Enabled ? "Microsoft Graph local poller" : "External mailbox bridge",
             windowHours = 24,
             evidenceEmails,
             orderRecords,
@@ -60,6 +76,19 @@ public sealed class IntakePipelineHealthController(TmsDbContext db) : Controller
             lastEmailReceivedUtc,
             lastOrderStagedUtc,
             evidenceToOrderGapMinutes,
+            newestEvidenceHasNoRecentOrder,
+            graph = new
+            {
+                enabled = graphOptions.Enabled,
+                configured = graphOptions.IsConfigured,
+                mailbox = graphOptions.Mailbox,
+                graphHealth.LastAttemptUtc,
+                graphHealth.LastSuccessUtc,
+                graphHealth.LastError,
+                graphHealth.LastMessagesSeen,
+                graphHealth.LastMessagesIngested,
+                stale = graphPollStale
+            },
             checkedAtUtc = now
         });
     }
