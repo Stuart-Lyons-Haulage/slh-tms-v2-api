@@ -30,7 +30,7 @@ public sealed class FreshBootstrapController(
             return BadRequest(new { message = "Confirmation must be EMPTY-DRIVER-MASTER." });
 
         if (!tachoOptions.IsConfigured)
-            return BadRequest(new { message = "TachoMaster is not configured.", missingSettings = tachoOptions.MissingSettings });
+            return BadRequest(new { message = "TachoMaster is not configured for the clean V2 runtime." });
 
         var existingCount = await db.Drivers.CountAsync(ct);
         if (existingCount != 0)
