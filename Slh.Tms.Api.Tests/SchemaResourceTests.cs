@@ -102,9 +102,17 @@ public sealed class SchemaResourceTests
     {
         var sql = SchemaMigrationRunner.IntakeMappingGovernancePreparationSql;
 
+        Assert.Contains("OBJECT_ID(N'dbo.Sites'", sql);
+        Assert.Contains("ALTER TABLE dbo.Sites ADD OperationalRegion nvarchar(80) NULL", sql);
         Assert.Contains("OBJECT_ID(N'dbo.IntegrationMappings'", sql);
-        Assert.Contains("COL_LENGTH(N'dbo.IntegrationMappings', N'NormalizedExternalValue') IS NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD MappingKind nvarchar(40) NULL", sql);
         Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD NormalizedExternalValue nvarchar(300) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD SenderPattern nvarchar(320) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD TemplateName nvarchar(120) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD TemplateVersion nvarchar(40) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD ConfidenceThreshold decimal(5,4) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD EffectiveFromUtc datetimeoffset NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD EffectiveToUtc datetimeoffset NULL", sql);
         Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
     }
