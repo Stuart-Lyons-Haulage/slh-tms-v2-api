@@ -118,6 +118,19 @@ public sealed class SchemaResourceTests
     }
 
     [Fact]
+    public void Driver_tacho_identity_preparation_is_guarded_and_additive()
+    {
+        var sql = SchemaMigrationRunner.DriverTachoIdentityPreparationSql;
+
+        Assert.Contains("OBJECT_ID(N'dbo.Drivers'", sql);
+        Assert.Contains("ALTER TABLE dbo.Drivers ADD TachoMasterDriverId nvarchar(80) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.Drivers ADD TachoCardNumber nvarchar(80) NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.Drivers ADD LastTachoSyncUtc datetimeoffset(7) NULL", sql);
+        Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Market_contact_stable_key_preparation_is_guarded_and_additive()
     {
         var sql = SchemaMigrationRunner.MarketContactsStableKeyPreparationSql;
