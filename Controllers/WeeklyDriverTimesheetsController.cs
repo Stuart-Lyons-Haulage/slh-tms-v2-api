@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -11,249 +12,372 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class WeeklyDriverTimesheetsController(
     TmsDbContext db,
     TachoMasterClient tachoMaster,
-    SageHrClient sageHr,
     ILogger<WeeklyDriverTimesheetsController> logger) : ControllerBase
 {
-    [HttpGet("weekly")]
-    public async Task<IActionResult> Weekly([FromQuery] DateOnly weekStart, CancellationToken ct)
-    {
-        var weekEnd = weekStart.AddDays(6);
-        var fromUtc = new DateTimeOffset(weekStart.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
-        var toUtc = new DateTimeOffset(weekEnd.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+    private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
 
-        List<Driver> drivers;
-        List<Load> loads;
-        try
-        {
-            drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct);
-            loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
-                .Where(x => x.PlanningDate >= weekStart && x.PlanningDate <= weekEnd && x.DriverId != null && x.Status != LoadStatus.Cancelled)
-                .ToListAsync(ct);
-        }
+    [HttpGet]
+    public async Task<IActionResult> Range([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken ct)
+    {
+        if (to < from || to.DayNumber - from.DayNumber > 92)
+            return BadRequest(new { message = "Choose a valid date range of no more than 93 days." });
+
+        return Ok(await Build(from, to, ct));
+    }
+
+    [HttpGet("weekly")]
+    public async Task<IActionResult> Weekly([FromQuery] DateOnly weekStart, CancellationToken ct) =>
+        Ok(await Build(weekStart, weekStart.AddDays(6), ct));
+
+    private async Task<object> Build(DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var today = LondonToday();
+
+        var drivers = await db.Drivers.AsNoTracking()
+            .Where(x => x.Active)
+            .OrderBy(x => x.DisplayName)
+            .ToListAsync(ct);
+        try { await MasterDetailStore.EnrichDriversAsync(db, drivers, ct); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Weekly driver rota could not load core TMS data for {WeekStart}.", weekStart);
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            db.ChangeTracker.Clear();
+            logger.LogWarning(ex, "Driver detail enrichment was unavailable for timesheets.");
+        }
+        drivers = drivers.Where(DriverPopulationRules.IsDriver).ToList();
+
+        var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        var vehicleById = vehicles.ToDictionary(x => x.Id);
+        var vehicleAliases = vehicles.ToDictionary(
+            x => x.Id,
+            x => new[] { x.Registration, x.Abbreviation, x.FleetNumber }
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray());
+
+        var vehicleByAlias = new Dictionary<string, Vehicle>(StringComparer.OrdinalIgnoreCase);
+        foreach (var vehicle in vehicles)
+            foreach (var alias in vehicleAliases[vehicle.Id])
+                vehicleByAlias.TryAdd(Normalise(alias), vehicle);
+
+        var loads = new List<Load>();
+        for (var day = from; day <= to; day = day.AddDays(1))
+        {
+            var dayLoads = await PlanningResilience.ReadLoadsAsync(db, day, ct);
+            try { await RunOperationalStore.EnrichAsync(db, dayLoads, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                message = "Weekly driver rota could not load the core TMS data. The error has been isolated from the rest of the portal.",
-                source = "TMS database",
-                detail = ex.GetBaseException().Message,
-                weekStart,
-                weekEnd
-            });
+                db.ChangeTracker.Clear();
+                logger.LogWarning(ex, "Operational allocation enrichment unavailable for timesheets on {Date}.", day);
+            }
+            loads.AddRange(dayLoads.Where(x => x.Status != LoadStatus.Cancelled));
+        }
+        loads = PlanningResilience.CollapseLogicalDuplicates(loads)
+            .Where(x => x.PlanningDate >= from && x.PlanningDate <= to)
+            .ToList();
+
+        var tachoByDate = new Dictionary<DateOnly, IReadOnlyList<TachoDriverDutyStatus>>();
+        string? tachoError = null;
+        for (var day = from; day <= to; day = day.AddDays(1))
+        {
+            if (day > today)
+            {
+                tachoByDate[day] = [];
+                continue;
+            }
+
+            try { tachoByDate[day] = await tachoMaster.GetDriverDutyStatusesAsync(day, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                tachoError ??= ex.GetBaseException().Message;
+                tachoByDate[day] = [];
+                logger.LogWarning(ex, "TachoMaster timesheet duty read failed for {Date}.", day);
+            }
         }
 
-        var vehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
-        var vehicles = vehicleIds.Count == 0
-            ? new Dictionary<Guid, Vehicle>()
-            : await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var candidateTrackingIdentifiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var aliases in vehicleAliases.Values)
+            foreach (var alias in aliases)
+                candidateTrackingIdentifiers.Add(alias);
 
-        // Do not scan the entire Falcon/DOT tracking table for a week. Only pull events for vehicles
-        // that are actually allocated to this week's runs. The previous unbounded weekly scan could
-        // time out as the live tracking table grew and surface as a generic HTTP 500 in Night Outs.
-        var rawVehicleIdentifiers = vehicles.Values
-            .SelectMany(v => new[] { v.Registration, v.Abbreviation, v.FleetNumber })
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => x!.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        var vehicleKeys = rawVehicleIdentifiers.Select(Normalise).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var duty in tachoByDate.Values.SelectMany(x => x))
+        {
+            if (string.IsNullOrWhiteSpace(duty.VehicleCode)) continue;
+            candidateTrackingIdentifiers.Add(duty.VehicleCode);
+            if (vehicleByAlias.TryGetValue(Normalise(duty.VehicleCode), out var matchedVehicle))
+                foreach (var alias in vehicleAliases[matchedVehicle.Id])
+                    candidateTrackingIdentifiers.Add(alias);
+        }
 
-        List<Models.Tracking.VehicleTrackingEvent> trackingEvents = [];
-        string? dotError = null;
-        if (rawVehicleIdentifiers.Count > 0)
+        var trackingStartUtc = StartOfUkDay(from);
+        var trackingEndUtc = StartOfUkDay(to.AddDays(2));
+        List<VehicleTrackingEvent> tracking = [];
+        string? trackerError = null;
+        if (candidateTrackingIdentifiers.Count > 0)
         {
             try
             {
-                trackingEvents = await db.VehicleTrackingEvents.AsNoTracking()
-                    .Where(x => x.EventTimeUtc >= fromUtc && x.EventTimeUtc < toUtc && rawVehicleIdentifiers.Contains(x.VehicleIdentifier))
+                var identifiers = candidateTrackingIdentifiers.ToList();
+                tracking = await db.VehicleTrackingEvents.AsNoTracking()
+                    .Where(x => x.EventTimeUtc >= trackingStartUtc &&
+                                x.EventTimeUtc < trackingEndUtc &&
+                                identifiers.Contains(x.VehicleIdentifier))
                     .OrderBy(x => x.EventTimeUtc)
-                    .Take(100000)
+                    .Take(200000)
                     .ToListAsync(ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                dotError = ex.GetBaseException().Message;
-                logger.LogWarning(ex, "DOT/Falcon weekly reconciliation was unavailable for {WeekStart}; returning TMS/Tacho/Sage data without DOT evidence.", weekStart);
+                trackerError = ex.GetBaseException().Message;
+                db.ChangeTracker.Clear();
+                logger.LogWarning(ex, "RoadTech movement evidence unavailable for driver timesheets.");
             }
         }
 
-        IReadOnlyList<SageHrEmployee> sageEmployees = [];
-        string? sageError = null;
-        if (sageHr.IsConfigured)
-        {
-            try { sageEmployees = await sageHr.GetActiveEmployeesAsync(ct); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                sageError = ex.GetBaseException().Message;
-                logger.LogWarning(ex, "Sage HR roster could not be loaded for weekly timesheet reconciliation.");
-            }
-        }
-        else sageError = "Sage HR is not configured.";
+        var driverRows = new List<object>();
+        var unmatchedTachoDutyCount = 0;
 
-        var tachoByDate = new Dictionary<DateOnly, IReadOnlyCollection<TachoDriverDutyStatus>>();
-        string? tachoError = null;
-        for (var date = weekStart; date <= weekEnd; date = date.AddDays(1))
+        foreach (var day in tachoByDate.Keys)
         {
-            // Future days in the selected week cannot have completed duty history yet. Avoid making
-            // unnecessary upstream calls which some Tachomaster endpoints reject.
-            if (date > DateOnly.FromDateTime(DateTime.UtcNow))
-            {
-                tachoByDate[date] = [];
-                continue;
-            }
-            try
-            {
-                var duties = await tachoMaster.GetDriverDutyStatusesAsync(date, ct);
-                tachoByDate[date] = duties;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                tachoError ??= ex.GetBaseException().Message;
-                tachoByDate[date] = [];
-                logger.LogWarning(ex, "TachoMaster duty reconciliation failed for {Date}.", date);
-            }
+            foreach (var duty in tachoByDate[day])
+                if (!drivers.Any(driver => DriverMatches(driver, duty)))
+                    unmatchedTachoDutyCount++;
         }
 
-        var driverRows = drivers.Select(driver =>
+        foreach (var driver in drivers)
         {
-            var sage = sageEmployees.FirstOrDefault(x => SageMatches(driver, x));
+            var employmentType = EmploymentType(driver);
+            var agencyName = employmentType == "Agency"
+                ? FirstMeaningful(driver.AgencyName, driver.DriverGroup, "Agency")
+                : null;
             var days = new List<object>();
-            var workedDays = 0;
-            var nights = 0;
-            var discrepancyCount = 0;
-            var tachoMinutesWeek = 0;
-            var plannedMinutesWeek = 0;
+            var daysWorked = 0;
+            var reviewDays = 0;
+            var dutySpanTotal = 0;
+            var activityTotal = 0;
+            var driveTotal = 0;
+            var workTotal = 0;
+            var availableTotal = 0;
+            var restTotal = 0;
 
-            for (var date = weekStart; date <= weekEnd; date = date.AddDays(1))
+            for (var day = from; day <= to; day = day.AddDays(1))
             {
-                var dayLoads = loads.Where(x => x.DriverId == driver.Id && x.PlanningDate == date).OrderBy(x => x.Reference).ToList();
-                var plannedTimes = dayLoads.SelectMany(x => x.Stops).Where(x => x.PlannedArrivalUtc != null).Select(x => x.PlannedArrivalUtc!.Value).OrderBy(x => x).ToList();
+                var dayLoads = loads.Where(x => x.DriverId == driver.Id && x.PlanningDate == day)
+                    .OrderBy(x => x.Reference)
+                    .ToList();
+                var duties = tachoByDate.TryGetValue(day, out var source)
+                    ? source.Where(x => DriverMatches(driver, x)).OrderBy(x => x.DutyStartUtc).ToList()
+                    : [];
+
+                var tachoStart = duties.Count > 0 ? duties.Min(x => x.DutyStartUtc) : (DateTimeOffset?)null;
+                var tachoEnd = duties.Count > 0 && duties.All(x => x.DutyEndUtc is not null)
+                    ? duties.Max(x => x.DutyEndUtc) : (DateTimeOffset?)null;
+                var dutySpanMinutes = tachoStart is not null && tachoEnd is not null && tachoEnd >= tachoStart
+                    ? Minutes(tachoEnd.Value - tachoStart.Value) : (int?)null;
+                var driveMinutes = duties.Sum(x => x.DriveMinutes);
+                var workMinutes = duties.Sum(x => x.WorkMinutes);
+                var availableMinutes = duties.Sum(x => x.AvailableMinutes);
+                var restMinutes = duties.Sum(x => x.RestMinutes);
+                var activityMinutes = duties.Count == 0 ? (int?)null : driveMinutes + workMinutes + availableMinutes;
+
+                var trackingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var displayVehicles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var duty in duties)
+                {
+                    if (string.IsNullOrWhiteSpace(duty.VehicleCode)) continue;
+                    trackingKeys.Add(Normalise(duty.VehicleCode));
+                    displayVehicles.Add(duty.VehicleCode);
+                    if (vehicleByAlias.TryGetValue(Normalise(duty.VehicleCode), out var vehicle))
+                    {
+                        displayVehicles.Add(vehicle.Registration);
+                        foreach (var alias in vehicleAliases[vehicle.Id]) trackingKeys.Add(Normalise(alias));
+                    }
+                }
+
+                foreach (var load in dayLoads)
+                {
+                    if (load.VehicleId is not Guid vehicleId || !vehicleById.TryGetValue(vehicleId, out var vehicle)) continue;
+                    displayVehicles.Add(vehicle.Registration);
+                    foreach (var alias in vehicleAliases[vehicle.Id]) trackingKeys.Add(Normalise(alias));
+                }
+
+                var plannedTimes = dayLoads.SelectMany(x => x.Stops)
+                    .Where(x => x.PlannedArrivalUtc is not null)
+                    .Select(x => x.PlannedArrivalUtc!.Value)
+                    .OrderBy(x => x)
+                    .ToList();
                 var plannedStart = plannedTimes.Count > 0 ? plannedTimes.First() : (DateTimeOffset?)null;
                 var plannedEnd = plannedTimes.Count > 0 ? plannedTimes.Last() : (DateTimeOffset?)null;
-                var plannedMinutes = plannedStart != null && plannedEnd != null && plannedEnd >= plannedStart ? (int)Math.Round((plannedEnd.Value - plannedStart.Value).TotalMinutes) : (int?)null;
-                if (plannedMinutes is int pm) plannedMinutesWeek += pm;
 
-                var tachoMatches = tachoByDate.TryGetValue(date, out var duties)
-                    ? duties.Where(x => DriverMatches(driver, x)).OrderBy(x => x.DutyStartUtc).ToList()
-                    : [];
-                var tachoStart = tachoMatches.Count > 0 ? tachoMatches.Min(x => x.DutyStartUtc) : (DateTimeOffset?)null;
-                var tachoEnds = tachoMatches.Where(x => x.DutyEndUtc != null).Select(x => x.DutyEndUtc!.Value).ToList();
-                var tachoEnd = tachoMatches.Count > 0 && tachoEnds.Count == tachoMatches.Count ? tachoEnds.Max() : (DateTimeOffset?)null;
-                var tachoMinutes = tachoMatches.Count > 0 ? tachoMatches.Sum(x => x.WorkMinutes + x.DriveMinutes + x.AvailableMinutes) : (int?)null;
-                if (tachoMinutes is int tm) tachoMinutesWeek += tm;
+                var trackerWindowStart = tachoStart ?? StartOfUkDay(day);
+                var trackerWindowEnd = tachoEnd ?? (tachoStart?.AddHours(20) ?? StartOfUkDay(day.AddDays(1)).AddHours(6));
+                if (trackerWindowEnd <= trackerWindowStart) trackerWindowEnd = trackerWindowStart.AddHours(20);
 
-                var assignedVehicleKeys = dayLoads.Where(x => x.VehicleId != null && vehicles.ContainsKey(x.VehicleId.Value))
-                    .SelectMany(x => VehicleKeys(vehicles[x.VehicleId!.Value].Registration, vehicles[x.VehicleId!.Value].Abbreviation, vehicles[x.VehicleId!.Value].FleetNumber))
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var dayStartUtc = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
-                var dayEndUtc = dayStartUtc.AddDays(1);
-                var dot = trackingEvents.Where(x => x.EventTimeUtc >= dayStartUtc && x.EventTimeUtc < dayEndUtc && assignedVehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && (x.IsMoving == true || x.IgnitionOn == true || x.SpeedKph > 0)).ToList();
-                var dotStart = dot.Count > 0 ? dot.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
-                var dotEnd = dot.Count > 0 ? dot.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
-                var dotMinutes = dotStart != null && dotEnd != null ? (int)Math.Round((dotEnd.Value - dotStart.Value).TotalMinutes) : (int?)null;
+                var movement = tracking
+                    .Where(x => x.EventTimeUtc >= trackerWindowStart && x.EventTimeUtc <= trackerWindowEnd)
+                    .Where(x => trackingKeys.Contains(Normalise(x.VehicleIdentifier)))
+                    .Where(IsMovement)
+                    .ToList();
 
-                var nightOut = dayLoads.Any(x => ReadNightOut(x.PlannerNotes) == true);
-                if (nightOut) nights++;
+                var firstMovement = movement.Count > 0 ? movement.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
+                var lastMovement = movement.Count > 0 ? movement.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
+                var movementSpanMinutes = firstMovement is not null && lastMovement is not null
+                    ? Minutes(lastMovement.Value - firstMovement.Value) : (int?)null;
+                var startVarianceMinutes = tachoStart is not null && firstMovement is not null
+                    ? Minutes(firstMovement.Value - tachoStart.Value) : (int?)null;
+                var finishVarianceMinutes = tachoEnd is not null && lastMovement is not null
+                    ? Minutes(lastMovement.Value - tachoEnd.Value) : (int?)null;
 
-                var discrepancies = new List<string>();
-                if (dayLoads.Count > 0 && tachoMatches.Count == 0 && date <= DateOnly.FromDateTime(DateTime.UtcNow)) discrepancies.Add("Planned work exists but no TachoMaster duty matched.");
-                if (dayLoads.Count == 0 && tachoMatches.Count > 0) discrepancies.Add("TachoMaster duty exists but no TMS run is allocated.");
-                if (dot.Count > 0 && tachoMatches.Count == 0) discrepancies.Add("DOT shows vehicle movement but no TachoMaster duty matched.");
-                if (dotError is null && dayLoads.Count > 0 && assignedVehicleKeys.Count > 0 && dot.Count == 0 && date <= DateOnly.FromDateTime(DateTime.UtcNow)) discrepancies.Add("Allocated vehicle has no DOT movement evidence for the day.");
-                if (plannedStart != null && tachoStart != null && Math.Abs((tachoStart.Value - plannedStart.Value).TotalMinutes) > 60)
-                    discrepancies.Add($"TMS planned start and TachoMaster duty start differ by {Math.Abs((int)(tachoStart.Value - plannedStart.Value).TotalMinutes)} minutes.");
-                if (tachoStart != null && dotStart != null && Math.Abs((dotStart.Value - tachoStart.Value).TotalMinutes) > 45)
-                    discrepancies.Add($"First DOT movement and TachoMaster duty start differ by {Math.Abs((int)(dotStart.Value - tachoStart.Value).TotalMinutes)} minutes.");
-                if (tachoEnd != null && dotEnd != null && Math.Abs((dotEnd.Value - tachoEnd.Value).TotalMinutes) > 60)
-                    discrepancies.Add($"Last DOT movement and TachoMaster duty end differ by {Math.Abs((int)(dotEnd.Value - tachoEnd.Value).TotalMinutes)} minutes.");
-                if (sageEmployees.Count > 0 && sage is null && (dayLoads.Count > 0 || tachoMatches.Count > 0)) discrepancies.Add("Working evidence exists but the driver is not matched to the active Sage HR roster.");
-                if (nightOut && dayLoads.Count == 0) discrepancies.Add("Night out is recorded without a planned run.");
+                var notes = new List<string>();
+                if (tachoStart is not null && firstMovement is not null && Math.Abs(startVarianceMinutes ?? 0) > 45)
+                    notes.Add($"Tacho start and first vehicle movement differ by {Math.Abs(startVarianceMinutes!.Value)} minutes.");
+                if (tachoEnd is not null && lastMovement is not null && Math.Abs(finishVarianceMinutes ?? 0) > 60)
+                    notes.Add($"Tacho finish and last vehicle movement differ by {Math.Abs(finishVarianceMinutes!.Value)} minutes.");
+                if (dayLoads.Count == 0 && duties.Count > 0)
+                    notes.Add("No TMS route was allocated; timesheet is based on TachoMaster and vehicle movement evidence.");
+                if (duties.Count == 0 && dayLoads.Count > 0 && movement.Count == 0 && day <= today)
+                    notes.Add("A TMS route exists but no TachoMaster or vehicle-movement evidence was found.");
 
-                var worked = dayLoads.Count > 0 || tachoMatches.Count > 0 || dot.Count > 0;
-                if (worked) workedDays++;
-                discrepancyCount += discrepancies.Count;
+                var hasTacho = duties.Count > 0;
+                var hasTracker = movement.Count > 0;
+                var status = tachoStart is not null && tachoEnd is null
+                    ? "Open duty"
+                    : notes.Any(x => x.Contains("differ by", StringComparison.OrdinalIgnoreCase))
+                        ? "Review"
+                        : hasTacho && hasTracker
+                            ? "Confirmed"
+                            : hasTacho
+                                ? "Tacho only"
+                                : hasTracker
+                                    ? "Tracker only"
+                                    : dayLoads.Count > 0
+                                        ? "Missing evidence"
+                                        : "No work";
+
+                var worked = hasTacho || hasTracker || dayLoads.Count > 0;
+                if (!worked) continue;
+
+                daysWorked++;
+                if (status is "Review" or "Missing evidence" or "Open duty") reviewDays++;
+                dutySpanTotal += dutySpanMinutes ?? 0;
+                activityTotal += activityMinutes ?? 0;
+                driveTotal += driveMinutes;
+                workTotal += workMinutes;
+                availableTotal += availableMinutes;
+                restTotal += restMinutes;
 
                 days.Add(new
                 {
-                    date,
-                    worked,
-                    sageMatched = sage is not null,
-                    sageEmployeeId = sage?.Id,
-                    tms = new { runCount = dayLoads.Count, runs = dayLoads.Select(x => x.Reference).ToList(), plannedStartUtc = plannedStart, plannedEndUtc = plannedEnd, plannedMinutes },
-                    tacho = new
-                    {
-                        matched = tachoMatches.Count > 0,
-                        dutyCount = tachoMatches.Count,
-                        dutyStartUtc = tachoStart,
-                        dutyEndUtc = tachoEnd,
-                        totalMinutes = tachoMinutes,
-                        vehicles = tachoMatches.Select(x => x.VehicleCode).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToList(),
-                        driveMinutes = tachoMatches.Sum(x => x.DriveMinutes),
-                        workMinutes = tachoMatches.Sum(x => x.WorkMinutes),
-                        availableMinutes = tachoMatches.Sum(x => x.AvailableMinutes),
-                        restMinutes = tachoMatches.Sum(x => x.RestMinutes),
-                        breakCount = tachoMatches.Sum(x => x.BreakCount),
-                        breakMinutes = tachoMatches.Where(x => x.BreakMinutes is not null).Sum(x => x.BreakMinutes ?? 0)
-                    },
-                    dot = new { movementEvents = dot.Count, firstMovementUtc = dotStart, lastMovementUtc = dotEnd, movementSpanMinutes = dotMinutes, vehicles = assignedVehicleKeys.ToList() },
-                    nightOut,
-                    discrepancies,
-                    status = discrepancies.Count == 0 ? worked ? "Confirmed" : "No work" : discrepancies.Count >= 2 ? "Review" : "Check"
+                    date = day,
+                    startUtc = tachoStart ?? firstMovement ?? plannedStart,
+                    finishUtc = tachoEnd ?? lastMovement ?? plannedEnd,
+                    dutySpanMinutes,
+                    activityMinutes,
+                    driveMinutes,
+                    workMinutes,
+                    availableMinutes,
+                    restMinutes,
+                    breakCount = duties.Sum(x => x.BreakCount),
+                    breakMinutes = duties.Where(x => x.BreakMinutes is not null).Sum(x => x.BreakMinutes ?? 0),
+                    tachoStartUtc = tachoStart,
+                    tachoEndUtc = tachoEnd,
+                    firstMovementUtc = firstMovement,
+                    lastMovementUtc = lastMovement,
+                    movementSpanMinutes,
+                    startVarianceMinutes,
+                    finishVarianceMinutes,
+                    vehicles = displayVehicles.OrderBy(x => x).ToArray(),
+                    runs = dayLoads.Select(x => RunDisplayLabel.For(x)).Distinct().ToArray(),
+                    routeAllocated = dayLoads.Count > 0,
+                    status,
+                    notes
                 });
             }
 
-            return new
+            if (daysWorked == 0) continue;
+
+            driverRows.Add(new
             {
                 driverId = driver.Id,
                 driverName = driver.DisplayName,
                 driver.EmployeeNumber,
-                driver.TachoName,
-                sageMatched = sage is not null,
-                sageEmployeeId = sage?.Id,
-                daysWorked = workedDays,
-                nightsOut = nights,
-                plannedMinutes = plannedMinutesWeek,
-                tachoMinutes = tachoMinutesWeek,
-                discrepancyCount,
-                weeklyStatus = discrepancyCount == 0 ? "Confirmed" : discrepancyCount >= 3 ? "Review" : "Check",
+                employmentType,
+                agencyName,
+                daysWorked,
+                reviewDays,
+                dutySpanMinutes = dutySpanTotal,
+                activityMinutes = activityTotal,
+                driveMinutes = driveTotal,
+                workMinutes = workTotal,
+                availableMinutes = availableTotal,
+                restMinutes = restTotal,
+                status = reviewDays == 0 ? "Confirmed" : "Review",
                 days
-            };
-        }).ToList();
+            });
+        }
 
-        var workingDrivers = driverRows.Where(x => x.daysWorked > 0).OrderBy(x => x.driverName).ToList();
-        return Ok(new
+        var employed = driverRows.Where(RowEmploymentIs("Employed")).Count();
+        var agency = driverRows.Where(RowEmploymentIs("Agency")).Count();
+
+        return new
         {
-            weekStart,
-            weekEnd,
+            from,
+            to,
+            weekStarts = "Wednesday",
+            weekEnds = "Tuesday",
             generatedAtUtc = DateTimeOffset.UtcNow,
             sourceStatus = new
             {
-                tms = "Available",
-                dot = dotError is null ? $"Available from stored RoadTech Falcon tracking events ({vehicleKeys.Count} allocated vehicle identifiers)" : $"Unavailable for this refresh: {dotError}",
-                tachoMaster = tachoError is null ? "Available - completed/current duty history through today" : $"Partial: {tachoError}",
-                sageHr = sageError is null ? "Available - active employee roster" : $"Unavailable: {sageError}"
+                tachoMaster = tachoError is null ? "Available" : $"Partial: {tachoError}",
+                roadTech = trackerError is null ? "Available" : $"Partial: {trackerError}"
             },
             summary = new
             {
-                liveDrivers = workingDrivers.Count,
-                totalDaysWorked = workingDrivers.Sum(x => x.daysWorked),
-                totalNightsOut = workingDrivers.Sum(x => x.nightsOut),
-                driversWithDiscrepancies = workingDrivers.Count(x => x.discrepancyCount > 0),
-                discrepancyCount = workingDrivers.Sum(x => x.discrepancyCount)
+                drivers = driverRows.Count,
+                employedDrivers = employed,
+                agencyDrivers = agency,
+                reviewDrivers = driverRows.Count(RowNeedsReview),
+                unmatchedTachoDuties = unmatchedTachoDutyCount
             },
-            drivers = workingDrivers
-        });
+            drivers = driverRows
+        };
     }
 
-    private static IEnumerable<string> VehicleKeys(params string?[] values) => values.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).Where(x => x.Length > 0);
-    private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static Func<object, bool> RowEmploymentIs(string type) => row =>
+    {
+        var property = row.GetType().GetProperty("employmentType");
+        return string.Equals(property?.GetValue(row)?.ToString(), type, StringComparison.OrdinalIgnoreCase);
+    };
+
+    private static bool RowNeedsReview(object row)
+    {
+        var property = row.GetType().GetProperty("status");
+        return string.Equals(property?.GetValue(row)?.ToString(), "Review", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string EmploymentType(Driver driver)
+    {
+        var token = Normalise($"{driver.DriverType} {driver.DriverGroup} {driver.AgencyName}");
+        return token.Contains("AGENCY", StringComparison.Ordinal) || !string.IsNullOrWhiteSpace(driver.AgencyName)
+            ? "Agency"
+            : "Employed";
+    }
+
+    private static string? FirstMeaningful(params string?[] values) =>
+        values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.Trim();
+
     private static bool DriverMatches(Driver driver, TachoDriverDutyStatus status)
     {
-        if (int.TryParse(driver.TachoMasterDriverId, out var linkedMember) && linkedMember > 0 && linkedMember == status.MemberCode) return true;
+        if (int.TryParse(driver.TachoMasterDriverId, out var linked) && linked > 0 && linked == status.MemberCode) return true;
         if (SameCard(driver.TachoCardNumber, status.CardNumber)) return true;
-        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(status.EmployeeNumber) && string.Equals(Normalise(driver.EmployeeNumber), Normalise(status.EmployeeNumber), StringComparison.OrdinalIgnoreCase)) return true;
-        var names = new[] { driver.TachoName, driver.DisplayName }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(status.EmployeeNumber) &&
+            Normalise(driver.EmployeeNumber) == Normalise(status.EmployeeNumber)) return true;
+
+        var names = new[] { driver.TachoName, driver.DisplayName }
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => Normalise(x!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return names.Contains(Normalise(status.DriverName));
     }
 
@@ -261,20 +385,24 @@ public sealed class WeeklyDriverTimesheetsController(
     {
         var a = Normalise(left ?? string.Empty);
         var b = Normalise(right ?? string.Empty);
-        if (a.Length < 8 || b.Length < 8) return false;
-        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase);
+        return a.Length >= 8 && b.Length >= 8 &&
+               (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool SageMatches(Driver driver, SageHrEmployee employee)
+    private static bool IsMovement(VehicleTrackingEvent item) =>
+        item.IsMoving == true || item.IgnitionOn == true || (item.SpeedKph ?? 0m) > 0m;
+
+    private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
+
+    private static DateOnly LondonToday() =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+
+    private static DateTimeOffset StartOfUkDay(DateOnly date)
     {
-        if (!string.IsNullOrWhiteSpace(employee.EmployeeNumber) && string.Equals(Normalise(employee.EmployeeNumber), Normalise(driver.EmployeeNumber), StringComparison.OrdinalIgnoreCase)) return true;
-        return string.Equals(Normalise($"{employee.FirstName} {employee.LastName}"), Normalise(driver.DisplayName), StringComparison.OrdinalIgnoreCase);
+        var local = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        return new DateTimeOffset(local, London.GetUtcOffset(local)).ToUniversalTime();
     }
 
-    private static bool? ReadNightOut(string? notes)
-    {
-        var value = (notes ?? string.Empty).Split('·').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("Night out:", StringComparison.OrdinalIgnoreCase));
-        if (value is null) return null;
-        return value.EndsWith("Yes", StringComparison.OrdinalIgnoreCase) ? true : value.EndsWith("No", StringComparison.OrdinalIgnoreCase) ? false : null;
-    }
+    private static string Normalise(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
