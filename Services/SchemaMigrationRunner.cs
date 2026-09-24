@@ -112,6 +112,20 @@ public static class SchemaMigrationRunner
         END;
         """;
     private const string EmailIntakeMappingV2Migration = "061_Email_Intake_Mapping_V2.sql";
+    private const string InfoMailboxMasterDataMigration = "071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql";
+
+    // 043 was historically able to be recorded before CustomerEmailRoutes existed
+    // on a partially provisioned database.  048 then had nothing to alter, while
+    // its history entry still made the runner believe the column was present.
+    // Keep the immutable migration files and checksums intact; repair the missing
+    // prerequisite immediately before the first migration that requires it.
+    internal const string CustomerEmailRouteMarketKeyPreparationSql = """
+        IF OBJECT_ID(N'dbo.CustomerEmailRoutes', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.CustomerEmailRoutes', N'MarketKey') IS NULL
+        BEGIN
+            ALTER TABLE dbo.CustomerEmailRoutes ADD MarketKey nvarchar(160) NULL;
+        END;
+        """;
 
     internal const string CanonicalVehicleIdentityPreparationSql = """
         IF OBJECT_ID(N'dbo.Vehicles', N'U') IS NOT NULL
@@ -262,7 +276,14 @@ public static class SchemaMigrationRunner
         return migrations;
     }
 
-    public static async Task ApplyAsync(TmsDbContext db, ILogger logger, CancellationToken ct)
+    public static Task ApplyAsync(TmsDbContext db, ILogger logger, CancellationToken ct) =>
+        ApplyAsync(db, logger, applyDeferredMigrations: false, ct);
+
+    public static async Task ApplyAsync(
+        TmsDbContext db,
+        ILogger logger,
+        bool applyDeferredMigrations,
+        CancellationToken ct)
     {
         IReadOnlyList<SchemaMigrationDefinition> migrations;
         try
@@ -300,7 +321,7 @@ public static class SchemaMigrationRunner
                         continue;
                     }
 
-                    if (DeferredStartupMigrations.Contains(migration.Name))
+                    if (!applyDeferredMigrations && DeferredStartupMigrations.Contains(migration.Name))
                     {
                         logger.LogWarning(
                             "Deferring schema migration {Version} {MigrationName} during API startup. It is registered and checksum-protected, but must be applied by the maintenance runner without blocking availability.",
@@ -360,13 +381,21 @@ public static class SchemaMigrationRunner
                         await db.Database.ExecuteSqlRawAsync(MarketContactsStableKeyPreparationSql, ct);
                     }
 
+                    if (string.Equals(migration.Name, InfoMailboxMasterDataMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive CustomerEmailRoutes.MarketKey compatibility preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(CustomerEmailRouteMarketKeyPreparationSql, ct);
+                    }
+
                     await ApplySingleMigrationAsync(db, migration, logger, ct);
                     appliedCount++;
                 }
 
                 logger.LogInformation(
-                    "Schema migration check complete. {AppliedMigrationCount} of {MigrationCount} registered migration(s) are applied; deferred maintenance migrations do not block API startup.",
-                    appliedCount, migrations.Count);
+                    "Schema migration check complete. {AppliedMigrationCount} of {MigrationCount} registered migration(s) are applied. Deferred migrations applied: {ApplyDeferredMigrations}.",
+                    appliedCount, migrations.Count, applyDeferredMigrations);
             }
             finally
             {

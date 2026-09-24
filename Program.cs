@@ -392,12 +392,13 @@ if (!string.IsNullOrWhiteSpace(expectedDatabaseName))
 // a replica starts.  A controlled release may opt in only after a verified restore
 // point, schema review and record-count check.
 var applySchemaChangesOnStartup = builder.Configuration.GetValue<bool>("Database:ApplySchemaChangesOnStartup");
+var applyDeferredSchemaMigrations = builder.Configuration.GetValue<bool>("Database:ApplyDeferredSchemaMigrations");
 if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
 {
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaMigration");
-    await SchemaMigrationRunner.ApplyAsync(db, logger, CancellationToken.None);
+    await SchemaMigrationRunner.ApplyAsync(db, logger, applyDeferredSchemaMigrations, CancellationToken.None);
     try
     {
         await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);

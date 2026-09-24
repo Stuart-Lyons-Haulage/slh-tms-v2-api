@@ -43,6 +43,9 @@ jobs:
       - name: Build API project (Release)
         run: dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
 
+      - name: Bootstrap a completely fresh SQL Server database
+        run: bash ops/bootstrap-fresh-db.sh
+
       - name: Build scheduled Jobs project (Release)
         run: dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj --configuration Release --no-restore
 

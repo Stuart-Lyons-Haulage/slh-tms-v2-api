@@ -178,6 +178,18 @@ public sealed class SchemaResourceTests
     }
 
     [Fact]
+    public void Customer_email_route_market_key_preparation_is_guarded_and_additive()
+    {
+        var sql = SchemaMigrationRunner.CustomerEmailRouteMarketKeyPreparationSql;
+
+        Assert.Contains("OBJECT_ID(N'dbo.CustomerEmailRoutes'", sql);
+        Assert.Contains("COL_LENGTH(N'dbo.CustomerEmailRoutes', N'MarketKey') IS NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.CustomerEmailRoutes ADD MarketKey nvarchar(160) NULL", sql);
+        Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Applied_migration_checksum_drift_is_rejected()
     {
         var migration = SchemaMigrationRunner.GetMigrations()[0];

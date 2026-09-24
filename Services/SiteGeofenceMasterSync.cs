@@ -244,19 +244,16 @@ public static partial class SiteGeofenceMasterSync
 
     private static List<Site> MatchingSites(string geofenceName, IReadOnlyList<Site> sites)
     {
-        // Phase 1 — exact token overlap (existing behaviour, score > 0 means ≥1 shared token)
-        var scored = sites
-            .Select(site => new { Site = site, Score = MatchScore(geofenceName, site) })
-            .Where(x => x.Score > 0)
+        // Phase 1 — exact canonical name/alias match only. A single shared token is
+        // not enough for an automatic operational link; examples such as "Bicester"
+        // or "Shell" can otherwise attach dozens of unrelated service-station fences
+        // to one Site. Lower-confidence candidates must stay unlinked for operator
+        // review in Geofence Integrity.
+        var exact = sites
+            .Where(site => SiteNames(site).Any(name =>
+                string.Equals(NormalizeForExactMatch(name), NormalizeForExactMatch(geofenceName), StringComparison.OrdinalIgnoreCase)))
             .ToList();
-        if (scored.Count > 0)
-        {
-            var bestScore = scored.Max(x => x.Score);
-            var best = scored.Where(x => x.Score == bestScore).Select(x => x.Site).ToList();
-            if (best.Count == 1) return best;
-            // Multiple sites share the same top token-overlap score — fall through to fuzzy
-            // ranking to break the tie.
-        }
+        if (exact.Count > 0) return exact;
 
         // Phase 2 — fuzzy similarity score (same algorithm as GeofenceLinkDiagnostics).
         // Only returns a result when exactly ONE site clears the auto-link threshold so
@@ -274,6 +271,12 @@ public static partial class SiteGeofenceMasterSync
         if (fuzzy.Count > 1) return fuzzy.Select(x => x.Site).ToList();
 
         return [];
+    }
+
+    private static string NormalizeForExactMatch(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        return new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     }
 
     /// <summary>
