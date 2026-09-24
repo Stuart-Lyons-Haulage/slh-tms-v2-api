@@ -22,8 +22,8 @@ public sealed class RuntimeHardeningRegressionTests
         Assert.Contains("coordinator.SyncFleetioAsync", standard, StringComparison.Ordinal);
         Assert.Contains("coordinator.SyncFleetioAsync", resilient, StringComparison.Ordinal);
 
-        var standardWrite = SliceFrom(standard, "[HttpPost("sync-assets")]");
-        var resilientWrite = SliceFrom(resilient, "[HttpPost("sync-assets-resilient")]");
+        var standardWrite = SliceFrom(standard, "[HttpPost(\"sync-assets\")]");
+        var resilientWrite = SliceFrom(resilient, "[HttpPost(\"sync-assets-resilient\")]");
         Assert.DoesNotContain("db.Vehicles.Add", standardWrite, StringComparison.Ordinal);
         Assert.DoesNotContain("db.Set<Vehicle>().Add", standardWrite, StringComparison.Ordinal);
         Assert.DoesNotContain("db.Vehicles.Add", resilientWrite, StringComparison.Ordinal);
@@ -34,7 +34,7 @@ public sealed class RuntimeHardeningRegressionTests
     public void Sage_write_route_delegates_to_the_canonical_coordinator()
     {
         var source = Read("Controllers", "IntegrationsController.cs");
-        var write = SliceFrom(source, "[HttpPost("sage-hr/sync-drivers")");
+        var write = SliceFrom(source, "[HttpPost(\"sage-hr/sync-drivers\")");
         Assert.Contains("coordinator.SyncSageHrAsync", write, StringComparison.Ordinal);
         Assert.DoesNotContain("db.Drivers.Add", write, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT INTO dbo.Drivers", write, StringComparison.Ordinal);
