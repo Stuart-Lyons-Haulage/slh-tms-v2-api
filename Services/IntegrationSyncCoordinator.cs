@@ -128,22 +128,16 @@ public sealed class IntegrationSyncCoordinator(
             var driverGroup = Clip(employee.Team, 80);
             if (!existingNumbers.Contains(employeeNumber))
             {
-                var id = Guid.NewGuid();
-                string? tachoName = null;
-                string? skills = null;
-                await db.Database.ExecuteSqlInterpolatedAsync($@"
-                    INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
-                    VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {true})", ct);
-                existingNumbers.Add(employeeNumber);
-                created++;
+                // Sage HR supplies employment/leave context only. Driver identity is owned by
+                // TachoMaster and must be explicitly reviewed before a new Driver row exists.
+                skipped++;
+                continue;
             }
-            else
-            {
-                await db.Database.ExecuteSqlInterpolatedAsync($@"
-                    UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
-                    WHERE EmployeeNumber = {employeeNumber}", ct);
-                updated++;
-            }
+
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
+                WHERE EmployeeNumber = {employeeNumber}", ct);
+            updated++;
         }
         var now = DateTimeOffset.UtcNow;
         var activeDriverEmployeeNumbers = candidates
@@ -188,7 +182,7 @@ public sealed class IntegrationSyncCoordinator(
         }
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return new("Sage HR", true, now, $"Sage HR synchronised {created + updated} driver records ({created} created, {updated} updated).", created + updated);
+        return new("Sage HR", true, now, $"Sage HR enriched {updated} existing driver record(s); {skipped} Sage candidate(s) were not allowed to create Driver Master rows.", updated);
     }
 
     public async Task<IntegrationSyncResult> SyncFleetioAsync(string actor, CancellationToken ct)
