@@ -45,21 +45,25 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     {
         EnsureConfigured();
         var external = ExternalRouteId(route.RunId);
-        var payload = RoutePayload(route);
+        var existing = await GetRouteByRunIdAsync(route.RunId, ct);
+        var payload = RoutePayload(route, existing);
 
-        using (var patch = CreateRequest(HttpMethod.Patch, $"fleet/routes/{Uri.EscapeDataString(external)}", payload))
-        using (var patchResponse = await httpClient.SendAsync(patch, ct))
+        if (existing is not null)
         {
+            using var patch = CreateRequest(HttpMethod.Patch, $"fleet/routes/{Uri.EscapeDataString(external)}", payload);
+            using var patchResponse = await httpClient.SendAsync(patch, ct);
             var patchBody = await patchResponse.Content.ReadAsStringAsync(ct);
             if (patchResponse.StatusCode != HttpStatusCode.NotFound)
             {
                 EnsureSuccess(patchResponse, patchBody, "route update");
                 var updated = ParseRoute(patchBody);
-                return new SamsaraRouteUpsertResult(updated?.Id, external, false, true, updated);
+                return new SamsaraRouteUpsertResult(updated?.Id ?? existing.Id, external, false, true, updated ?? existing);
             }
+
+            logger.LogWarning("Samsara route {ExternalId} disappeared between lookup and update; recreating it.", external);
         }
 
-        using var create = CreateRequest(HttpMethod.Post, "fleet/routes", payload);
+        using var create = CreateRequest(HttpMethod.Post, "fleet/routes", RoutePayload(route, null));
         using var createResponse = await httpClient.SendAsync(create, ct);
         var createBody = await createResponse.Content.ReadAsStringAsync(ct);
         EnsureSuccess(createResponse, createBody, "route create");
@@ -126,17 +130,27 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return request;
     }
 
-    private object RoutePayload(SamsaraRouteRequest route)
+    private object RoutePayload(SamsaraRouteRequest route, SamsaraRouteSnapshot? existing)
     {
         var externalIds = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             [options.ExternalIdKey] = route.RunId.ToString("N")
         };
 
+        var stopExternalIdKey = $"{options.ExternalIdKey}Stop";
         var stops = route.Stops.Select(stop =>
         {
+            var stopExternalValue = stop.StopId.ToString("N");
+            var existingStop = existing?.Stops.FirstOrDefault(item =>
+                item.ExternalIds.TryGetValue(stopExternalIdKey, out var value) &&
+                string.Equals(value, stopExternalValue, StringComparison.OrdinalIgnoreCase));
+
             var payload = new Dictionary<string, object?>
             {
+                ["externalIds"] = new Dictionary<string, string>
+                {
+                    [stopExternalIdKey] = stopExternalValue
+                },
                 ["singleUseLocation"] = new
                 {
                     address = stop.Address,
@@ -146,6 +160,8 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                 },
                 ["notes"] = string.IsNullOrWhiteSpace(stop.Notes) ? null : Clip(stop.Notes, 2000)
             };
+            if (!string.IsNullOrWhiteSpace(existingStop?.Id))
+                payload["id"] = existingStop.Id;
             if (stop.ScheduledArrivalTime is not null)
                 payload["scheduledArrivalTime"] = stop.ScheduledArrivalTime.Value.UtcDateTime.ToString("O");
             if (stop.ScheduledDepartureTime is not null)
@@ -203,12 +219,20 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         var root = document.RootElement;
         var route = root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object ? data : root;
         if (route.ValueKind != JsonValueKind.Object) return null;
+        var stops = route.TryGetProperty("stops", out var stopArray) && stopArray.ValueKind == JsonValueKind.Array
+            ? stopArray.EnumerateArray()
+                .Select(stop => new SamsaraRouteStopSnapshot(
+                    Text(stop, "id"),
+                    ExternalIds(stop)))
+                .ToList()
+            : [];
         return new SamsaraRouteSnapshot(
             Text(route, "id"),
             Text(route, "name"),
             Text(route, "driverId"),
             Text(route, "vehicleId"),
-            ExternalIds(route));
+            ExternalIds(route),
+            stops);
     }
 
     private static IReadOnlyDictionary<string, string> ExternalIds(JsonElement item)
@@ -255,6 +279,7 @@ public sealed record SamsaraConnectionSummary(bool Connected, int VehicleCount, 
 public sealed record SamsaraVehicle(string Id, string? Name, string? LicensePlate, string? Vin, IReadOnlyDictionary<string, string> ExternalIds);
 public sealed record SamsaraDriver(string Id, string? Name, string? Username, string? LicenseNumber, IReadOnlyDictionary<string, string> ExternalIds);
 public sealed record SamsaraRouteStopRequest(
+    Guid StopId,
     string Address,
     double Latitude,
     double Longitude,
@@ -274,6 +299,10 @@ public sealed record SamsaraRouteSnapshot(
     string? Name,
     string? DriverId,
     string? VehicleId,
+    IReadOnlyDictionary<string, string> ExternalIds,
+    IReadOnlyList<SamsaraRouteStopSnapshot> Stops);
+public sealed record SamsaraRouteStopSnapshot(
+    string? Id,
     IReadOnlyDictionary<string, string> ExternalIds);
 public sealed record SamsaraRouteUpsertResult(
     string? RouteId,
