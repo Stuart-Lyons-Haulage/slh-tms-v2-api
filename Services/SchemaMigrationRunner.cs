@@ -130,6 +130,16 @@ public static class SchemaMigrationRunner
         "060_TachoMaster_Job_Managed_Identity.sql"
     };
 
+    // Migration 043 was historically deferred during startup, and later required
+    // migrations were allowed to apply around it. It is now a required dependency
+    // for the Info mailbox master-data seeds, so existing clean-V2 databases may
+    // legitimately contain this single historical gap. Allow that gap only so the
+    // runner can catch 043 up and restore contiguous history.
+    private static readonly IReadOnlySet<string> CatchUpMigrationGaps = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "043_Customer_Site_Crm_Links.sql"
+    };
+
     private static readonly string[] OrderedMigrationFiles =
     [
         "000_Critical_Master_Site_Compatibility.sql",
@@ -581,7 +591,8 @@ public static class SchemaMigrationRunner
             if (!applied.ContainsKey(version))
             {
                 if (migrationByVersion.TryGetValue(version, out var missingMigration) &&
-                    DeferredStartupMigrations.Contains(missingMigration.Name))
+                    (DeferredStartupMigrations.Contains(missingMigration.Name) ||
+                     CatchUpMigrationGaps.Contains(missingMigration.Name)))
                     continue;
                 throw new InvalidOperationException(
                     $"SchemaMigration history has a gap at version {version}. Refusing to apply migrations out of order.");
