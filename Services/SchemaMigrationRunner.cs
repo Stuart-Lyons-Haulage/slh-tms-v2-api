@@ -47,6 +47,14 @@ public static class SchemaMigrationRunner
             ALTER TABLE dbo.MarketContacts ADD MarketKey nvarchar(160) NULL;
         END;
         """;
+    internal const string IntakeMappingGovernancePreparationSql = """
+        IF OBJECT_ID(N'dbo.IntegrationMappings', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.IntegrationMappings', N'NormalizedExternalValue') IS NULL
+        BEGIN
+            ALTER TABLE dbo.IntegrationMappings ADD NormalizedExternalValue nvarchar(300) NULL;
+        END;
+        """;
+    private const string IntakeMappingGovernanceMigration = "033_Intake_Mapping_Governance.sql";
     private const string MarketContactsStableKeyMigration = "049_Market_Contact_Stable_Key_And_Stands.sql";
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -226,6 +234,14 @@ public static class SchemaMigrationRunner
                     logger.LogInformation(
                         "Applying required schema migration {Version} {MigrationName} ({Checksum}).",
                         migration.Version, migration.Name, migration.Checksum);
+
+                    if (string.Equals(migration.Name, IntakeMappingGovernanceMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive IntegrationMappings.NormalizedExternalValue compatibility preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(IntakeMappingGovernancePreparationSql, ct);
+                    }
 
                     if (string.Equals(migration.Name, MarketContactsStableKeyMigration, StringComparison.Ordinal))
                     {
