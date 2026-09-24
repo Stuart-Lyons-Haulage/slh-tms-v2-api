@@ -244,6 +244,14 @@ public static partial class SiteGeofenceMasterSync
 
     private static List<Site> MatchingSites(string geofenceName, IReadOnlyList<Site> sites)
     {
+        // Phase 0 — known customer collection-site semantics. These are physical-location
+        // identities already used by Planner/Tacho/Live Runs, but Falcon often names them
+        // differently from Site Master (for example "Selsey (Natures Way)" vs "NWF Selsey").
+        // Return every qualifying site so multiple possible locations remain ambiguous rather
+        // than being guessed.
+        var operational = OperationalCustomerMatches(geofenceName, sites);
+        if (operational.Count > 0) return operational;
+
         // Phase 1 — exact canonical name/alias match only. A single shared token is
         // not enough for an automatic operational link; examples such as "Bicester"
         // or "Shell" can otherwise attach dozens of unrelated service-station fences
@@ -269,6 +277,34 @@ public static partial class SiteGeofenceMasterSync
         // If multiple sites are above threshold (ambiguous) return them all so the caller
         // treats this as a non-unique match and leaves the geofence unlinked.
         if (fuzzy.Count > 1) return fuzzy.Select(x => x.Site).ToList();
+
+        return [];
+    }
+
+    private static List<Site> OperationalCustomerMatches(string geofenceName, IReadOnlyList<Site> sites)
+    {
+        var fence = NormalizeForExactMatch(geofenceName);
+        if (fence.Length == 0) return [];
+
+        static bool Customer(Site site, string code) =>
+            string.Equals(site.CustomerCode?.Trim(), code, StringComparison.OrdinalIgnoreCase);
+
+        var nwfLocality = new[] { "SELSEY", "RUNCTON", "MERSTON", "DRAYTON" }
+            .FirstOrDefault(locality => fence.Contains(locality, StringComparison.Ordinal));
+        if (nwfLocality is not null &&
+            (fence.Contains("NATURESWAY", StringComparison.Ordinal) || fence.Contains("NWF", StringComparison.Ordinal)))
+        {
+            return sites.Where(site =>
+                    Customer(site, "NWF") &&
+                    SiteNames(site).Any(name => NormalizeForExactMatch(name).Contains(nwfLocality, StringComparison.Ordinal)))
+                .ToList();
+        }
+
+        if (fence.Contains("GREENHOUSE", StringComparison.Ordinal))
+            return sites.Where(site => Customer(site, "GHS")).ToList();
+
+        if (fence.Contains("LANGMEAD", StringComparison.Ordinal) || fence.Contains("HAMFARM", StringComparison.Ordinal))
+            return sites.Where(site => Customer(site, "LANGMEADS")).ToList();
 
         return [];
     }
