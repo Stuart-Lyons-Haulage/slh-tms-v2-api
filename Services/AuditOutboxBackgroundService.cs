@@ -50,6 +50,7 @@ public sealed class AuditOutboxProcessor(
 {
     internal const int MaximumRetries = 5;
     internal const int BatchSize = 50;
+    internal const int RetentionCleanupBatchSize = 250;
     internal static readonly TimeSpan StaleThreshold = TimeSpan.FromMinutes(5);
 
     public async Task<int> ProcessPendingAsync(CancellationToken ct)
@@ -88,7 +89,31 @@ public sealed class AuditOutboxProcessor(
                 processed++;
         }
 
+        await ClearProcessedPayloadsAsync(ct);
         return processed;
+    }
+
+    private async Task<int> ClearProcessedPayloadsAsync(CancellationToken ct)
+    {
+        // Existing V1/V2 outbox rows can contain large replay payloads long after success.
+        // Select identifiers only so cleanup never materialises the nvarchar(max) payloads,
+        // then clear a bounded batch each polling cycle. Pending/failed rows keep payloads.
+        var ids = await db.AuditOutboxes
+            .AsNoTracking()
+            .Where(x => x.ProcessedAt != null && x.Payload != string.Empty)
+            .OrderBy(x => x.ProcessedAt)
+            .Select(x => x.OutboxId)
+            .Take(RetentionCleanupBatchSize)
+            .ToListAsync(ct);
+
+        if (ids.Count == 0) return 0;
+
+        var cleared = await db.AuditOutboxes
+            .Where(x => ids.Contains(x.OutboxId))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.Payload, string.Empty), ct);
+
+        logger.LogInformation("Cleared retained payloads from {Count} successfully processed audit outbox row(s).", cleared);
+        return cleared;
     }
 
     private async Task<bool> ProcessOneAsync(Guid outboxId, CancellationToken ct)
@@ -116,6 +141,7 @@ public sealed class AuditOutboxProcessor(
                 db.MasterDataAudits.Add(audit);
 
             item.ProcessedAt = DateTimeOffset.UtcNow;
+            item.Payload = string.Empty;
             await db.SaveAuditReplayChangesAsync(ct);
             return true;
         }
@@ -130,6 +156,7 @@ public sealed class AuditOutboxProcessor(
                 if (concurrentlyProcessed is not null && concurrentlyProcessed.ProcessedAt is null)
                 {
                     concurrentlyProcessed.ProcessedAt = DateTimeOffset.UtcNow;
+                    concurrentlyProcessed.Payload = string.Empty;
                     await db.SaveAuditReplayChangesAsync(ct);
                 }
                 return true;
