@@ -43,6 +43,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<DriverStatusLog> DriverStatusLogs => Set<DriverStatusLog>();
     public DbSet<MasterDataAudit> MasterDataAudits => Set<MasterDataAudit>();
     public DbSet<AuditOutbox> AuditOutboxes => Set<AuditOutbox>();
+    public DbSet<TmsUser> TmsUsers => Set<TmsUser>();
     public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
     public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
@@ -148,8 +149,13 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Customer>().HasIndex(x => x.Code).IsUnique(false);
         b.Entity<CustomerContact>().HasIndex(x => new { x.CustomerCode, x.Name }).IsUnique();
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
+        b.Entity<Vehicle>().HasIndex(x => x.FleetioId)
+            .IsUnique()
+            .HasFilter("[FleetioId] IS NOT NULL")
+            .HasDatabaseName("UX_Vehicles_FleetioId");
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique();
         b.Entity<Driver>().HasIndex(x => x.TachoMasterDriverId)
+            .IsUnique()
             .HasDatabaseName("IX_Drivers_TachoMasterDriverId")
             .HasFilter("[TachoMasterDriverId] IS NOT NULL");
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
@@ -185,6 +191,10 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
         b.Entity<AuditOutbox>().ToTable("AuditOutbox");
         b.Entity<AuditOutbox>().HasKey(x => x.OutboxId);
+        b.Entity<TmsUser>().ToTable("TmsUsers");
+        b.Entity<TmsUser>().HasKey(x => x.Id);
+        b.Entity<TmsUser>().HasIndex(x => x.Username).IsUnique();
+        b.Entity<TmsUser>().HasIndex(x => new { x.Active, x.Role });
         b.Entity<AuditOutbox>()
             .HasIndex(x => new { x.ProcessedAt, x.FailedAt, x.CreatedAt })
             .HasDatabaseName("IX_AuditOutbox_Pending");

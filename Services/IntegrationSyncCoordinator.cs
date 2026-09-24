@@ -128,22 +128,16 @@ public sealed class IntegrationSyncCoordinator(
             var driverGroup = Clip(employee.Team, 80);
             if (!existingNumbers.Contains(employeeNumber))
             {
-                var id = Guid.NewGuid();
-                string? tachoName = null;
-                string? skills = null;
-                await db.Database.ExecuteSqlInterpolatedAsync($@"
-                    INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
-                    VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {true})", ct);
-                existingNumbers.Add(employeeNumber);
-                created++;
+                // Sage HR supplies employment/leave context only. Driver identity is owned by
+                // TachoMaster and must be explicitly reviewed before a new Driver row exists.
+                skipped++;
+                continue;
             }
-            else
-            {
-                await db.Database.ExecuteSqlInterpolatedAsync($@"
-                    UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
-                    WHERE EmployeeNumber = {employeeNumber}", ct);
-                updated++;
-            }
+
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
+                WHERE EmployeeNumber = {employeeNumber}", ct);
+            updated++;
         }
         var now = DateTimeOffset.UtcNow;
         var activeDriverEmployeeNumbers = candidates
@@ -151,21 +145,44 @@ public sealed class IntegrationSyncCoordinator(
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        db.StagedImports.Add(new StagedImport
+        var londonDate = UkDate(now);
+        var receiptKey = $"sagehrsync:{londonDate:yyyy-MM-dd}";
+        var receiptPayload = JsonSerializer.Serialize(new
         {
-            EntityType = "sagehrsync",
-            IdempotencyKey = $"sagehrsync:{Guid.NewGuid():N}",
-            PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, activeDriverEmployeeNumbers, created, updated, skipped }),
-            Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase) ? "Sage HR scheduled synchronisation" : "Sage HR manual synchronisation",
-            Status = StagingStatus.Promoted,
-            ReceivedAtUtc = now,
-            ReviewedAtUtc = now,
-            ReviewedBy = actor,
-            ReviewNote = "Sage HR synchronisation through the shared integration coordinator."
+            sourceEmployeeCount = employees.Count,
+            driverCandidateCount = candidates.Count,
+            activeDriverEmployeeNumbers,
+            created,
+            updated,
+            skipped
         });
+        var receipt = await db.StagedImports.SingleOrDefaultAsync(row => row.IdempotencyKey == receiptKey, ct);
+        if (receipt is null)
+        {
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "sagehrsync",
+                IdempotencyKey = receiptKey,
+                PayloadJson = receiptPayload,
+                Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase) ? "Sage HR scheduled synchronisation" : "Sage HR manual synchronisation",
+                Status = StagingStatus.Promoted,
+                ReceivedAtUtc = now,
+                ReviewedAtUtc = now,
+                ReviewedBy = actor,
+                ReviewNote = "Daily Sage HR sync receipt. Repeated same-day syncs update this row rather than append history."
+            });
+        }
+        else
+        {
+            receipt.PayloadJson = receiptPayload;
+            receipt.Status = StagingStatus.Promoted;
+            receipt.ReviewedAtUtc = now;
+            receipt.ReviewedBy = actor;
+            receipt.ReviewNote = "Daily Sage HR sync receipt updated by latest successful sync.";
+        }
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return new("Sage HR", true, now, $"Sage HR synchronised {created + updated} driver records ({created} created, {updated} updated).", created + updated);
+        return new("Sage HR", true, now, $"Sage HR enriched {updated} existing driver record(s); {skipped} Sage candidate(s) were not allowed to create Driver Master rows.", updated);
     }
 
     public async Task<IntegrationSyncResult> SyncFleetioAsync(string actor, CancellationToken ct)
@@ -495,6 +512,27 @@ public sealed class IntegrationSyncCoordinator(
         var b = Normalise(right);
         if (a.Length < 8 || b.Length < 8) return false;
         return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static DateOnly UkDate(DateTimeOffset value)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, zone).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            try
+            {
+                var zone = TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time");
+                return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, zone).DateTime);
+            }
+            catch (TimeZoneNotFoundException)
+            {
+                return DateOnly.FromDateTime(value.UtcDateTime);
+            }
+        }
     }
 
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());

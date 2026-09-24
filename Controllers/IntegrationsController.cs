@@ -150,75 +150,9 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     [HttpPost("sage-hr/sync-drivers"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SyncDrivers(CancellationToken ct)
     {
-        if (!sageHr.IsConfigured)
-        {
-            return BadRequest(new { configured = false, missingSettings = sageHr.MissingSettings, message = $"Sage HR cannot sync until these settings are complete: {string.Join(", ", sageHr.MissingSettings)}." });
-        }
-
-        try
-        {
-            var employees = await sageHr.GetActiveEmployeesAsync(ct);
-            var rawCandidates = employees.Where(IsDriver).ToList();
-            // Sage can return the same employee more than once when historical
-            // team/position records are expanded. De-duplicate before touching
-            // the unique EmployeeNumber index in Azure SQL.
-            var candidates = rawCandidates
-                .GroupBy(employee => string.IsNullOrWhiteSpace(employee.EmployeeNumber)
-                    ? $"SAGE-{employee.Id}"
-                    : employee.EmployeeNumber.Trim(), StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First())
-                .ToList();
-            var created = 0; var updated = 0; var skipped = rawCandidates.Count - candidates.Count;
-            var existingNumbers = (await db.Drivers.AsNoTracking().Select(driver => driver.EmployeeNumber).ToListAsync(ct))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            await using var transaction = await db.Database.BeginTransactionAsync(ct);
-            foreach (var employee in candidates)
-            {
-                var employeeNumber = ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40);
-                var displayName = ClipRequired($"{employee.FirstName} {employee.LastName}".Trim(), 160);
-                if (string.IsNullOrWhiteSpace(displayName)) { skipped++; continue; }
-                var mobileNumber = Clip(employee.MobilePhone, 40);
-                var driverType = Clip(employee.Position, 80);
-                var driverGroup = Clip(employee.Team, 80);
-                string? tachoName = null;
-                string? skills = null;
-                if (!existingNumbers.Contains(employeeNumber))
-                {
-                    var id = Guid.NewGuid();
-                    await db.Database.ExecuteSqlInterpolatedAsync($@"
-                        INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
-                        VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {true})", ct);
-                    existingNumbers.Add(employeeNumber);
-                    created++;
-                }
-                else
-                {
-                    await db.Database.ExecuteSqlInterpolatedAsync($@"
-                        UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
-                        WHERE EmployeeNumber = {employeeNumber}", ct);
-                    updated++;
-                }
-            }
-            db.StagedImports.Add(new StagedImport
-            {
-                EntityType = "sagehrsync",
-                IdempotencyKey = $"sagehrsync:{Guid.NewGuid():N}",
-                PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped }),
-                Source = "Sage HR driver synchronisation",
-                Status = StagingStatus.Promoted,
-                ReviewedAtUtc = DateTimeOffset.UtcNow,
-                ReviewedBy = User.Identity?.Name,
-                ReviewNote = "Transactional Sage HR sync using the production-compatible driver columns."
-            });
-            await db.SaveChangesAsync(ct);
-            await transaction.CommitAsync(ct);
-            return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
-        }
-        catch (Exception exception)
-        {
-            logger.LogWarning(exception, "Sage HR driver sync failed.");
-            return Ok(new { configured = true, connected = false, sourceEmployeeCount = 0, driverCandidateCount = 0, created = 0, updated = 0, skipped = 0, syncedAtUtc = DateTimeOffset.UtcNow, message = $"Sage HR driver sync failed: {exception.GetBaseException().Message}. No driver records were changed." });
-        }
+        var actor = User.Identity?.Name ?? "admin:sagehr";
+        var result = await coordinator.SyncSageHrAsync(actor, ct);
+        return result.Success ? Ok(result) : StatusCode(StatusCodes.Status503ServiceUnavailable, result);
     }
 
     private bool IsDriver(SageHrEmployee employee) =>

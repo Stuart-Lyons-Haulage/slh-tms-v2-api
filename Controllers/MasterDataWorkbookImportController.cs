@@ -49,6 +49,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         await ProcessDriversAsync(workbook, result, commit, ct);
 
         result.Warnings.Add("Drivers are update-only from this workbook. TachoMaster remains the authority for driver identity and live tacho readings.");
+        result.Warnings.Add("Vehicles are update-only from this workbook. Fleet remains the authority for vehicle identity and registrations.");
         result.Warnings.Add("Sites with weak or conflicting matches are held for review and are not created during commit.");
         result.Warnings.Add("Collection Sites, Customers For Deliveries, Site Cutoffs and Run Times are imported as master detail records for intake/planner matching.");
         result.Warnings.Add("Timing rules now retain latestCollectionTime for wall boards. Dispatch can still set an earlier planned start; once the first geofence is hit live ETA/ETO takes over for downstream stops.");
@@ -285,32 +286,83 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
     private async Task ProcessVehiclesAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)
     {
-        var rows = workbook.Sheets.Where(sheet => sheet.Key.Contains("vehicle", StringComparison.OrdinalIgnoreCase) || sheet.Key.Contains("fuel", StringComparison.OrdinalIgnoreCase)).SelectMany(sheet => sheet.Value).ToList();
+        var rows = workbook.Sheets
+            .Where(sheet => sheet.Key.Contains("vehicle", StringComparison.OrdinalIgnoreCase)
+                || sheet.Key.Contains("fuel", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(sheet => sheet.Value)
+            .ToList();
+        if (rows.Count == 0) return;
+
+        var vehicles = await db.Vehicles.ToListAsync(ct);
         foreach (var row in rows)
         {
             var registration = row.Text("registration", "reg", "vehicle registration");
             if (string.IsNullOrWhiteSpace(registration)) continue;
-            var payload = new Dictionary<string, object?>
+
+            var canonical = IntegrationSyncCoordinator.CanonicalVehicleRegistration(registration);
+            var vehicle = vehicles.FirstOrDefault(item =>
+                string.Equals(
+                    IntegrationSyncCoordinator.CanonicalVehicleRegistration(item.Registration),
+                    canonical,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (vehicle is null)
             {
-                ["registration"] = registration.Replace(" ", string.Empty).ToUpperInvariant(),
-                ["abbreviation"] = row.Text("abbreviation", "reg last 3", "last 3"),
-                ["transmission"] = row.Text("transmission"),
-                ["dvsCompliant"] = row.Bool("dvs"),
-                ["cabMobile"] = row.Text("cab mobile", "cab phone", "cabmobile"),
-                ["fuelPin"] = row.Text("fuel pin", "fuelpin"),
-                ["shellCard"] = row.Text("shell card", "shellcard"),
-                ["bpRedCard"] = row.Text("bp red card", "bpredcard"),
-                ["bpPlainCard"] = row.Text("bp plain card", "bpplaincard"),
-                ["notes"] = row.Text("notes"),
-                ["active"] = row.Bool("active") ?? true
-            };
+                result.Rows.Add(new WorkbookRowResult(
+                    "Vehicles & Fuel",
+                    row.RowNumber,
+                    registration,
+                    "skipped",
+                    "No existing Fleet vehicle matched this normalised registration. Workbook vehicle rows are update-only and cannot create vehicles.",
+                    30) { ActionTaken = "not written" });
+                continue;
+            }
+
             if (commit)
             {
-                using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload));
-                await staging.PromoteDirect("vehicle", doc.RootElement, ct);
+                vehicle.Abbreviation = row.Text("abbreviation", "reg last 3", "last 3") ?? vehicle.Abbreviation;
+                vehicle.Transmission = row.Text("transmission") ?? vehicle.Transmission;
+                vehicle.DvsCompliant = row.Bool("dvs") ?? vehicle.DvsCompliant;
+                vehicle.CabMobile = row.Text("cab mobile", "cab phone", "cabmobile") ?? vehicle.CabMobile;
+                vehicle.FuelPin = row.Text("fuel pin", "fuelpin") ?? vehicle.FuelPin;
+                vehicle.ShellCard = row.Text("shell card", "shellcard") ?? vehicle.ShellCard;
+                vehicle.BpRedCard = row.Text("bp red card", "bpredcard") ?? vehicle.BpRedCard;
+                vehicle.BpPlainCard = row.Text("bp plain card", "bpplaincard") ?? vehicle.BpPlainCard;
+                vehicle.Notes = row.Text("notes") ?? vehicle.Notes;
+                await MasterDetailStore.SaveAsync(
+                    db,
+                    "vehicle",
+                    vehicle.Registration,
+                    JsonSerializer.Serialize(new
+                    {
+                        registration = vehicle.Registration,
+                        vehicle.Abbreviation,
+                        vehicle.Transmission,
+                        vehicle.DvsCompliant,
+                        vehicle.CabMobile,
+                        vehicle.FuelPin,
+                        vehicle.ShellCard,
+                        vehicle.BpRedCard,
+                        vehicle.BpPlainCard,
+                        vehicle.Notes,
+                        sourceWorkbookSheet = row.SheetName,
+                        sourceWorkbookRow = row.RowNumber
+                    }),
+                    "SLH master workbook vehicle overlay",
+                    User.Identity?.Name,
+                    ct);
             }
-            result.Rows.Add(new WorkbookRowResult("Vehicles & Fuel", row.RowNumber, registration, commit ? "imported" : "ready", "Vehicle will upsert by normalised registration.", 95) { ActionTaken = commit ? "upserted vehicle/fuel" : "would upsert vehicle/fuel" });
+
+            result.Rows.Add(new WorkbookRowResult(
+                "Vehicles & Fuel",
+                row.RowNumber,
+                vehicle.Registration,
+                commit ? "updated" : "matched",
+                "Matched existing Fleet vehicle; workbook fields are an operational overlay only.",
+                95) { ActionTaken = commit ? "updated vehicle/fuel overlay" : "would update vehicle/fuel overlay" });
         }
+
+        if (commit) await db.SaveChangesAsync(ct);
     }
 
     private async Task ProcessCustomerContactsAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)

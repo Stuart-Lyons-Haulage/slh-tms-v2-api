@@ -74,7 +74,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         var request = JsonSerializer.Serialize(new
         {
             receivedFromUtc = "2026-09-15T00:00:00Z",
-            minimumPlanningDate = "2026-09-19",
+            minimumPlanningDate = "2026-09-18",
             refreshUnamendedPending = true,
             maxMessages = 50
         });
@@ -84,6 +84,14 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
             new StringContent(request, Encoding.UTF8, "application/json"));
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstPayload = await first.Content.ReadAsStringAsync();
+        using (var firstJson = JsonDocument.Parse(firstPayload))
+        {
+            Assert.True(
+                firstJson.RootElement.TryGetProperty("pendingArchivedForRefresh", out var archivedCount) &&
+                archivedCount.GetInt32() == 1,
+                $"Replay did not archive exactly one stale row. Response: {firstPayload}");
+        }
 
         using (var scope = factory.Services.CreateScope())
         {

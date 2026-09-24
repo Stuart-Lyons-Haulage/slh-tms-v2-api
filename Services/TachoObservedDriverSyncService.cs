@@ -5,7 +5,7 @@ using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed record TachoObservedDriverSyncResult(int Observed, int Existing, int Created, int SkippedUnknownVehicle, int SkippedWithoutCard);
+public sealed record TachoObservedDriverSyncResult(int Observed, int Existing, int Created, int SkippedUnknownVehicle, int SkippedWithoutCard, int StagedForReview = 0);
 
 /// <summary>
 /// Reconciles the live/open TachoMaster duty feed with Driver Master on every scheduled Tacho poll.
@@ -45,6 +45,7 @@ public sealed class TachoObservedDriverSyncService(
         var created = 0;
         var skippedUnknownVehicle = 0;
         var skippedWithoutCard = 0;
+        var stagedForReview = 0;
         var now = DateTimeOffset.UtcNow;
 
         foreach (var status in observed
@@ -105,58 +106,63 @@ public sealed class TachoObservedDriverSyncService(
                 continue;
             }
 
-            var employeeNumber = UniqueReference(member, cardKey, drivers);
-            var displayName = string.IsNullOrWhiteSpace(status.DriverName)
-                ? !string.IsNullOrWhiteSpace(member)
-                    ? $"Tacho driver {member}"
-                    : $"Tacho driver {cardKey[^Math.Min(6, cardKey.Length)..]}"
-                : status.DriverName.Trim();
-
-            driver = new Driver
+            // Unknown Tacho identities must never create Driver Master rows during live polling.
+            // Only Member Code identities are staged because Member Code is the canonical person identity.
+            if (string.IsNullOrWhiteSpace(member))
             {
-                EmployeeNumber = employeeNumber,
-                DisplayName = Clip(displayName, 160),
-                TachoName = Clip(displayName, 160),
-                TachoMasterDriverId = member,
-                TachoCardNumber = cardKey.Length > 0 ? status.CardNumber : null,
-                TachoDriveAvailableTodayMinutes = status.DriveAvailableTodayMinutes,
-                TachoDriveAvailableWeekMinutes = status.DriveAvailableWeekMinutes,
-                TachoWorkAvailableWeekMinutes = status.WorkAvailableWeekMinutes,
-                DriverType = "Driver",
-                LastTachoSyncUtc = now,
-                Active = true
-            };
+                skippedWithoutCard++;
+                continue;
+            }
 
-            db.Drivers.Add(driver);
-            drivers.Add(driver);
-            await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "Created from live TachoMaster member identity", actor, ct);
-            db.MasterDataAudits.Add(new MasterDataAudit
+            var reviewKey = $"driverreview:member:{member}";
+            var payloadJson = JsonSerializer.Serialize(new
             {
-                EntityType = "Driver",
-                EntityId = driver.Id,
-                Action = "CreatedFromLiveTachoMember",
-                ChangedBy = actor,
-                ChangesJson = JsonSerializer.Serialize(new
-                {
-                    source = "TachoMaster open duty",
-                    status.VehicleCode,
-                    status.DriverName,
-                    status.MemberCode,
-                    status.CardNumber,
-                    employeeNumber
-                })
+                tachoMemberCode = member,
+                displayName = string.IsNullOrWhiteSpace(status.DriverName) ? $"Tacho driver {member}" : status.DriverName.Trim(),
+                cardNumber = string.IsNullOrWhiteSpace(status.CardNumber) ? null : status.CardNumber.Trim(),
+                employeeNumber = (string?)null,
+                workerType = "Driver",
+                agencyName = (string?)null,
+                cardLastRead = (string?)null,
+                driverCardExpiry = (string?)null,
+                drivingLicenceExpiry = (string?)null,
+                cpcExpiry = (string?)null,
+                source = "TachoMaster live duty observation — no matching Driver Master record",
+                vehicleCode = status.VehicleCode,
+                receivedAtUtc = now
             });
-            created++;
+
+            var review = await db.StagedImports
+                .SingleOrDefaultAsync(row => row.EntityType == "driverreview" && row.IdempotencyKey == reviewKey, ct);
+            if (review is null)
+            {
+                db.StagedImports.Add(new StagedImport
+                {
+                    EntityType = "driverreview",
+                    IdempotencyKey = reviewKey,
+                    PayloadJson = payloadJson,
+                    Source = "TachoMaster live duty identity",
+                    Status = StagingStatus.PendingReview,
+                    ReceivedAtUtc = now,
+                    ReviewNote = $"TachoMaster member {member} ({status.DriverName}) was observed in SLH vehicle {status.VehicleCode} but has no Driver Master match. Review before creating a driver."
+                });
+                stagedForReview++;
+            }
+            else if (review.Status == StagingStatus.PendingReview)
+            {
+                review.PayloadJson = payloadJson;
+                review.ReviewNote = $"Updated from latest TachoMaster live duty observation at {now:u}; still awaiting Driver Master review.";
+            }
 
             logger.LogWarning(
-                "Created Driver Master record {Driver} ({EmployeeNumber}) because previously unseen TachoMaster member {MemberCode} was observed in SLH vehicle {Vehicle}.",
-                driver.DisplayName, driver.EmployeeNumber, status.MemberCode, status.VehicleCode);
+                "TachoMaster member {MemberCode} observed in SLH vehicle {Vehicle} has no canonical Driver Master match; staged for review instead of creating a driver.",
+                member, status.VehicleCode);
         }
 
-        if (existing > 0 || created > 0)
+        if (existing > 0 || stagedForReview > 0 || db.ChangeTracker.HasChanges())
             await db.SaveChangesAsync(ct);
 
-        return new(observed.Count, existing, created, skippedUnknownVehicle, skippedWithoutCard);
+        return new(observed.Count, existing, 0, skippedUnknownVehicle, skippedWithoutCard, stagedForReview);
     }
 
     private static string UniqueReference(string? member, string cardKey, IReadOnlyCollection<Driver> drivers)

@@ -17,6 +17,7 @@ internal static class TmsAccessPolicy
     public static bool IsCompanyUser(ClaimsPrincipal user, IReadOnlyCollection<string>? allowedDomains = null)
     {
         if (user.Identity?.IsAuthenticated != true) return false;
+        if (user.HasClaim("auth_source", "local")) return true;
 
         var domains = NormaliseAllowedDomains(allowedDomains);
         if (domains.Count == 0) return false;
