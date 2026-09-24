@@ -138,6 +138,56 @@ public sealed class SiteGeofenceMasterSyncTests
         Assert.False(status.NeedsReview);
     }
 
+    [Theory]
+    [InlineData("Selsey (Natures Way)", "NWF Selsey")]
+    [InlineData("Runcton (Natures Way)", "NWF Runcton")]
+    [InlineData("Merston (Natures Way)", "NWF Merston")]
+    [InlineData("Drayton (Natures Way)", "NWF Drayton")]
+    public async Task Sync_links_natures_way_provider_names_to_nwf_physical_sites(string fenceName, string siteName)
+    {
+        await using var db = CreateDb();
+        var site = new Site { ExternalCode = siteName.Replace(" ", "-").ToUpperInvariant(), CustomerCode = "NWF", Name = siteName, Active = true };
+        db.Sites.Add(site);
+        db.SiteGeofences.Add(new SiteGeofence
+        {
+            Name = fenceName,
+            NormalizedName = fenceName.ToUpperInvariant(),
+            PolygonJson = "[[0,0],[1,0],[0,1]]",
+            Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
+
+        var fence = Assert.Single(db.SiteGeofences);
+        Assert.Equal(site.Id, fence.SiteId);
+        Assert.Equal(1, result.GeofencesLinked);
+    }
+
+    [Theory]
+    [InlineData("Greenhouse Growers", "GHS", "Greenhouse")]
+    [InlineData("Langmead Herbs - Ham Farm", "LANGMEADS", "Ham Farm")]
+    public async Task Sync_links_known_customer_collection_geofence_names(string siteName, string customerCode, string fenceName)
+    {
+        await using var db = CreateDb();
+        var site = new Site { ExternalCode = customerCode, CustomerCode = customerCode, Name = siteName, Active = true };
+        db.Sites.Add(site);
+        db.SiteGeofences.Add(new SiteGeofence
+        {
+            Name = fenceName,
+            NormalizedName = fenceName.ToUpperInvariant(),
+            PolygonJson = "[[0,0],[1,0],[0,1]]",
+            Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
+
+        var fence = Assert.Single(db.SiteGeofences);
+        Assert.Equal(site.Id, fence.SiteId);
+        Assert.Equal(1, result.GeofencesLinked);
+    }
+
     [Fact]
     public async Task Sync_renumbers_existing_site_codes_without_sql_unique_collision()
     {
