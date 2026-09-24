@@ -34,6 +34,8 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.073_Rejected_Order_DoNotLearn_Guard.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.074_Local_Tms_Users.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.075_Canonical_Identity_Uniqueness.sql", resources);
     }
 
     [Fact]
@@ -46,7 +48,6 @@ public sealed class SchemaResourceTests
         var migrations = SchemaMigrationRunner.GetMigrations();
 
         Assert.Equal(resources.Length, migrations.Count);
-        Assert.Equal(65, migrations.Count);
         Assert.Equal(Enumerable.Range(1, migrations.Count), migrations.Select(migration => migration.Version));
         Assert.Equal(
             resources,
@@ -78,7 +79,9 @@ public sealed class SchemaResourceTests
             "062_Distributed_Integration_Lease_Heartbeat.sql",
             "071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql",
             "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql",
-            "073_Rejected_Order_DoNotLearn_Guard.sql"
+            "073_Rejected_Order_DoNotLearn_Guard.sql",
+            "074_Local_Tms_Users.sql",
+            "075_Canonical_Identity_Uniqueness.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }
