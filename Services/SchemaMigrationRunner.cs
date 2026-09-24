@@ -87,6 +87,42 @@ public static class SchemaMigrationRunner
         END;
         """;
     private const string DriverTachoIdentityMigration = "037_Driver_Tacho_Identity.sql";
+
+    internal const string RoadTechOperationalVisitsPreparationSql = """
+        IF OBJECT_ID(N'dbo.GeofenceVisits', N'U') IS NOT NULL
+        BEGIN
+            IF COL_LENGTH(N'dbo.GeofenceVisits', N'RunId') IS NULL
+                ALTER TABLE dbo.GeofenceVisits ADD RunId uniqueidentifier NULL;
+            IF COL_LENGTH(N'dbo.GeofenceVisits', N'RunStopId') IS NULL
+                ALTER TABLE dbo.GeofenceVisits ADD RunStopId uniqueidentifier NULL;
+            IF COL_LENGTH(N'dbo.GeofenceVisits', N'SiteId') IS NULL
+                ALTER TABLE dbo.GeofenceVisits ADD SiteId uniqueidentifier NULL;
+        END;
+        """;
+    private const string RoadTechOperationalVisitsMigration = "059_RoadTech_Operational_Visits.sql";
+
+    internal const string EmailIntakeMappingV2PreparationSql = """
+        IF OBJECT_ID(N'dbo.CustomerEmailRoutes', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.CustomerEmailRoutes', N'NormalizedMappingHash') IS NULL
+        BEGIN
+            ALTER TABLE dbo.CustomerEmailRoutes ADD NormalizedMappingHash AS
+                CONVERT(binary(32), HASHBYTES('SHA2_256', LOWER(CONCAT(
+                    CustomerCode, N'|', ISNULL(SenderEmail, N''), N'|',
+                    ISNULL(SenderDomain, N''), N'|', ISNULL(SubjectContains, N''))))) PERSISTED;
+        END;
+        """;
+    private const string EmailIntakeMappingV2Migration = "061_Email_Intake_Mapping_V2.sql";
+
+    internal const string CanonicalVehicleIdentityPreparationSql = """
+        IF OBJECT_ID(N'dbo.Vehicles', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.Vehicles', N'NormalizedRegistration') IS NULL
+        BEGIN
+            ALTER TABLE dbo.Vehicles ADD NormalizedRegistration AS
+                UPPER(REPLACE(REPLACE(LTRIM(RTRIM(Registration)), N' ', N''), N'-', N'')) PERSISTED;
+        END;
+        """;
+    private const string CanonicalVehicleIdentityMigration = "075_Canonical_Identity_Uniqueness.sql";
+
     private const string MarketContactsStableKeyMigration = "049_Market_Contact_Stable_Key_And_Stands.sql";
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -281,6 +317,30 @@ public static class SchemaMigrationRunner
                             "Applying additive Drivers Tacho identity compatibility preparation before migration {Version}.",
                             migration.Version);
                         await db.Database.ExecuteSqlRawAsync(DriverTachoIdentityPreparationSql, ct);
+                    }
+
+                    if (string.Equals(migration.Name, RoadTechOperationalVisitsMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive GeofenceVisits linkage preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(RoadTechOperationalVisitsPreparationSql, ct);
+                    }
+
+                    if (string.Equals(migration.Name, EmailIntakeMappingV2Migration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive CustomerEmailRoutes normalized-hash preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(EmailIntakeMappingV2PreparationSql, ct);
+                    }
+
+                    if (string.Equals(migration.Name, CanonicalVehicleIdentityMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive Vehicles normalized-registration preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(CanonicalVehicleIdentityPreparationSql, ct);
                     }
 
                     if (string.Equals(migration.Name, MarketContactsStableKeyMigration, StringComparison.Ordinal))
