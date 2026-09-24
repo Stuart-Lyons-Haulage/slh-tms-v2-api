@@ -197,14 +197,26 @@ public static class GeofenceSiteAliasRepair
         var now = DateTimeOffset.UtcNow;
         foreach (var fence in unlinked)
         {
-            // Phase 1: exact canonical match (code, name, driver-text, alias)
-            var target = GeofenceProviderSiteLinkPolicy.ExactCanonicalSite(fence.Name, fence.SiteNumber, sites);
-            string matchReason;
+            // Phase 0: explicit operational customer-site naming semantics. Falcon uses
+            // names such as "Selsey (Natures Way)" while Site Master uses "NWF Selsey".
+            // The customer + physical locality combination is the identity here.
+            var target = GeofenceFuzzyMatcher.OperationalCustomerMatch(fence.Name, sites);
+            string? matchReason = null;
             if (target is not null)
+            {
+                matchReason = "Known customer collection-site identity match.";
+            }
+            else
+            {
+                // Phase 1: exact canonical match (code, name, driver-text, alias)
+                target = GeofenceProviderSiteLinkPolicy.ExactCanonicalSite(fence.Name, fence.SiteNumber, sites);
+            }
+
+            if (target is not null && matchReason is null)
             {
                 matchReason = "Unique exact Site Master name/driver-text/alias match.";
             }
-            else
+            else if (target is null)
             {
                 // Phase 2: fuzzy token-similarity match — only accepts a result when exactly
                 // ONE site clears the threshold, preventing ambiguous auto-links.
@@ -235,7 +247,7 @@ public static class GeofenceSiteAliasRepair
                     canonicalSiteId = target.Id,
                     canonicalSiteCode = target.ExternalCode,
                     canonicalSiteName = target.Name,
-                    reason = matchReason
+                    reason = matchReason ?? "Site Master match."
                 })
             });
         }
@@ -265,6 +277,45 @@ public static class GeofenceFuzzyMatcher
     };
 
     public sealed record FuzzyMatch(Site Site, int Score);
+
+    /// <summary>
+    /// Resolves the small set of regular customer collection locations whose Falcon
+    /// names and TMS names intentionally differ. Returns null whenever more than one
+    /// physical Site could qualify.
+    /// </summary>
+    public static Site? OperationalCustomerMatch(string geofenceName, IReadOnlyList<Site> sites)
+    {
+        var fence = Normalize(geofenceName);
+        if (fence.Length == 0) return null;
+
+        static bool Customer(Site site, string code) =>
+            string.Equals(site.CustomerCode?.Trim(), code, StringComparison.OrdinalIgnoreCase);
+
+        IEnumerable<Site> candidates = [];
+        var nwfLocality = new[] { "SELSEY", "RUNCTON", "MERSTON", "DRAYTON" }
+            .FirstOrDefault(locality => fence.Contains(locality, StringComparison.Ordinal));
+
+        if (nwfLocality is not null &&
+            (fence.Contains("NATURESWAY", StringComparison.Ordinal) || fence.Contains("NWF", StringComparison.Ordinal)))
+        {
+            candidates = sites.Where(site =>
+                Customer(site, "NWF") &&
+                new[] { site.Name, site.DriverTextName, site.Aliases }
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Any(value => Normalize(value).Contains(nwfLocality, StringComparison.Ordinal)));
+        }
+        else if (fence.Contains("GREENHOUSE", StringComparison.Ordinal))
+        {
+            candidates = sites.Where(site => Customer(site, "GHS"));
+        }
+        else if (fence.Contains("LANGMEAD", StringComparison.Ordinal) || fence.Contains("HAMFARM", StringComparison.Ordinal))
+        {
+            candidates = sites.Where(site => Customer(site, "LANGMEADS"));
+        }
+
+        var unique = candidates.GroupBy(site => site.Id).Select(group => group.First()).ToList();
+        return unique.Count == 1 ? unique[0] : null;
+    }
 
     /// <summary>
     /// Returns the single site that best matches the geofence name above the auto-link
