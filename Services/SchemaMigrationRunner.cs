@@ -222,7 +222,8 @@ public static class SchemaMigrationRunner
         "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql",
         "073_Rejected_Order_DoNotLearn_Guard.sql",
         "074_Local_Tms_Users.sql",
-        "075_Canonical_Identity_Uniqueness.sql"
+        "075_Canonical_Identity_Uniqueness.sql",
+        "076_Customer_Collection_Sites_Geofence_Links.sql"
     ];
 
     internal const string HistoryTableSql = """
