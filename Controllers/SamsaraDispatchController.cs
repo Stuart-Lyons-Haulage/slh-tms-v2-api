@@ -59,6 +59,49 @@ public sealed class SamsaraDispatchController(
         }
     }
 
+    [HttpGet("dispatch/status")]
+    public async Task<IActionResult> DispatchStatus([FromQuery] DateOnly date, CancellationToken ct)
+    {
+        var loads = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+        var byId = loads.ToDictionary(load => load.Id);
+        if (byId.Count == 0)
+        {
+            var sqlLoads = await db.Loads.AsNoTracking()
+                .Where(load => load.PlanningDate == date)
+                .ToListAsync(ct);
+            byId = sqlLoads.ToDictionary(load => load.Id);
+        }
+
+        var ids = byId.Keys.ToList();
+        var mappings = ids.Count == 0
+            ? []
+            : await db.IntegrationMappings.AsNoTracking()
+                .Where(item => item.Active &&
+                               item.Provider == "Samsara" &&
+                               item.TmsEntityType == "Load" &&
+                               ids.Contains(item.TmsEntityId))
+                .OrderByDescending(item => item.UpdatedAtUtc)
+                .ToListAsync(ct);
+
+        return Ok(new
+        {
+            planningDate = date,
+            configured = samsara.IsConfigured,
+            runs = mappings
+                .GroupBy(item => item.TmsEntityId)
+                .Select(group => group.First())
+                .Select(item => new
+                {
+                    runId = item.TmsEntityId,
+                    reference = byId.GetValueOrDefault(item.TmsEntityId)?.Reference,
+                    routeId = item.ExternalKey,
+                    exportedAtUtc = item.UpdatedAtUtc
+                })
+                .OrderBy(item => item.reference)
+                .ToList()
+        });
+    }
+
     [HttpGet("dispatch/{runId:guid}/status")]
     public async Task<IActionResult> DispatchStatus(Guid runId, CancellationToken ct)
     {
@@ -188,6 +231,12 @@ public sealed class SamsaraDispatchController(
                 samsaraStops);
 
             var result = await samsara.UpsertRouteAsync(request, ct);
+            await SaveMappingAsync(
+                "Load",
+                load.Id,
+                result.RouteId ?? result.ExternalId,
+                load.Reference,
+                ct);
             return Ok(new
             {
                 success = true,
