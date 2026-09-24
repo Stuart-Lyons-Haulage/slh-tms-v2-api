@@ -75,6 +75,18 @@ public static class SchemaMigrationRunner
         END;
         """;
     private const string IntakeMappingGovernanceMigration = "033_Intake_Mapping_Governance.sql";
+    internal const string DriverTachoIdentityPreparationSql = """
+        IF OBJECT_ID(N'dbo.Drivers', N'U') IS NOT NULL
+        BEGIN
+            IF COL_LENGTH(N'dbo.Drivers', N'TachoMasterDriverId') IS NULL
+                ALTER TABLE dbo.Drivers ADD TachoMasterDriverId nvarchar(80) NULL;
+            IF COL_LENGTH(N'dbo.Drivers', N'TachoCardNumber') IS NULL
+                ALTER TABLE dbo.Drivers ADD TachoCardNumber nvarchar(80) NULL;
+            IF COL_LENGTH(N'dbo.Drivers', N'LastTachoSyncUtc') IS NULL
+                ALTER TABLE dbo.Drivers ADD LastTachoSyncUtc datetimeoffset(7) NULL;
+        END;
+        """;
+    private const string DriverTachoIdentityMigration = "037_Driver_Tacho_Identity.sql";
     private const string MarketContactsStableKeyMigration = "049_Market_Contact_Stable_Key_And_Stands.sql";
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -261,6 +273,14 @@ public static class SchemaMigrationRunner
                             "Applying additive IntegrationMappings.NormalizedExternalValue compatibility preparation before migration {Version}.",
                             migration.Version);
                         await db.Database.ExecuteSqlRawAsync(IntakeMappingGovernancePreparationSql, ct);
+                    }
+
+                    if (string.Equals(migration.Name, DriverTachoIdentityMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive Drivers Tacho identity compatibility preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(DriverTachoIdentityPreparationSql, ct);
                     }
 
                     if (string.Equals(migration.Name, MarketContactsStableKeyMigration, StringComparison.Ordinal))
