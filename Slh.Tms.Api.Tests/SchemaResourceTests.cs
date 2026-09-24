@@ -131,6 +131,41 @@ public sealed class SchemaResourceTests
     }
 
     [Fact]
+    public void Roadtech_operational_visit_preparation_is_guarded_and_additive()
+    {
+        var sql = SchemaMigrationRunner.RoadTechOperationalVisitsPreparationSql;
+
+        Assert.Contains("ALTER TABLE dbo.GeofenceVisits ADD RunId uniqueidentifier NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.GeofenceVisits ADD RunStopId uniqueidentifier NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.GeofenceVisits ADD SiteId uniqueidentifier NULL", sql);
+        Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Email_intake_mapping_v2_preparation_is_guarded_and_additive()
+    {
+        var sql = SchemaMigrationRunner.EmailIntakeMappingV2PreparationSql;
+
+        Assert.Contains("OBJECT_ID(N'dbo.CustomerEmailRoutes'", sql);
+        Assert.Contains("NormalizedMappingHash", sql);
+        Assert.Contains("HASHBYTES('SHA2_256'", sql);
+        Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Canonical_vehicle_identity_preparation_is_guarded_and_additive()
+    {
+        var sql = SchemaMigrationRunner.CanonicalVehicleIdentityPreparationSql;
+
+        Assert.Contains("OBJECT_ID(N'dbo.Vehicles'", sql);
+        Assert.Contains("ALTER TABLE dbo.Vehicles ADD NormalizedRegistration", sql);
+        Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Market_contact_stable_key_preparation_is_guarded_and_additive()
     {
         var sql = SchemaMigrationRunner.MarketContactsStableKeyPreparationSql;
