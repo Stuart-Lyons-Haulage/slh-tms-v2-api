@@ -29,16 +29,12 @@ using Slh.Tms.Api.Services;
 [assembly: InternalsVisibleTo("Slh.Tms.Api.Tests")]
 
 var builder = WebApplication.CreateBuilder(args);
-var authMode = (builder.Configuration["Auth:Mode"] ?? "Entra").Trim();
-var localAuthMode = string.Equals(authMode, "Local", StringComparison.OrdinalIgnoreCase);
 var tenantId = builder.Configuration["Entra:TenantId"];
-var audience = localAuthMode
-    ? (builder.Configuration["Auth:Local:Audience"] ?? "slh-tms-v2")
-    : builder.Configuration["Entra:Audience"];
-if (!localAuthMode && string.IsNullOrWhiteSpace(tenantId))
-    throw new InvalidOperationException("Entra:TenantId is required when Auth:Mode is Entra.");
+var audience = builder.Configuration["Entra:Audience"];
+if (string.IsNullOrWhiteSpace(tenantId))
+    throw new InvalidOperationException("Entra:TenantId is required.");
 if (string.IsNullOrWhiteSpace(audience))
-    throw new InvalidOperationException("Authentication audience is required.");
+    throw new InvalidOperationException("Entra:Audience is required.");
 var allowedTmsDomains = builder.Configuration.GetSection("Entra:AllowedDomains").Get<string[]>() ?? ["lyonshaulage.com"];
 var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
 var applicationInsightsConnectionString =
@@ -131,7 +127,6 @@ builder.Services.AddHostedService<InfoMailboxGraphPollingService>();
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
-builder.Services.AddScoped<LocalAuthService>();
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<MasterDataService>();
 builder.Services.AddScoped<MasterAssignmentComplianceService>();
@@ -282,42 +277,19 @@ builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
 {
-    if (localAuthMode)
+    o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
+    o.TokenValidationParameters = new TokenValidationParameters
     {
-        var localSigningKey = builder.Configuration["Auth:Local:SigningKey"];
-        if (string.IsNullOrWhiteSpace(localSigningKey) || localSigningKey.Length < 32)
-            throw new InvalidOperationException("Auth:Local:SigningKey must be at least 32 characters when Auth:Mode is Local.");
-
-        o.TokenValidationParameters = new TokenValidationParameters
+        ValidateIssuer = true,
+        ValidIssuers = new[]
         {
-            ValidateIssuer = true,
-            ValidIssuer = builder.Configuration["Auth:Local:Issuer"] ?? "slh-tms-v2",
-            ValidateAudience = true,
-            ValidAudience = audience,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(localSigningKey)),
-            ClockSkew = TimeSpan.FromMinutes(2),
-            NameClaimType = ClaimTypes.Name,
-            RoleClaimType = ClaimTypes.Role
-        };
-    }
-    else
-    {
-        o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
-        o.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuers = new[]
-            {
-                $"https://login.microsoftonline.com/{tenantId}/v2.0",
-                $"https://sts.windows.net/{tenantId}/"
-            },
-            ValidateAudience = true,
-            ValidAudience = audience,
-            ValidateLifetime = true
-        };
-    }
+            $"https://login.microsoftonline.com/{tenantId}/v2.0",
+            $"https://sts.windows.net/{tenantId}/"
+        },
+        ValidateAudience = true,
+        ValidAudience = audience,
+        ValidateLifetime = true
+    };
 
     o.Events = new JwtBearerEvents
     {
@@ -417,25 +389,6 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
     catch (Exception ex)
     {
         logger.LogError(ex, "Post-migration startup maintenance failed; required schema migrations completed successfully, so application startup will continue.");
-    }
-}
-
-if (localAuthMode)
-{
-    var bootstrapUsername = builder.Configuration["Auth:Local:BootstrapUsername"];
-    var bootstrapPassword = builder.Configuration["Auth:Local:BootstrapPassword"];
-    var bootstrapDisplayName = builder.Configuration["Auth:Local:BootstrapDisplayName"] ?? "SLH Administrator";
-    if (!string.IsNullOrWhiteSpace(bootstrapUsername) && !string.IsNullOrWhiteSpace(bootstrapPassword))
-    {
-        await using var scope = app.Services.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        if (!await db.TmsUsers.AnyAsync())
-        {
-            var auth = scope.ServiceProvider.GetRequiredService<LocalAuthService>();
-            await auth.CreateAsync(bootstrapUsername, bootstrapDisplayName, bootstrapPassword, "TMS.Admin", CancellationToken.None);
-            var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.LocalAuth");
-            logger.LogInformation("Created initial local TMS administrator account {Username}.", LocalAuthService.NormaliseUsername(bootstrapUsername));
-        }
     }
 }
 
