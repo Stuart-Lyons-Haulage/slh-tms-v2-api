@@ -100,6 +100,7 @@ builder.Services.Configure<AzureMapsMatrixOptions>(builder.Configuration.GetSect
 builder.Services.Configure<BackloadMatchingOptions>(builder.Configuration.GetSection("Optimisation:Backload"));
 builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta:Live"));
 builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
+builder.Services.Configure<NightlyArchiveOptions>(builder.Configuration.GetSection("Archive"));
 
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
@@ -115,6 +116,7 @@ builder.Services.AddSingleton<PlanningChangeNotifier>();
 builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
+builder.Services.AddHostedService<NightlyArchiveBackgroundService>();
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
