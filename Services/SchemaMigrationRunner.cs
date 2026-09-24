@@ -127,7 +127,6 @@ public static class SchemaMigrationRunner
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
         "042_Operational_Read_Performance_Indexes.sql",
-        "043_Customer_Site_Crm_Links.sql",
         "060_TachoMaster_Job_Managed_Identity.sql"
     };
 
