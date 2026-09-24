@@ -354,6 +354,17 @@ static bool ReadBool(IConfiguration configuration, bool fallback, params string[
 
 var app = builder.Build();
 
+var expectedDatabaseName = builder.Configuration["Database:ExpectedDatabaseName"]?.Trim();
+if (!string.IsNullOrWhiteSpace(expectedDatabaseName))
+{
+    await using var databaseGuardScope = app.Services.CreateAsyncScope();
+    var guardedDb = databaseGuardScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+    var actualDatabaseName = guardedDb.Database.GetDbConnection().Database;
+    if (!string.Equals(actualDatabaseName, expectedDatabaseName, StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException(
+            $"Database safety guard refused startup. Expected database '{expectedDatabaseName}', but the configured connection targets '{actualDatabaseName}'.");
+}
+
 // Production must never modify the operational schema or master data merely because
 // a replica starts.  A controlled release may opt in only after a verified restore
 // point, schema review and record-count check.
