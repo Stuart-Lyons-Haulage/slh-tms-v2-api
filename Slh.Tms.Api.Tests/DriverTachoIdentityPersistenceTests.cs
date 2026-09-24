@@ -37,7 +37,7 @@ public sealed class DriverTachoIdentityPersistenceTests
     }
 
     [Fact]
-    public void Tacho_master_identity_has_a_non_unique_lookup_index()
+    public void Tacho_master_identity_has_a_unique_canonical_index()
     {
         using var db = new TmsDbContext(
             new DbContextOptionsBuilder<TmsDbContext>()
@@ -49,6 +49,6 @@ public sealed class DriverTachoIdentityPersistenceTests
             .Single(candidate => candidate.Properties.Any(property => property.Name == nameof(Driver.TachoMasterDriverId)));
 
         Assert.Equal("IX_Drivers_TachoMasterDriverId", index.GetDatabaseName());
-        Assert.False(index.IsUnique);
+        Assert.True(index.IsUnique);
     }
 }
