@@ -504,7 +504,7 @@ public sealed class SpecialistMailboxOrderParser
                             destination,
                             workbookDeliveryDate.Value,
                             "WAITROSE");
-                        var reference = $"WEALMOOR-WR-{workbookDeliveryDate:yyyyMMdd}-{NormaliseKey(destination)}";
+                        var reference = $"WEALMOOR-WR-{workbookDeliveryDate.Value:yyyyMMdd}-{NormaliseKey(destination)}";
                         var rowWarnings = new List<string>();
                         var payload = BuildPayload(
                             request,
