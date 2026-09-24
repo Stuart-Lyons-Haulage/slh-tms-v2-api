@@ -12,6 +12,8 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class WeeklyDriverTimesheetsController(
     TmsDbContext db,
     TachoMasterClient tachoMaster,
+    DotTrackingClient dotTracking,
+    SageHrClient sageHr,
     ILogger<WeeklyDriverTimesheetsController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
@@ -44,6 +46,22 @@ public sealed class WeeklyDriverTimesheetsController(
             logger.LogWarning(ex, "Driver detail enrichment was unavailable for timesheets.");
         }
         drivers = drivers.Where(DriverPopulationRules.IsDriver).ToList();
+
+        IReadOnlyList<SageHrEmployee> sageEmployees = [];
+        string? sageError = null;
+        if (sageHr.IsConfigured)
+        {
+            try { sageEmployees = await sageHr.GetActiveEmployeesAsync(ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                sageError = ex.GetBaseException().Message;
+                logger.LogWarning(ex, "Sage HR roster could not be loaded for timesheet employment classification.");
+            }
+        }
+        else
+        {
+            sageError = "Sage HR is not configured.";
+        }
 
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
         var vehicleById = vehicles.ToDictionary(x => x.Id);
@@ -95,42 +113,67 @@ public sealed class WeeklyDriverTimesheetsController(
             }
         }
 
-        var candidateTrackingIdentifiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var aliases in vehicleAliases.Values)
-            foreach (var alias in aliases)
-                candidateTrackingIdentifiers.Add(alias);
-
-        foreach (var duty in tachoByDate.Values.SelectMany(x => x))
-        {
-            if (string.IsNullOrWhiteSpace(duty.VehicleCode)) continue;
-            candidateTrackingIdentifiers.Add(duty.VehicleCode);
-            if (vehicleByAlias.TryGetValue(Normalise(duty.VehicleCode), out var matchedVehicle))
-                foreach (var alias in vehicleAliases[matchedVehicle.Id])
-                    candidateTrackingIdentifiers.Add(alias);
-        }
-
-        var trackingStartUtc = StartOfUkDay(from);
-        var trackingEndUtc = StartOfUkDay(to.AddDays(2));
-        List<VehicleTrackingEvent> tracking = [];
+        var trackingByDate = new Dictionary<DateOnly, IReadOnlyList<DotTelemetryRecord>>();
         string? trackerError = null;
-        if (candidateTrackingIdentifiers.Count > 0)
+        var providerHistoryDays = 0;
+        var legacyFallbackDays = 0;
+
+        // RoadTech deliberately remains the owner of breadcrumb history. The operational SQL
+        // database stores current state/geofence visits rather than every GPS point, so timesheets
+        // must read the provider's historical endpoint instead of expecting VehicleTrackingEvents
+        // to contain a complete journey trail.
+        for (var day = from; day <= to.AddDays(1); day = day.AddDays(1))
         {
+            if (day > today)
+            {
+                trackingByDate[day] = [];
+                continue;
+            }
+
             try
             {
-                var identifiers = candidateTrackingIdentifiers.ToList();
-                tracking = await db.VehicleTrackingEvents.AsNoTracking()
-                    .Where(x => x.EventTimeUtc >= trackingStartUtc &&
-                                x.EventTimeUtc < trackingEndUtc &&
-                                identifiers.Contains(x.VehicleIdentifier))
-                    .OrderBy(x => x.EventTimeUtc)
-                    .Take(200000)
-                    .ToListAsync(ct);
+                var providerRows = await dotTracking.GetHistoricalVehicleEventsAsync(day, ct);
+                var records = providerRows
+                    .Select(DotTelemetryRecord.FromProvider)
+                    .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
+                    .OrderBy(record => record.EventTimeUtc)
+                    .ToList();
+                trackingByDate[day] = records;
+                providerHistoryDays++;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                trackerError = ex.GetBaseException().Message;
-                db.ChangeTracker.Clear();
-                logger.LogWarning(ex, "RoadTech movement evidence unavailable for driver timesheets.");
+                trackerError ??= ex.GetBaseException().Message;
+                logger.LogWarning(ex, "RoadTech historical movement read failed for timesheets on {Date}; checking retained legacy rows.", day);
+
+                try
+                {
+                    var dayStart = StartOfUkDay(day);
+                    var dayEnd = StartOfUkDay(day.AddDays(1));
+                    var legacy = await db.VehicleTrackingEvents.AsNoTracking()
+                        .Where(x => x.EventTimeUtc >= dayStart && x.EventTimeUtc < dayEnd)
+                        .OrderBy(x => x.EventTimeUtc)
+                        .Take(100000)
+                        .ToListAsync(ct);
+                    trackingByDate[day] = legacy.Select(x => new DotTelemetryRecord(
+                        x.ProviderEventId,
+                        x.VehicleIdentifier,
+                        x.EventTimeUtc,
+                        x.Latitude,
+                        x.Longitude,
+                        x.SpeedKph,
+                        x.IgnitionOn,
+                        x.IsMoving,
+                        x.MatchStatus,
+                        x.RawPayload)).ToList();
+                    if (legacy.Count > 0) legacyFallbackDays++;
+                }
+                catch (Exception fallbackEx) when (fallbackEx is not OperationCanceledException)
+                {
+                    db.ChangeTracker.Clear();
+                    logger.LogWarning(fallbackEx, "Legacy RoadTech movement fallback also failed for {Date}.", day);
+                    trackingByDate[day] = [];
+                }
             }
         }
 
@@ -146,9 +189,12 @@ public sealed class WeeklyDriverTimesheetsController(
 
         foreach (var driver in drivers)
         {
-            var employmentType = EmploymentType(driver);
+            var sageMatch = sageEmployees.FirstOrDefault(employee => SageMatches(driver, employee));
+            // Sage HR is the authority for employed status. Anyone who does not match the
+            // active Sage roster must not appear in the employed payroll section.
+            var employmentType = sageMatch is not null ? "Employed" : "Agency";
             var agencyName = employmentType == "Agency"
-                ? FirstMeaningful(driver.AgencyName, driver.DriverGroup, "Agency")
+                ? FirstMeaningful(driver.AgencyName, driver.DriverGroup, "Not in Sage HR")
                 : null;
             var days = new List<object>();
             var daysWorked = 0;
@@ -214,10 +260,13 @@ public sealed class WeeklyDriverTimesheetsController(
                 var trackerWindowEnd = tachoEnd ?? (tachoStart?.AddHours(20) ?? StartOfUkDay(day.AddDays(1)).AddHours(6));
                 if (trackerWindowEnd <= trackerWindowStart) trackerWindowEnd = trackerWindowStart.AddHours(20);
 
-                var movement = tracking
+                var trackingForDuty = (trackingByDate.TryGetValue(day, out var dayTracking) ? dayTracking : [])
+                    .Concat(trackingByDate.TryGetValue(day.AddDays(1), out var nextDayTracking) ? nextDayTracking : []);
+                var movement = trackingForDuty
                     .Where(x => x.EventTimeUtc >= trackerWindowStart && x.EventTimeUtc <= trackerWindowEnd)
                     .Where(x => trackingKeys.Contains(Normalise(x.VehicleIdentifier)))
                     .Where(IsMovement)
+                    .OrderBy(x => x.EventTimeUtc)
                     .ToList();
 
                 var firstMovement = movement.Count > 0 ? movement.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
@@ -302,6 +351,7 @@ public sealed class WeeklyDriverTimesheetsController(
                 driverId = driver.Id,
                 driverName = driver.DisplayName,
                 driver.EmployeeNumber,
+                sageMatched = sageMatch is not null,
                 employmentType,
                 agencyName,
                 daysWorked,
@@ -330,7 +380,14 @@ public sealed class WeeklyDriverTimesheetsController(
             sourceStatus = new
             {
                 tachoMaster = tachoError is null ? "Available" : $"Partial: {tachoError}",
-                roadTech = trackerError is null ? "Available" : $"Partial: {trackerError}"
+                roadTech = trackerError is null
+                    ? $"Available - historical movement loaded directly from RoadTech for {providerHistoryDays} day(s)"
+                    : legacyFallbackDays > 0
+                        ? $"Partial - RoadTech history failed for at least one day; {legacyFallbackDays} day(s) used retained legacy movement rows. {trackerError}"
+                        : $"Partial - RoadTech historical movement unavailable for at least one day. {trackerError}",
+                sageHr = sageError is null
+                    ? $"Available - {sageEmployees.Count} active employee record(s); employed timesheets require a Sage HR match"
+                    : $"Unavailable - {sageError}. No driver is treated as employed without Sage HR confirmation."
             },
             summary = new
             {
@@ -356,16 +413,18 @@ public sealed class WeeklyDriverTimesheetsController(
         return string.Equals(property?.GetValue(row)?.ToString(), "Review", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string EmploymentType(Driver driver)
-    {
-        var token = Normalise($"{driver.DriverType} {driver.DriverGroup} {driver.AgencyName}");
-        return token.Contains("AGENCY", StringComparison.Ordinal) || !string.IsNullOrWhiteSpace(driver.AgencyName)
-            ? "Agency"
-            : "Employed";
-    }
-
     private static string? FirstMeaningful(params string?[] values) =>
         values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.Trim();
+
+    private static bool SageMatches(Driver driver, SageHrEmployee employee)
+    {
+        if (!string.IsNullOrWhiteSpace(employee.EmployeeNumber) &&
+            !string.IsNullOrWhiteSpace(driver.EmployeeNumber) &&
+            Normalise(employee.EmployeeNumber) == Normalise(driver.EmployeeNumber))
+            return true;
+
+        return Normalise($"{employee.FirstName} {employee.LastName}") == Normalise(driver.DisplayName);
+    }
 
     private static bool DriverMatches(Driver driver, TachoDriverDutyStatus status)
     {
@@ -389,7 +448,7 @@ public sealed class WeeklyDriverTimesheetsController(
                (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool IsMovement(VehicleTrackingEvent item) =>
+    private static bool IsMovement(DotTelemetryRecord item) =>
         item.IsMoving == true || item.IgnitionOn == true || (item.SpeedKph ?? 0m) > 0m;
 
     private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
