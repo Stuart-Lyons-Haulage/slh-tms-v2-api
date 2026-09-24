@@ -76,7 +76,6 @@ var jobKind = (configuration["TMS_JOB_KIND"] ?? args.FirstOrDefault() ?? string.
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
 
-await EnsureStagedImportTriggerDoesNotBlockIntegrationsAsync(services.GetRequiredService<TmsDbContext>(), shutdown.Token);
 
 var exitCode = jobKind switch
 {
@@ -95,21 +94,6 @@ var exitCode = jobKind switch
 };
 
 Environment.ExitCode = exitCode;
-
-static async Task EnsureStagedImportTriggerDoesNotBlockIntegrationsAsync(TmsDbContext db, CancellationToken ct)
-{
-    if (!db.Database.IsRelational()) return;
-
-    // Migration 073 added a rejected-order guard trigger to StagedImports. That table is also
-    // used by TachoMaster, Sage HR, Fleetio and master-data evidence. SQL Server rejects EF's
-    // generated OUTPUT DML against trigger-enabled tables, so scheduled integrations must remove
-    // this runtime trigger before any provider sync starts. Rejected-order learning protection
-    // remains in the API/service path rather than a shared table trigger.
-    await db.Database.ExecuteSqlRawAsync("""
-        IF OBJECT_ID(N'dbo.TR_StagedImports_Rejected_DoNotLearn', N'TR') IS NOT NULL
-            DROP TRIGGER dbo.TR_StagedImports_Rejected_DoNotLearn;
-        """, ct);
-}
 
 static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>
     keys.Select(key => configuration[key]).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? fallback;
