@@ -335,9 +335,15 @@ builder.Services.AddAuthorization(options =>
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
     options.AddPolicy("TmsAccess", tmsAccessPolicy);
-    options.AddPolicy("TmsRead", tmsAccessPolicy);
-    options.AddPolicy("TmsWrite", tmsAccessPolicy);
-    options.AddPolicy("TmsApprove", tmsAccessPolicy);
+    options.AddPolicy("TmsRead", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsLocalRolePolicy.CanRead(context.User, allowedTmsDomains)));
+    options.AddPolicy("TmsWrite", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsLocalRolePolicy.CanWrite(context.User, allowedTmsDomains)));
+    options.AddPolicy("TmsApprove", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsLocalRolePolicy.CanApprove(context.User, allowedTmsDomains)));
     options.AddPolicy("TmsReadMaster", policy => policy
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsMasterRolePolicy.CanReadMaster(context.User, allowedTmsDomains)));
