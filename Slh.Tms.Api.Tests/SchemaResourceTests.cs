@@ -98,6 +98,18 @@ public sealed class SchemaResourceTests
     }
 
     [Fact]
+    public void Intake_mapping_governance_preparation_is_guarded_and_additive()
+    {
+        var sql = SchemaMigrationRunner.IntakeMappingGovernancePreparationSql;
+
+        Assert.Contains("OBJECT_ID(N'dbo.IntegrationMappings'", sql);
+        Assert.Contains("COL_LENGTH(N'dbo.IntegrationMappings', N'NormalizedExternalValue') IS NULL", sql);
+        Assert.Contains("ALTER TABLE dbo.IntegrationMappings ADD NormalizedExternalValue nvarchar(300) NULL", sql);
+        Assert.DoesNotContain("DROP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Market_contact_stable_key_preparation_is_guarded_and_additive()
     {
         var sql = SchemaMigrationRunner.MarketContactsStableKeyPreparationSql;
