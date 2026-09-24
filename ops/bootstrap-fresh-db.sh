@@ -40,12 +40,9 @@ export ConnectionStrings__TmsDb="Server=127.0.0.1,$host_port;Database=$database_
 export Database__ExpectedDatabaseName="$database_name"
 export Database__ApplySchemaChangesOnStartup=true
 export Database__ApplyDeferredSchemaMigrations=false
-export Auth__Mode=Local
-export Auth__Local__Issuer=slh-tms-bootstrap
-export Auth__Local__Audience=slh-tms-bootstrap
-export Auth__Local__SigningKey="SlhFreshBootstrapSigningKey_2026_09_24_AtLeast32Chars"
-export Auth__Local__BootstrapUsername=admin
-export Auth__Local__BootstrapPassword="${SLH_FRESH_BOOTSTRAP_ADMIN_PASSWORD:-Slh!Bootstrap_${RANDOM}_${RANDOM}_Aa1}"
+export Entra__TenantId="${SLH_FRESH_BOOTSTRAP_ENTRA_TENANT_ID:-00000000-0000-0000-0000-000000000000}"
+export Entra__Audience="${SLH_FRESH_BOOTSTRAP_ENTRA_AUDIENCE:-api://slh-tms-v2-bootstrap}"
+export Entra__AllowedDomains__0="${SLH_FRESH_BOOTSTRAP_ALLOWED_DOMAIN:-lyonshaulage.com}"
 
 for _ in $(seq 1 60); do
   if docker exec "$container_name" /opt/mssql-tools18/bin/sqlcmd \
