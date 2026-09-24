@@ -449,7 +449,7 @@ public sealed class WeeklyDriverTimesheetsController(
     }
 
     private static bool IsMovement(DotTelemetryRecord item) =>
-        item.IsMoving == true || item.IgnitionOn == true || (item.SpeedKph ?? 0m) > 0m;
+        item.IsMoving == true || (item.SpeedKph ?? 0m) > 0m;
 
     private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
 
