@@ -194,8 +194,8 @@ public sealed class SamsaraDispatchController(
                     resolved.Latitude.Value,
                     resolved.Longitude.Value,
                     samsara.StopRadiusMeters,
-                    index == 0 ? stop.PlannedArrivalUtc : stop.PlannedArrivalUtc,
-                    index == 0 ? firstScheduled : null,
+                    stop.PlannedArrivalUtc,
+                    index == 0 && stop.PlannedArrivalUtc is null ? firstScheduled : null,
                     stop.PlannerNote));
             }
 
@@ -219,6 +219,7 @@ public sealed class SamsaraDispatchController(
                 $"SLH TMS run {load.Reference}",
                 driver is null ? null : $"Driver: {driver.DisplayName}",
                 $"Vehicle: {vehicle.Registration}",
+                state?.PlannedStartUtc is null ? null : $"Planned yard start: {state.PlannedStartUtc:O}",
                 load.TrailerId is null ? null : $"Trailer TMS ID: {load.TrailerId}",
                 string.IsNullOrWhiteSpace(load.PlannerNotes) ? null : $"Planner: {load.PlannerNotes}"
             }.Where(line => !string.IsNullOrWhiteSpace(line)));
