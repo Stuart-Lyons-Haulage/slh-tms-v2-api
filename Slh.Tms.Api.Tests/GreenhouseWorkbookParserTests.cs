@@ -15,7 +15,7 @@ public sealed class GreenhouseWorkbookParserTests
             "ghs-friday-aldi-180926",
             null,
             "info@lyonshaulage.com",
-            "planner@greenhouse.example",
+            "phil.sampson@thegreenhousesussex.co.uk",
             "Greenhouse Planner",
             "Friday Aldi",
             DateTimeOffset.Parse("2026-09-17T12:03:18Z"),
@@ -45,6 +45,31 @@ public sealed class GreenhouseWorkbookParserTests
         });
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "ALDI-ATHERSTONE");
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "ALDI-SWINDON");
+    }
+
+    [Fact]
+    public void GreenhouseWorkbook_FromUnverifiedSender_IsNotAutomaticOrderIntake()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "ghs-spoofed-sender",
+            null,
+            "info@lyonshaulage.com",
+            "planner@example.com",
+            "Unknown Planner",
+            "Friday Aldi",
+            DateTimeOffset.Parse("2026-09-17T12:03:18Z"),
+            "Please see attached.",
+            null,
+            null,
+            [new MailboxAttachmentRequest(
+                "GHS Aldi Bookings 180926.xlsm",
+                "application/vnd.ms-excel.sheet.macroenabled.12",
+                Convert.ToBase64String(BuildWorkbook()),
+                false)]);
+
+        var result = new IntakeParser().TryParse(request);
+
+        Assert.Null(result);
     }
 
     private static byte[] BuildWorkbook()
