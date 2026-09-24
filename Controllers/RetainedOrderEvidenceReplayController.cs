@@ -94,6 +94,7 @@ public sealed class RetainedOrderEvidenceReplayController(
                 .ToList();
 
             var archivedForRefresh = 0;
+            var archivedOriginalIds = new List<Guid>();
             if (request.RefreshUnamendedPending != false &&
                 !string.IsNullOrWhiteSpace(mailboxRequest.MessageId))
             {
@@ -136,17 +137,57 @@ public sealed class RetainedOrderEvidenceReplayController(
                         previous,
                         pending.ReviewNote,
                         "Retained evidence replay"));
+                    archivedOriginalIds.Add(pending.Id);
                     archivedForRefresh++;
                 }
 
                 if (archivedForRefresh > 0)
                 {
                     await db.SaveChangesAsync(ct);
+                    db.ChangeTracker.Clear();
                     summary.PendingArchivedForRefresh += archivedForRefresh;
                 }
             }
 
             await canonical.StageParsedForReplay(mailboxRequest, filtered, ct);
+
+            // Replay must never revive the exact stale rows it just superseded. Re-read
+            // the captured original IDs after staging and enforce the archive contract.
+            if (archivedOriginalIds.Count > 0)
+            {
+                db.ChangeTracker.Clear();
+                var originals = await db.StagedImports
+                    .Where(item => archivedOriginalIds.Contains(item.Id))
+                    .ToListAsync(ct);
+
+                var repaired = 0;
+                foreach (var original in originals)
+                {
+                    if (original.Status == StagingStatus.Archived) continue;
+
+                    var amended = await db.StagedImportEvents.AsNoTracking()
+                        .AnyAsync(item => item.StagedImportId == original.Id &&
+                                         item.EventType == "Amended", ct);
+                    if (amended) continue;
+
+                    var previous = original.Status;
+                    original.Status = StagingStatus.Archived;
+                    original.IdempotencyKey = $"archived-replay:{original.Id:N}";
+                    original.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                    original.ReviewedBy = "Retained evidence replay";
+                    original.ReviewNote = "Superseded by a fresh parse of the original retained email evidence.";
+                    db.StagedImportEvents.Add(StagingAudit.Create(
+                        original,
+                        "ReplayArchiveReasserted",
+                        previous,
+                        original.ReviewNote,
+                        "Retained evidence replay"));
+                    repaired++;
+                }
+
+                if (repaired > 0)
+                    await db.SaveChangesAsync(ct);
+            }
 
             var stagedNow = await db.StagedImports.AsNoTracking()
                 .CountAsync(item => item.EntityType == "order" &&
