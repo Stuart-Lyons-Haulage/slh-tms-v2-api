@@ -14,7 +14,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, SamsaraOptions samsara, SamsaraClient samsaraClient, InfoMailboxGraphOptions infoMailboxGraph, InfoMailboxGraphHealthState infoMailboxGraphHealth, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -29,8 +29,20 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             textBee = new { configured = textBee.IsConfigured, dutyPhoneLabel = textBee.DutyPhoneLabel, missingSettings = textBee.MissingSettings },
             driverSms = new { configured = sms.IsConfigured, provider = textBee.IsConfigured ? "TextBee" : azureSms.IsConfigured ? "Azure SMS" : "MightyText copy" },
             fleetio = new { configured = fleetio.IsConfigured, missingSettings = fleetio.MissingSettings },
+            samsara = new { configured = samsaraClient.IsConfigured, missingSettings = samsaraClient.MissingSettings },
             tachoMaster = new { configured = tachoMaster.IsConfigured, missingSettings = tachoMaster.MissingSettings },
             sageHr = new { configured = sageHr.IsConfigured },
+            infoMailboxGraph = new
+            {
+                enabled = infoMailboxGraph.Enabled,
+                configured = infoMailboxGraph.Enabled && infoMailboxGraph.IsConfigured,
+                mailbox = infoMailboxGraph.Mailbox,
+                lastAttemptUtc = infoMailboxGraphHealth.LastAttemptUtc,
+                lastSuccessUtc = infoMailboxGraphHealth.LastSuccessUtc,
+                lastError = infoMailboxGraphHealth.LastError,
+                lastMessagesSeen = infoMailboxGraphHealth.LastMessagesSeen,
+                lastMessagesIngested = infoMailboxGraphHealth.LastMessagesIngested
+            },
             emailIntake = new { configured = latestEmailIntake is not null, lastReceivedUtc = latestEmailIntake },
             assistant = new { configured = assistant.IsConfigured, model = assistant.Model, safeRulesAvailable = true },
             batchIntake = new { configured = true, endpoint = "/api/v1/staging/batch" }
