@@ -102,6 +102,16 @@ builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta
 builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
 builder.Services.Configure<NightlyArchiveOptions>(builder.Configuration.GetSection("Archive"));
 
+var infoMailboxGraphOptions = new InfoMailboxGraphOptions();
+builder.Configuration.GetSection("Integrations:InfoMailboxGraph").Bind(infoMailboxGraphOptions);
+builder.Services.AddSingleton(infoMailboxGraphOptions);
+builder.Services.AddSingleton<InfoMailboxGraphHealthState>();
+builder.Services.AddHttpClient("InfoMailboxGraph", client =>
+{
+    client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
+    client.Timeout = TimeSpan.FromSeconds(60);
+});
+
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
     .Select(origin => origin.Trim())
@@ -117,6 +127,7 @@ builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
 builder.Services.AddHostedService<NightlyArchiveBackgroundService>();
+builder.Services.AddHostedService<InfoMailboxGraphPollingService>();
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
