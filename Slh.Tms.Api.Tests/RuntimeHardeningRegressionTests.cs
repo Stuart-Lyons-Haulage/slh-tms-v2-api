@@ -59,6 +59,31 @@ public sealed class RuntimeHardeningRegressionTests
     }
 
     [Fact]
+    public void Fresh_tacho_bootstrap_is_one_time_recent_card_only_and_admin_guarded()
+    {
+        var source = Read("Controllers", "FreshBootstrapController.cs");
+        Assert.Contains("Authorize(Policy = \"TmsAdmin\")", source, StringComparison.Ordinal);
+        Assert.Contains("existingCount != 0", source, StringComparison.Ordinal);
+        Assert.Contains("TachoDriverCardReadEligibility.IsEligible", source, StringComparison.Ordinal);
+        Assert.Contains("GroupBy(x => x.MemberCode)", source, StringComparison.Ordinal);
+        Assert.Contains("eligible.Count < 25", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workbook_cannot_create_driver_or_vehicle_master_rows()
+    {
+        var source = Read("Controllers", "MasterDataWorkbookImportController.cs");
+        var drivers = SliceMethod(source, "private async Task ProcessDriversAsync", "private static DateOnly?");
+        var vehicles = SliceMethod(source, "private async Task ProcessVehiclesAsync", "private async Task ProcessCustomerContactsAsync");
+
+        Assert.DoesNotContain("db.Drivers.Add", drivers, StringComparison.Ordinal);
+        Assert.DoesNotContain("PromoteDirect(\"driver\"", drivers, StringComparison.Ordinal);
+        Assert.DoesNotContain("PromoteDirect(\"vehicle\"", vehicles, StringComparison.Ordinal);
+        Assert.DoesNotContain("new Vehicle", vehicles, StringComparison.Ordinal);
+        Assert.Contains("update-only", vehicles, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Archive_requires_server_readiness_marker_before_any_cleanup()
     {
         var source = Read("Services", "NightlyArchiveBackgroundService.cs");
@@ -66,6 +91,14 @@ public sealed class RuntimeHardeningRegressionTests
         Assert.Contains("if (!File.Exists(marker))", source, StringComparison.Ordinal);
         Assert.Contains("WriteVerifiedArchiveAsync", source, StringComparison.Ordinal);
         Assert.Contains("HashFileAsync", source, StringComparison.Ordinal);
+    }
+
+    private static string SliceMethod(string source, string startMarker, string endMarker)
+    {
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, $"Expected method bounds not found: {startMarker}");
+        return source[start..end];
     }
 
     private static string SliceFrom(string source, string marker)
