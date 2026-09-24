@@ -87,8 +87,9 @@ builder.Services.AddSingleton<TokenCredential>(_ => new DefaultAzureCredential()
 builder.Services.AddSingleton(_ =>
 {
     var telemetryConfiguration = TelemetryConfiguration.CreateDefault();
-    telemetryConfiguration.ConnectionString = applicationInsightsConnectionString;
     telemetryConfiguration.DisableTelemetry = string.IsNullOrWhiteSpace(applicationInsightsConnectionString);
+    if (!telemetryConfiguration.DisableTelemetry)
+        telemetryConfiguration.ConnectionString = applicationInsightsConnectionString;
     return new TelemetryClient(telemetryConfiguration);
 });
 builder.Services.Configure<HgvVehicleProfile>(builder.Configuration.GetSection("Routing:HgvVehicleProfile"));
