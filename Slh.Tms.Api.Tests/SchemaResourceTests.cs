@@ -223,6 +223,20 @@ public sealed class SchemaResourceTests
     }
 
     [Fact]
+    public void Historical_customer_site_crm_gap_can_be_caught_up()
+    {
+        var migrations = SchemaMigrationRunner.GetMigrations();
+        var catchUp = migrations.Single(migration => migration.Name == "043_Customer_Site_Crm_Links.sql");
+        var history = migrations
+            .Where(migration => migration.Version != catchUp.Version)
+            .ToDictionary(
+                migration => migration.Version,
+                migration => new AppliedSchemaMigration(migration.Version, migration.Name, migration.Checksum));
+
+        SchemaMigrationRunner.ValidateAppliedHistory(migrations, history);
+    }
+
+    [Fact]
     public void Runtime_integration_mapping_repair_covers_partial_tables()
     {
         Assert.Contains("Provider", IntegrationMappingSchemaRepair.RepairSql);
