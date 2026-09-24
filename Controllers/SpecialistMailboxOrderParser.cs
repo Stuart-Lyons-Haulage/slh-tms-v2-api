@@ -35,10 +35,9 @@ public sealed class SpecialistMailboxOrderParser
 
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
-        var existing = inner.TryParse(request);
-        if (existing is not null)
-            return existing;
-
+        // Verified workbook profiles are deliberately evaluated before the older
+        // body parsers. A known sender + subject family + workbook structure is the
+        // safest automatic intake lane and keeps retailer-name noise out of Order Review.
         var summerBerry = TryParseSummerBerryMorrisonsAldi(request);
         if (summerBerry is not null)
             return summerBerry;
@@ -47,11 +46,19 @@ public sealed class SpecialistMailboxOrderParser
         if (greenhouse is not null)
             return greenhouse;
 
+        var barfootsAldi = TryParseBarfootsAldiWorkbook(request);
+        if (barfootsAldi is not null)
+            return barfootsAldi;
+
+        var wealmoorWaitrose = TryParseWealmoorWaitroseWorkbook(request);
+        if (wealmoorWaitrose is not null)
+            return wealmoorWaitrose;
+
         var vitacress = TryParseVitacressWaitroseWorkbook(request);
         if (vitacress is not null)
             return vitacress;
 
-        return null;
+        return inner.TryParse(request);
     }
 
     private static EmailIntakeParseResult? TryParseSummerBerryMorrisonsAldi(MailboxEmailIntakeRequest request)
@@ -197,6 +204,12 @@ public sealed class SpecialistMailboxOrderParser
 
     private static EmailIntakeParseResult? TryParseGreenhouseAldiWorkbook(MailboxEmailIntakeRequest request)
     {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@thegreenhousesussex.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase))
+            return null;
+
         var attachments = (request.Attachments ?? [])
             .Where(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))
             .Where(item => IsExcel(item.Name))
@@ -296,6 +309,252 @@ public sealed class SpecialistMailboxOrderParser
         }
 
         return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
+    }
+
+    private static EmailIntakeParseResult? TryParseBarfootsAldiWorkbook(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("Aldi Confirmed Booking", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var planningDate = ExtractPlanningDate(request);
+        if (planningDate is null)
+            return null;
+
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))
+            .Where(item => IsExcel(item.Name))
+            .ToList();
+        if (attachments.Count == 0)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var globalWarnings = new List<string>();
+
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                var sheetNumber = 0;
+                do
+                {
+                    sheetNumber++;
+                    var rows = ReadRows(reader);
+                    var headerIndex = rows.FindIndex(row =>
+                        RowContains(row, "Depot Description") &&
+                        RowContains(row, "Collection Site") &&
+                        (RowContains(row, "Temp.") || RowContains(row, "Temperature")) &&
+                        RowContains(row, "Pallets"));
+                    if (headerIndex < 0)
+                        continue;
+
+                    var headers = HeaderMap(rows[headerIndex]);
+                    var depotIndex = FindColumn(headers, "depotdescription", "depot", "destination");
+                    var collectionIndex = FindColumn(headers, "collectionsite", "collection");
+                    var temperatureIndex = FindColumn(headers, "temp", "temperature");
+                    var palletsIndex = FindColumn(headers, "pallets", "pallet", "qty", "quantity");
+                    if (depotIndex < 0 || collectionIndex < 0 || palletsIndex < 0)
+                        continue;
+
+                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+                    {
+                        var row = rows[rowIndex];
+                        var destination = CellText(row, depotIndex);
+                        var collection = CellText(row, collectionIndex);
+                        var pallets = CellInt(row, palletsIndex);
+                        var date = CellDate(row, 0) ?? planningDate;
+                        if (date is null || pallets is null or <= 0 ||
+                            string.IsNullOrWhiteSpace(collection) ||
+                            string.IsNullOrWhiteSpace(destination) ||
+                            !destination.StartsWith("ALDI", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        if (Math.Abs(date.Value.DayNumber - planningDate.Value.DayNumber) > 1)
+                            continue;
+
+                        var temperature = CellText(row, temperatureIndex);
+                        var discriminator = string.Join("|", new[] { collection, temperature }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                        var naturalKey = WorkbookNaturalKey(request, "BARFOOTS", collection, destination, date.Value, discriminator);
+                        var reference = $"BARFOOTS-ALDI-{date:yyyyMMdd}-{NormaliseKey(destination)}-{NormaliseKey(discriminator)}";
+                        if (reference.Length > 120) reference = reference[..120];
+
+                        var rowWarnings = new List<string>();
+                        var payload = BuildPayload(
+                            request,
+                            reference,
+                            null,
+                            "BARFOOTS",
+                            date.Value,
+                            date.Value,
+                            pallets.Value,
+                            collection.Trim(),
+                            destination.Trim(),
+                            null,
+                            null,
+                            attachment.Name,
+                            reader.Name,
+                            rowIndex + 1,
+                            "Barfoots Aldi confirmed workbook",
+                            rowWarnings,
+                            "ALDI");
+
+                        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                        root["temperatureRequirement"] = temperature;
+                        root["intakeNaturalKey"] = naturalKey;
+                        root["intakeProfile"] = "BARFOOTS_ALDI_CONFIRMED_WORKBOOK";
+                        payload = JsonSerializer.SerializeToElement(root);
+
+                        orders.Add(new ParsedEmailOrder(
+                            $"barfoots-aldi-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}-{NormaliseKey(discriminator)}",
+                            naturalKey,
+                            payload,
+                            rowWarnings));
+                    }
+                }
+                while (reader.NextResult());
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                globalWarnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Barfoots Aldi workbook parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    private static EmailIntakeParseResult? TryParseWealmoorWaitroseWorkbook(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@wealmoor.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("WAITROSE PALLET ESTIMATE", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var deliveryDate = ExtractPlanningDate(request);
+        if (deliveryDate is null)
+            return null;
+
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))
+            .Where(item => IsExcel(item.Name))
+            .Where(item => (item.Name ?? string.Empty).Contains("WAITROSE PALLET ESTIMATE", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (attachments.Count == 0)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var globalWarnings = new List<string>();
+
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                var sheetNumber = 0;
+                do
+                {
+                    sheetNumber++;
+                    var rows = ReadRows(reader);
+                    var headerIndex = rows.FindIndex(row =>
+                        RowContains(row, "Depot") &&
+                        FindColumnPrefix(row, "FRV") >= 0 &&
+                        FindColumnPrefix(row, "CHL") >= 0);
+                    if (headerIndex < 0)
+                        continue;
+
+                    var depotIndex = FindColumn(HeaderMap(rows[headerIndex]), "depot");
+                    var frvIndex = FindColumnPrefix(rows[headerIndex], "FRV");
+                    var chilledIndex = FindColumnPrefix(rows[headerIndex], "CHL");
+                    if (depotIndex < 0 || frvIndex < 0 || chilledIndex < 0)
+                        continue;
+
+                    var formDate = rows
+                        .Select(FirstDate)
+                        .FirstOrDefault(value => value is not null);
+                    var workbookDeliveryDate = formDate ?? deliveryDate;
+                    if (workbookDeliveryDate is null)
+                        continue;
+
+                    // These estimates arrive the day before the Waitrose depot date.
+                    // Keep the depot date as delivery and the preceding day as collection.
+                    var collectionDate = workbookDeliveryDate.Value.AddDays(-1);
+
+                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+                    {
+                        var row = rows[rowIndex];
+                        var destination = CellText(row, depotIndex);
+                        if (string.IsNullOrWhiteSpace(destination))
+                            continue;
+
+                        var frvPallets = CellInt(row, frvIndex) ?? 0;
+                        var chilledPallets = CellInt(row, chilledIndex) ?? 0;
+                        var pallets = frvPallets + chilledPallets;
+                        if (pallets <= 0)
+                            continue;
+
+                        var naturalKey = WorkbookNaturalKey(
+                            request,
+                            "WEALMOOR",
+                            "Wealmoor Greenford",
+                            destination,
+                            workbookDeliveryDate.Value,
+                            "WAITROSE");
+                        var reference = $"WEALMOOR-WR-{workbookDeliveryDate:yyyyMMdd}-{NormaliseKey(destination)}";
+                        var rowWarnings = new List<string>();
+                        var payload = BuildPayload(
+                            request,
+                            reference,
+                            null,
+                            "WEALMOOR",
+                            collectionDate,
+                            workbookDeliveryDate.Value,
+                            pallets,
+                            "Wealmoor Greenford",
+                            destination.Trim(),
+                            null,
+                            null,
+                            attachment.Name,
+                            reader.Name,
+                            rowIndex + 1,
+                            "Wealmoor Waitrose pallet estimate workbook",
+                            rowWarnings,
+                            "WAITROSE");
+
+                        var temperature = frvPallets > 0 && chilledPallets > 0
+                            ? "+12°C / +2°C"
+                            : frvPallets > 0 ? "+12°C" : "+2°C";
+                        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                        root["temperatureRequirement"] = temperature;
+                        root["intakeNaturalKey"] = naturalKey;
+                        root["intakeProfile"] = "WEALMOOR_WAITROSE_PALLET_ESTIMATE";
+                        root["palletBreakdown"] = new JsonObject
+                        {
+                            ["frvPlus12"] = frvPallets,
+                            ["chilledPlus2"] = chilledPallets
+                        };
+                        payload = JsonSerializer.SerializeToElement(root);
+
+                        orders.Add(new ParsedEmailOrder(
+                            $"wealmoor-waitrose-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}",
+                            naturalKey,
+                            payload,
+                            rowWarnings));
+                    }
+                }
+                while (reader.NextResult());
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                globalWarnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Wealmoor Waitrose workbook parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, globalWarnings, null);
     }
 
     private static EmailIntakeParseResult? TryParseVitacressWaitroseWorkbook(MailboxEmailIntakeRequest request)
@@ -467,6 +726,7 @@ public sealed class SpecialistMailboxOrderParser
             ["sourceAttachmentName"] = attachmentName,
             ["sourceSheet"] = sheetName,
             ["sourceRow"] = sourceRow,
+            ["intakeNaturalKey"] = NaturalKey(request, customer, collection, destination, deliveryDate, pallets),
             ["intakeParser"] = parser,
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
             ["intakeWarnings"] = warnings,
@@ -527,6 +787,19 @@ public sealed class SpecialistMailboxOrderParser
         foreach (var name in names)
             if (columns.TryGetValue(name, out var index))
                 return index;
+        return -1;
+    }
+
+    private static int FindColumnPrefix(object?[] row, string prefix)
+    {
+        var normalisedPrefix = NormaliseKey(prefix);
+        for (var index = 0; index < row.Length; index++)
+        {
+            var key = NormaliseKey(CellText(row[index]));
+            if (!string.IsNullOrWhiteSpace(key) &&
+                key.StartsWith(normalisedPrefix, StringComparison.OrdinalIgnoreCase))
+                return index;
+        }
         return -1;
     }
 
@@ -612,7 +885,16 @@ public sealed class SpecialistMailboxOrderParser
     }
 
     private static string NaturalKey(MailboxEmailIntakeRequest request, string customer, string collection, string destination, DateOnly date, int pallets) =>
-        $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{customer}|{date:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}|{pallets}";
+        $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{customer}|{date:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}";
+
+    private static string WorkbookNaturalKey(
+        MailboxEmailIntakeRequest request,
+        string customer,
+        string collection,
+        string destination,
+        DateOnly date,
+        string? discriminator) =>
+        $"{NaturalKey(request, customer, collection, destination, date, 0)}|{NormaliseKey(discriminator)}";
 
     private static string StableEmailReference(string? messageId)
     {
