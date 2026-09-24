@@ -189,6 +189,7 @@ public sealed class SamsaraDispatchController(
                 }
 
                 samsaraStops.Add(new SamsaraRouteStopRequest(
+                    stop.Id,
                     resolved.Address,
                     resolved.Latitude.Value,
                     resolved.Longitude.Value,
