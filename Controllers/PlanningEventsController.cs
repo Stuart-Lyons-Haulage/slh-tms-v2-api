@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http.Timeouts;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -10,6 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class PlanningEventsController(PlanningChangeNotifier notifier) : ControllerBase
 {
     [HttpGet("stream")]
+    [DisableRequestTimeout]
     public async Task Stream(CancellationToken ct)
     {
         Response.StatusCode = StatusCodes.Status200OK;
