@@ -109,21 +109,4 @@ public sealed class IntakePipelineHealthController(
             graphHealth.LastMessagesIngested
         });
     }
-
-    [HttpPost("poll"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> PollNow(CancellationToken ct)
-    {
-        if (!graphOptions.Enabled || !graphOptions.IsConfigured)
-            return BadRequest(new { message = "Microsoft Graph mailbox polling is not fully configured." });
-
-        await graphPoller.PollOnceAsync(ct);
-        return Ok(new
-        {
-            message = "Graph mailbox poll completed; Order Review is being refreshed from the canonical staging queue.",
-            graphHealth.LastAttemptUtc,
-            graphHealth.LastSuccessUtc,
-            graphHealth.LastMessagesSeen,
-            graphHealth.LastMessagesIngested
-        });
-    }
 }
