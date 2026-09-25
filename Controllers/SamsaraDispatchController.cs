@@ -316,6 +316,7 @@ public sealed class SamsaraDispatchController(
                 samsaraStops.Add(new SamsaraRouteStopRequest(
                     stop.Id,
                     index + 1,
+                    CleanStopName(stop.Name),
                     samsaraAddressId,
                     resolved.Address,
                     resolved.Latitude.Value,
