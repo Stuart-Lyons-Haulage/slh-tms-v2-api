@@ -52,8 +52,8 @@ public sealed class RoadrunnerReviewRetirementTests
 
         var ok = Assert.IsType<OkObjectResult>(result);
         var json = JsonSerializer.Serialize(ok.Value);
-        Assert.Contains("\\\"review\\\":0", json);
-        Assert.Contains("\\\"unmatched\\\":1", json);
+        Assert.Contains("\"review\":0", json);
+        Assert.Contains("\"unmatched\":1", json);
         Assert.DoesNotContain(db.StagedImports, row =>
             string.Equals(row.EntityType, "masterdata:roadrunner-site-review", StringComparison.OrdinalIgnoreCase));
     }
