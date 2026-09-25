@@ -23,6 +23,9 @@ public sealed class RetainedOrderEvidenceReplayController(
     {
         var receivedFromUtc = request.ReceivedFromUtc ?? DateTimeOffset.UtcNow.AddDays(-4);
         var minimumPlanningDate = request.MinimumPlanningDate ?? DateOnly.FromDateTime(DateTime.UtcNow.Date);
+        var maximumPlanningDate = request.MaximumPlanningDate;
+        if (maximumPlanningDate is not null && maximumPlanningDate < minimumPlanningDate)
+            return BadRequest(new { error = "maximum_planning_date_before_minimum_planning_date" });
         var maxMessages = Math.Clamp(request.MaxMessages ?? 500, 1, 1000);
 
         var evidenceRows = await db.StagedImports
@@ -42,6 +45,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         summary.LegacyMappingExceptionsArchived = await ArchiveLegacyMappingExceptions(
             receivedFromUtc,
             minimumPlanningDate,
+            maximumPlanningDate,
             ct);
         foreach (var evidence in evidenceRows)
         {
@@ -75,7 +79,8 @@ public sealed class RetainedOrderEvidenceReplayController(
             }
 
             var eligibleOrders = parsed.Orders
-                .Where(order => IsOnOrAfter(order.Payload, minimumPlanningDate))
+                .Where(order => IsOnOrAfter(order.Payload, minimumPlanningDate) &&
+                                (maximumPlanningDate is null || IsOnOrBefore(order.Payload, maximumPlanningDate.Value)))
                 .ToList();
 
             if (eligibleOrders.Count == 0)
@@ -209,6 +214,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         {
             receivedFromUtc,
             minimumPlanningDate = minimumPlanningDate.ToString("yyyy-MM-dd"),
+            maximumPlanningDate = maximumPlanningDate?.ToString("yyyy-MM-dd"),
             maxMessages,
             refreshUnamendedPending = request.RefreshUnamendedPending != false,
             summary.EvidenceScanned,
@@ -228,6 +234,7 @@ public sealed class RetainedOrderEvidenceReplayController(
     private async Task<int> ArchiveLegacyMappingExceptions(
         DateTimeOffset receivedFromUtc,
         DateOnly minimumPlanningDate,
+        DateOnly? maximumPlanningDate,
         CancellationToken ct)
     {
         var candidates = await db.StagedImports
@@ -242,6 +249,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         foreach (var item in candidates)
         {
             if (!PayloadIsOnOrAfter(item.PayloadJson, minimumPlanningDate)) continue;
+            if (maximumPlanningDate is not null && !PayloadIsOnOrBefore(item.PayloadJson, maximumPlanningDate.Value)) continue;
             var manuallyAmended = await db.StagedImportEvents.AsNoTracking()
                 .AnyAsync(evt => evt.StagedImportId == item.Id && evt.EventType == "Amended", ct);
             if (manuallyAmended) continue;
@@ -271,6 +279,19 @@ public sealed class RetainedOrderEvidenceReplayController(
         {
             using var document = JsonDocument.Parse(payloadJson);
             return IsOnOrAfter(document.RootElement, minimumPlanningDate);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool PayloadIsOnOrBefore(string payloadJson, DateOnly maximumPlanningDate)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return IsOnOrBefore(document.RootElement, maximumPlanningDate);
         }
         catch (JsonException)
         {
@@ -335,6 +356,18 @@ public sealed class RetainedOrderEvidenceReplayController(
         return planningDate is DateOnly value && value >= minimumPlanningDate;
     }
 
+    private static bool IsOnOrBefore(JsonElement payload, DateOnly maximumPlanningDate)
+    {
+        var collection = Date(payload, "collectionDate");
+        var delivery = Date(payload, "deliveryDate");
+
+        DateOnly? planningDate = collection is DateOnly c && delivery is DateOnly d && c < d
+            ? c
+            : collection ?? delivery;
+
+        return planningDate is DateOnly value && value <= maximumPlanningDate;
+    }
+
     private static DateOnly? Date(JsonElement root, string name) =>
         DateOnly.TryParse(Text(root, name), out var value) ? value : null;
 
@@ -396,6 +429,7 @@ public sealed class RetainedOrderEvidenceReplayController(
 public sealed record RetainedOrderEvidenceReplayRequest(
     DateTimeOffset? ReceivedFromUtc = null,
     DateOnly? MinimumPlanningDate = null,
+    DateOnly? MaximumPlanningDate = null,
     bool? RefreshUnamendedPending = true,
     int? MaxMessages = 500);
 
