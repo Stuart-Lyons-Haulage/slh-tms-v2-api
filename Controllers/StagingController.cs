@@ -224,7 +224,10 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         try
         {
             using var document = JsonDocument.Parse(staged.PayloadJson);
-            return TryGetProperty(document.RootElement, "plannerReady", out _);
+            var payload = document.RootElement;
+            var graphCorrelation = Text(payload, "importCorrelationId");
+            return graphCorrelation?.StartsWith("graph:", StringComparison.OrdinalIgnoreCase) == true &&
+                   TryGetProperty(payload, "plannerReady", out _);
         }
         catch (JsonException)
         {
