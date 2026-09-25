@@ -143,6 +143,58 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Planner_order_line_note_carries_x_and_reference_numbers_from_approved_order()
+    {
+        var date = new DateOnly(2026, 9, 25);
+        var reference = ($"PO-{Guid.NewGuid():N}")[..20];
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.TransportOrders.Add(new TransportOrder
+            {
+                Reference = reference,
+                CustomerCode = "TEST",
+                CollectionDate = date,
+                DeliveryDate = date,
+                Pallets = 6,
+                SellerName = "Greenhouse",
+                StallNumber = "Waitrose Bracknell"
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "order",
+                IdempotencyKey = $"refs-{Guid.NewGuid():N}",
+                Status = StagingStatus.Promoted,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = reference,
+                    xNumber = "X123456",
+                    customerReference = "CUST-789",
+                    bookingReference = "BOOK-456",
+                    collectionDate = date.ToString("yyyy-MM-dd"),
+                    deliveryDate = date.ToString("yyyy-MM-dd"),
+                    collectionSite = "Greenhouse",
+                    deliverySite = "Waitrose Bracknell",
+                    pallets = 6
+                })
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Read");
+        using var response = JsonDocument.Parse(await (await client.GetAsync($"/api/v1/planning-control/pallets?date={date:yyyy-MM-dd}")).Content.ReadAsStringAsync());
+        var order = Assert.Single(response.RootElement.GetProperty("orders").EnumerateArray().Where(x => x.GetProperty("reference").GetString() == reference));
+        var lineNote = order.GetProperty("lineNote").GetString();
+
+        Assert.NotNull(lineNote);
+        Assert.Contains($"Ref: {reference}", lineNote);
+        Assert.Contains("X No: X123456", lineNote);
+        Assert.Contains("Customer Ref: CUST-789", lineNote);
+        Assert.Contains("Booking Ref: BOOK-456", lineNote);
+    }
+
+    [Fact]
     public async Task Run_stop_updates_preserve_planner_note()
     {
         var date = new DateOnly(2026, 9, 7);
