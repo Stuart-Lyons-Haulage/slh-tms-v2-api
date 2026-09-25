@@ -340,7 +340,7 @@ public sealed class SamsaraDispatchController(
                                 resolved.Address,
                                 resolved.Latitude.Value,
                                 resolved.Longitude.Value,
-                                samsara.StopRadiusMeters),
+                                resolved.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
                             ct);
 
                         samsaraAddressId = addressResult.AddressId;
@@ -376,7 +376,7 @@ public sealed class SamsaraDispatchController(
                     resolved.Address,
                     resolved.Latitude.Value,
                     resolved.Longitude.Value,
-                    samsara.StopRadiusMeters,
+                    resolved.Site?.GeofenceRadiusMetres ?? samsara.StopRadiusMeters,
                     scheduledArrival,
                     scheduledDeparture,
                     stopNotes));
