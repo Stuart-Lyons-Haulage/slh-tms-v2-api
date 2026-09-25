@@ -64,15 +64,16 @@ internal static class PlanningResilience
         try
         {
             var audited = await PlannerPlanAuditProjection.ReadLoadsAsync(db, date, ct);
-            var activeKeys = merged.Values
-                .Where(load => load.Status != LoadStatus.Cancelled)
+            // A cancelled operational/register row is a deliberate tombstone. Keep its
+            // logical key so an older planner audit row cannot resurrect a deleted run.
+            var knownKeys = merged.Values
                 .Select(LogicalRunKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var auditRecoveries = 0;
             foreach (var load in audited)
             {
                 var logicalKey = LogicalRunKey(load);
-                if (activeKeys.Contains(logicalKey)) continue;
+                if (knownKeys.Contains(logicalKey)) continue;
 
                 try
                 {
@@ -86,7 +87,7 @@ internal static class PlanningResilience
                 }
 
                 merged[load.Id] = load;
-                activeKeys.Add(logicalKey);
+                knownKeys.Add(logicalKey);
                 auditRecoveries++;
             }
             TmsMetrics.Shared.RecordPlanningRecovery(auditRecoveries, "planner_audit");

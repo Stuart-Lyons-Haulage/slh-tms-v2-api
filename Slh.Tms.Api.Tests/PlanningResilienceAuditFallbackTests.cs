@@ -160,4 +160,41 @@ public sealed class PlanningResilienceAuditFallbackTests
         Assert.Equal(first[0].Id, second[0].Id);
         Assert.Equal(first[0].Stops.Select(stop => stop.Id), second[0].Stops.Select(stop => stop.Id));
     }
+
+    [Fact]
+    public async Task Cancelled_run_is_not_resurrected_from_an_older_planner_audit()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        var day = new DateOnly(2026, 8, 27);
+        var run = new PlannerPlanRunRequest(
+            "RUN-001", "Run 1", "AM", day, null, null, null, null, true, "Imported", null,
+            [new PlannerPlanStopRequest(1, "Collection", "Delivery", 10, "PO-001", "Standard", "06:00", "07:00", "17:00", 1)]);
+
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = "plannerplanrun",
+            IdempotencyKey = $"planimport:{day:yyyyMMdd}:{run.RunRef}",
+            PayloadJson = JsonSerializer.Serialize(run, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            Status = StagingStatus.Promoted,
+            Source = "Planner plan import",
+            ReviewedAtUtc = DateTimeOffset.UtcNow
+        });
+        db.Loads.Add(new Load
+        {
+            Id = Guid.NewGuid(),
+            Reference = PlannerPlanImportRules.TmsReference(day, run.RunRef),
+            PlanningDate = day,
+            Status = LoadStatus.Cancelled,
+            Stops = []
+        });
+        await db.SaveChangesAsync();
+
+        var loads = await PlanningResilience.ReadLoadsAsync(db, day, CancellationToken.None);
+
+        Assert.Single(loads);
+        Assert.Equal(LoadStatus.Cancelled, loads[0].Status);
+    }
 }

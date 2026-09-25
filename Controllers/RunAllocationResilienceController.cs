@@ -18,7 +18,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         {
             var query = db.Loads.AsNoTracking().Include(x => x.Stops).AsQueryable();
             if (date is not null) query = query.Where(x => x.PlanningDate == date.Value);
-            foreach (var load in await query.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToListAsync(ct))
+            foreach (var load in await query.Where(x => x.Status != LoadStatus.Cancelled).OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToListAsync(ct))
                 merged[load.Id] = load;
         }
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
@@ -26,7 +26,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             db.ChangeTracker.Clear();
         }
 
-        foreach (var load in await PlanningRegisterStore.ReadLoadsAsync(db, date, ct))
+        foreach (var load in (await PlanningRegisterStore.ReadLoadsAsync(db, date, ct)).Where(load => load.Status != LoadStatus.Cancelled))
             merged[load.Id] = load;
 
         var rows = merged.Values.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToList();
