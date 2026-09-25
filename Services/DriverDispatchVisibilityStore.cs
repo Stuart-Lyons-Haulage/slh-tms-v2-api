@@ -71,7 +71,7 @@ public static class DriverDispatchVisibilityStore
         var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
         var profiles = await ReadProfilesAsync(db, logger, ct);
         var liveStatuses = await ReadLiveStatusesAsync(db, logger, ct);
-        var sageRoster = await ReadSageRosterAsync(sageHr, logger, ct);
+        var sageRoster = await ReadSageRosterAsync(db, sageHr, logger, ct);
 
         var visible = new List<DriverDispatchVisibilityItem>();
         foreach (var driver in drivers)
@@ -246,7 +246,7 @@ public static class DriverDispatchVisibilityStore
         return "Unmatched";
     }
 
-    private static async Task<SageRoster> ReadSageRosterAsync(SageHrClient sageHr, ILogger logger, CancellationToken ct)
+    private static async Task<SageRoster> ReadSageRosterAsync(TmsDbContext db, SageHrClient sageHr, ILogger logger, CancellationToken ct)
     {
         if (!sageHr.IsConfigured) return SageRoster.Unavailable;
         try
@@ -259,11 +259,39 @@ public static class DriverDispatchVisibilityStore
                 .Select(employee => Normalise(employee.EmployeeNumber))
                 .Where(number => number.Length > 0)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            return new SageRoster(true, numbers);
+            if (numbers.Count > 0) return new SageRoster(true, numbers);
+            logger.LogWarning("Sage HR returned {EmployeeCount} employees but no usable driver employee numbers; checking the latest successful Sage roster receipt.", employees.Count);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException || !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(exception, "Sage HR employment roster was unavailable for Driver Dispatch visibility; local employed labels will not be promoted.");
+            logger.LogWarning("Sage HR employment roster timed out for Driver Dispatch visibility; checking the latest successful Sage roster receipt.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Sage HR employment roster was unavailable for Driver Dispatch visibility; checking the latest successful Sage roster receipt.");
+        }
+
+        try
+        {
+            var receipt = await db.StagedImports.AsNoTracking()
+                .Where(row => row.EntityType == "sagehrsync" && row.Status == StagingStatus.Promoted)
+                .OrderByDescending(row => row.ReviewedAtUtc ?? row.ReceivedAtUtc)
+                .Select(row => row.PayloadJson)
+                .FirstOrDefaultAsync(ct);
+            if (string.IsNullOrWhiteSpace(receipt)) return SageRoster.Unavailable;
+
+            using var document = JsonDocument.Parse(receipt);
+            if (!document.RootElement.TryGetProperty("activeDriverEmployeeNumbers", out var values) || values.ValueKind != JsonValueKind.Array)
+                return SageRoster.Unavailable;
+            var numbers = values.EnumerateArray()
+                .Select(value => Normalise(value.GetString()))
+                .Where(number => number.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return numbers.Count > 0 ? new SageRoster(true, numbers) : SageRoster.Unavailable;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "The latest successful Sage HR roster receipt could not be read for Driver Dispatch visibility.");
             return SageRoster.Unavailable;
         }
     }
