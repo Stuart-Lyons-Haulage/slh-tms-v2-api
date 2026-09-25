@@ -67,7 +67,7 @@ public sealed class StartupConfigurationValidatorTests
         EnvironmentName = name,
         ApplicationName = "Slh.Tms.Api.Tests",
         ContentRootPath = Directory.GetCurrentDirectory(),
-        ContentRootFileProvider = NullFileProvider.Instance
+        ContentRootFileProvider = new NullFileProvider()
     };
 
     private sealed class TestHostEnvironment : IHostEnvironment
@@ -75,6 +75,6 @@ public sealed class StartupConfigurationValidatorTests
         public string EnvironmentName { get; set; } = string.Empty;
         public string ApplicationName { get; set; } = string.Empty;
         public string ContentRootPath { get; set; } = string.Empty;
-        public IFileProvider ContentRootFileProvider { get; set; } = NullFileProvider.Instance;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }
