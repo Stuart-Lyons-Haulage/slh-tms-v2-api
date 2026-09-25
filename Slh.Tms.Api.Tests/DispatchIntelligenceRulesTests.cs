@@ -143,6 +143,24 @@ public sealed class DispatchIntelligenceRulesTests
         Assert.Equal(DateTimeOffset.Parse("2026-09-10T03:00:00Z"), result);
     }
 
+    [Fact]
+    public void No_completed_tacho_duty_has_no_legal_start_to_persist_or_dispatch()
+    {
+        var driver = TestDriver();
+        var duties = new[]
+        {
+            Duty("2026-09-09T05:00:00Z", null)
+        };
+
+        var shiftEnd = DispatchTachoRules.LatestShiftEndUtc(driver, duties);
+        var available = DispatchTachoRules.AvailableFrom(
+            shiftEnd,
+            DispatchTachoRules.DeriveRequiredRestPeriod(driver, duties));
+
+        Assert.Null(shiftEnd);
+        Assert.Null(available);
+    }
+
     [Theory]
     [InlineData(39.9, "ok")]
     [InlineData(40, "amber")]
@@ -165,21 +183,21 @@ public sealed class DispatchIntelligenceRulesTests
         Active = true
     };
 
-    private static TachoDriverDutyStatus Duty(string startUtc, string endUtc, int? shortDailyRestsUsed = null) => new(
+    private static TachoDriverDutyStatus Duty(string startUtc, string? endUtc, int? shortDailyRestsUsed = null) => new(
         VehicleCode: "AB12CDE",
         MemberCode: 101,
         DriverName: "Test Driver",
         CardNumber: "1234567890123456",
         EmployeeNumber: "SLH001",
         DutyStartUtc: DateTimeOffset.Parse(startUtc),
-        DutyEndUtc: DateTimeOffset.Parse(endUtc),
+        DutyEndUtc: endUtc is null ? null : DateTimeOffset.Parse(endUtc),
         WorkMinutes: 180,
         RestMinutes: 0,
         AvailableMinutes: 0,
         DriveMinutes: 300,
         BreakCount: 1,
         BreakMinutes: 45,
-        MetricsValidAtUtc: DateTimeOffset.Parse(endUtc),
+        MetricsValidAtUtc: endUtc is null ? null : DateTimeOffset.Parse(endUtc),
         DailyDriverPeriodsAvailable: 1,
         DriveAvailableTodayMinutes: 240,
         DriveAvailableTomorrowMinutes: 540,

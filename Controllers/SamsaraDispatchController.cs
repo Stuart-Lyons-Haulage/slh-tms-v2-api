@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Integrations;
@@ -15,6 +16,7 @@ public sealed class SamsaraDispatchController(
     TmsDbContext db,
     SamsaraClient samsara,
     SamsaraOptions options,
+    DispatchService dispatch,
     ILogger<SamsaraDispatchController> logger) : ControllerBase
 {
     [HttpGet("status")]
@@ -280,9 +282,26 @@ public sealed class SamsaraDispatchController(
             var dispatchState = await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct);
             dispatchState.TryGetValue(load.Id, out var state);
             var orderedStops = load.Stops.OrderBy(stop => stop.Sequence).ToList();
-            var firstScheduled = state?.PlannedStartUtc ?? orderedStops[0].PlannedArrivalUtc;
-            if (firstScheduled is null)
-                return BadRequest(new { message = "Set the planned dispatch start before sending the run to Samsara." });
+            if (driver is null)
+                return BadRequest(new { message = "Allocate a driver before sending the run to Samsara." });
+            var available = (await dispatch.GetAvailableTimesAsync(
+                new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct))
+                .Single();
+            if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
+                return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
+            var firstScheduled = state?.DriverId == driver.Id && state.PlannedStartUtc is DateTimeOffset persistedStart
+                ? persistedStart
+                : available.AvailableFrom;
+            if (firstScheduled < available.AvailableFrom)
+                return BadRequest(new { message = $"The run cannot be sent to Samsara before the TachoMaster legal start {available.AvailableFrom:O}." });
+            if (state?.DriverId != driver.Id || state.PlannedStartUtc is null)
+            {
+                state = await DriverDispatchStateStore.SetPlannedStartAsync(
+                    db, load.Id, firstScheduled, User.Identity?.Name, ct,
+                    available.RequiredRestPeriod == 9 ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
+                    driver.Id,
+                    state?.UseReducedDailyRest == true);
+            }
 
             var orderIds = orderedStops
                 .Where(stop => stop.OrderId is not null)

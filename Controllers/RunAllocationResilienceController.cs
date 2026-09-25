@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -8,7 +9,7 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/runs"), Authorize]
-public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMapsRouteClient maps, MasterAssignmentComplianceService compliance) : ControllerBase
+public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMapsRouteClient maps, MasterAssignmentComplianceService compliance, DispatchService dispatch) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Runs([FromQuery] DateOnly? date, CancellationToken ct)
@@ -54,7 +55,22 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         if (request.VehicleId is Guid selectedVehicleId && IsVehicleUnavailable(await db.Vehicles.AsNoTracking().SingleAsync(x => x.Id == selectedVehicleId, ct)))
             return Conflict(new { code = "vehicle_unavailable", message = "The selected vehicle is VOR, out of service or otherwise unavailable." });
 
-        var plannedStart = request.PlannedStartUtc ?? (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id)?.PlannedStartUtc;
+        var existingState = (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id);
+        DateTimeOffset? plannedStart = request.PlannedStartUtc ??
+            (existingState is not null && existingState.DriverId == request.DriverId ? existingState.PlannedStartUtc : null);
+        if (request.DriverId is Guid requestedDriverId)
+        {
+            var available = (await dispatch.GetAvailableTimesAsync(
+                new DispatchAvailableTimesRequest(load.PlanningDate, [requestedDriverId], request.UseReducedDailyRest ? [requestedDriverId] : []), ct))
+                .Single();
+            if (available.AvailableFrom is null)
+                return Conflict(new { code = "tacho_start_unavailable", message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
+            if (!string.IsNullOrWhiteSpace(available.BreachDetail))
+                return Conflict(new { code = "tacho_dispatch_blocked", message = available.BreachDetail });
+            if (plannedStart is null) plannedStart = available.AvailableFrom;
+            if (plannedStart < available.AvailableFrom)
+                return Conflict(new { code = "tacho_start_too_early", message = $"The run cannot start before {available.AvailableFrom:O}; TachoMaster requires {available.RequiredRestPeriod}h daily rest." });
+        }
         if (request.VehicleId is Guid requestedVehicleId && await HasResourceOverlap(requestedVehicleId, null, load, plannedStart, ct))
             return Conflict(new { code = "vehicle_in_use", message = "The selected vehicle is already committed to an overlapping run. Choose another vehicle or a start time after the previous run ends." });
         if (request.TrailerId is Guid requestedTrailerId && await HasResourceOverlap(null, requestedTrailerId, load, plannedStart, ct))
@@ -65,6 +81,13 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         load.TrailerId = request.TrailerId;
         load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
         await SaveCoreLoadAsync(load, register, ct);
+        if (request.DriverId is Guid assignedDriverId && plannedStart is DateTimeOffset calculatedStart)
+            await DriverDispatchStateStore.SetPlannedStartAsync(db, load.Id, calculatedStart, User.Identity?.Name, ct,
+                request.UseReducedDailyRest ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
+                assignedDriverId,
+                request.UseReducedDailyRest);
+        else if (request.DriverId is null)
+            await DriverDispatchStateStore.SetPlannedStartAsync(db, load.Id, null, User.Identity?.Name, ct, "Driver unassigned");
         await RunOperationalStore.EnrichAsync(db, [load], ct);
         return Ok(load);
     }
@@ -330,7 +353,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     };
 }
 
-public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId, DateTimeOffset? PlannedStartUtc = null);
+public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId, DateTimeOffset? PlannedStartUtc = null, bool UseReducedDailyRest = false);
 public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
 public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc, string? PlannerNote);
 public sealed record RunStatusRequest(string Status);

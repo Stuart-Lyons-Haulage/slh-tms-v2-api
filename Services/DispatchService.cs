@@ -107,7 +107,7 @@ public sealed class DispatchService(
                     CleanStopName(locationName),
                     positionAtUtc),
                 needsReturn,
-                null,
+                DispatchTachoRules.AvailableFrom(shiftEnd, rest),
                 blockedReason is not null,
                 blockedReason,
                 suggestion.RunId,
@@ -332,7 +332,9 @@ public sealed class DispatchService(
                     allocation.PlannedStartTime.ToUniversalTime(),
                     actor,
                     ct,
-                    allocation.UseReducedDailyRest ? "Locked smart dispatch plan · reduced 9h daily rest" : "Locked smart dispatch plan · regular 11h daily rest");
+                    allocation.UseReducedDailyRest ? "Locked smart dispatch plan · reduced 9h daily rest" : "Locked smart dispatch plan · regular 11h daily rest",
+                    allocation.DriverId,
+                    allocation.UseReducedDailyRest);
             }
 
             await transaction.CommitAsync(ct);

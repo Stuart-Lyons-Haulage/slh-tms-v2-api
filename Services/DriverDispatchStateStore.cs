@@ -10,7 +10,9 @@ public sealed record DriverDispatchState(
     DateTimeOffset? PlannedStartUtc,
     DateTimeOffset UpdatedAtUtc,
     string? UpdatedBy,
-    string? Source = null);
+    string? Source = null,
+    Guid? DriverId = null,
+    bool UseReducedDailyRest = false);
 
 /// <summary>
 /// Stores planner-only dispatch state without requiring a live schema migration. The run remains
@@ -51,10 +53,12 @@ public static class DriverDispatchStateStore
         DateTimeOffset? plannedStartUtc,
         string? actor,
         CancellationToken ct,
-        string source = "Manual override")
+        string source = "Manual override",
+        Guid? driverId = null,
+        bool useReducedDailyRest = false)
     {
         var now = DateTimeOffset.UtcNow;
-        var state = new DriverDispatchState(loadId, plannedStartUtc, now, actor, source);
+        var state = new DriverDispatchState(loadId, plannedStartUtc, now, actor, source, driverId, useReducedDailyRest);
         var key = Key(loadId);
         var row = await db.StagedImports.SingleOrDefaultAsync(item => item.EntityType == EntityType && item.IdempotencyKey == key, ct);
         if (row is null)

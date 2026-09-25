@@ -436,7 +436,7 @@ public sealed class DriverDispatchController(
         }
 
         var actor = User.Identity?.Name ?? "TMS planner";
-        var state = await DriverDispatchStateStore.SetPlannedStartAsync(db, loadId, plannedStartUtc, actor, ct);
+        var state = await DriverDispatchStateStore.SetPlannedStartAsync(db, loadId, plannedStartUtc, actor, ct, "Manual override", load.DriverId, false);
         try
         {
             db.DriverStatusLogs.Add(new DriverStatusLog
