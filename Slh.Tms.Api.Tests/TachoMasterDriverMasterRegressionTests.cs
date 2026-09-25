@@ -39,6 +39,9 @@ public sealed class TachoMasterDriverMasterRegressionTests
         Assert.Contains("byMemberCode", tachoSync, StringComparison.Ordinal);
         Assert.Contains("driver.TachoMasterDriverId", tachoSync, StringComparison.Ordinal);
         Assert.Contains("Identity order: member code, tacho card, employee number, name", tachoSync, StringComparison.Ordinal);
+        Assert.Contains("memberOwnerIds", tachoSync, StringComparison.Ordinal);
+        Assert.Contains("Skipping TachoMaster member", tachoSync, StringComparison.Ordinal);
+        Assert.Contains("conflicting member assignment(s) were skipped safely", tachoSync, StringComparison.Ordinal);
         Assert.DoesNotContain("db.Drivers.Add", tachoSync, StringComparison.Ordinal);
         Assert.DoesNotContain("new Driver", tachoSync, StringComparison.Ordinal);
     }
