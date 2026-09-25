@@ -23,14 +23,25 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         var latestEmailIntake = await db.StagedImports.AsNoTracking().Where(item => item.Source != null && (item.Source.Contains("Power Automate") || item.Source.Contains("Mailbox"))).MaxAsync(item => (DateTimeOffset?)item.ReceivedAtUtc, ct);
         return Ok(new
         {
-            roadTech = new { configured = tracking.IsConfigured, latestEventUtc = latestTracking, connected = tracking.IsConfigured && latestTracking is not null && DateTimeOffset.UtcNow - latestTracking < TimeSpan.FromMinutes(30) },
+            roadTech = new
+            {
+                configured = tracking.IsConfigured,
+                connected = tracking.IsConfigured && latestTracking is not null && DateTimeOffset.UtcNow - latestTracking < TimeSpan.FromMinutes(30),
+                latestEventUtc = latestTracking,
+                tracking = new { configured = tracking.IsConfigured },
+                tacho = new
+                {
+                    configured = tachoMaster.IsConfigured,
+                    sharedCredentials = tachoMaster.UsesSharedRoadTechCredentials,
+                    missingSettings = tachoMaster.MissingSettings
+                }
+            },
             azureMaps = new { configured = !string.IsNullOrWhiteSpace(configuration["Maps:Endpoint"]) },
             azureSms = new { configured = azureSms.IsConfigured },
             textBee = new { configured = textBee.IsConfigured, dutyPhoneLabel = textBee.DutyPhoneLabel, missingSettings = textBee.MissingSettings },
             driverSms = new { configured = sms.IsConfigured, provider = textBee.IsConfigured ? "TextBee" : azureSms.IsConfigured ? "Azure SMS" : "MightyText copy" },
             fleetio = new { configured = fleetio.IsConfigured, missingSettings = fleetio.MissingSettings },
             samsara = new { configured = samsaraClient.IsConfigured, missingSettings = samsaraClient.MissingSettings },
-            tachoMaster = new { configured = tachoMaster.IsConfigured, missingSettings = tachoMaster.MissingSettings },
             sageHr = new { configured = sageHr.IsConfigured },
             infoMailboxGraph = new
             {
