@@ -25,6 +25,11 @@ public sealed class SamsaraOptions
     // locations remain as a safe fallback for an ad-hoc stop that cannot be mapped.
     public bool EnableAddressSync { get; set; } = true;
 
+    // Route execution is consumed from Samsara's append-only audit feed. The TMS
+    // stores only the latest stop snapshot plus the feed cursor, not raw events.
+    public bool EnableRouteProgressSync { get; set; } = true;
+    public int RouteProgressPollSeconds { get; set; } = 30;
+
     public bool IsConfigured =>
         Enabled &&
         !string.IsNullOrWhiteSpace(BaseUrl) &&
