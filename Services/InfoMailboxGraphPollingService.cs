@@ -73,6 +73,7 @@ public sealed class InfoMailboxGraphPollingService(
     InfoMailboxGraphHealthState health,
     ILogger<InfoMailboxGraphPollingService> logger) : BackgroundService
 {
+    private readonly SemaphoreSlim pollGate = new(1, 1);
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -120,7 +121,20 @@ public sealed class InfoMailboxGraphPollingService(
         }
     }
 
-    internal async Task PollOnceAsync(CancellationToken ct)
+    public async Task PollOnceAsync(CancellationToken ct)
+    {
+        await pollGate.WaitAsync(ct);
+        try
+        {
+            await PollCoreAsync(ct);
+        }
+        finally
+        {
+            pollGate.Release();
+        }
+    }
+
+    private async Task PollCoreAsync(CancellationToken ct)
     {
         var credential = new ClientSecretCredential(options.TenantId, options.ClientId, options.ClientSecret);
         var token = await credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
@@ -191,7 +205,6 @@ public sealed class InfoMailboxGraphPollingService(
         string? next =
             $"users/{mailbox}/mailFolders/inbox/messages" +
             "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,body,bodyPreview,from,toRecipients,ccRecipients,importance,webLink,hasAttachments" +
-            "&$orderby=receivedDateTime asc" +
             $"&$filter={filter}&$top=50";
 
         var messages = new List<GraphMailboxMessage>();
@@ -203,7 +216,7 @@ public sealed class InfoMailboxGraphPollingService(
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             request.Headers.TryAddWithoutValidation("Prefer", "outlook.body-content-type=\"html\"");
             using var response = await client.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            await EnsureGraphSuccessAsync(response, request.RequestUri, ct);
 
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var root = document.RootElement;
@@ -235,12 +248,12 @@ public sealed class InfoMailboxGraphPollingService(
         var encodedMessageId = Uri.EscapeDataString(messageId);
         var metadataUrl =
             $"users/{mailbox}/messages/{encodedMessageId}/attachments" +
-            "?$select=id,name,contentType,size,isInline,contentId";
+            "?$select=id,name,contentType,size,isInline";
 
         using var metadataRequest = new HttpRequestMessage(HttpMethod.Get, metadataUrl);
         metadataRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         using var metadataResponse = await client.SendAsync(metadataRequest, ct);
-        metadataResponse.EnsureSuccessStatusCode();
+        await EnsureGraphSuccessAsync(metadataResponse, metadataRequest.RequestUri, ct);
 
         using var document = JsonDocument.Parse(await metadataResponse.Content.ReadAsStringAsync(ct));
         var result = new List<MailboxAttachmentRequest>();
@@ -266,7 +279,7 @@ public sealed class InfoMailboxGraphPollingService(
             using var payloadRequest = new HttpRequestMessage(HttpMethod.Get, payloadUrl);
             payloadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             using var payloadResponse = await client.SendAsync(payloadRequest, ct);
-            payloadResponse.EnsureSuccessStatusCode();
+            await EnsureGraphSuccessAsync(payloadResponse, payloadRequest.RequestUri, ct);
 
             using var payloadDocument = JsonDocument.Parse(await payloadResponse.Content.ReadAsStringAsync(ct));
             var payload = payloadDocument.RootElement;
@@ -285,6 +298,19 @@ public sealed class InfoMailboxGraphPollingService(
         }
 
         return result;
+    }
+
+    private static async Task EnsureGraphSuccessAsync(HttpResponseMessage response, Uri? requestUri, CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode) return;
+
+        var body = await response.Content.ReadAsStringAsync(ct);
+        var detail = string.IsNullOrWhiteSpace(body) ? response.ReasonPhrase : body;
+        if (detail?.Length > 600) detail = detail[..600];
+        throw new HttpRequestException(
+            $"Microsoft Graph returned {(int)response.StatusCode} ({response.ReasonPhrase}) for {requestUri?.AbsolutePath}: {detail}",
+            null,
+            response.StatusCode);
     }
 
     internal static GraphMailboxMessage? ParseMessage(JsonElement item)

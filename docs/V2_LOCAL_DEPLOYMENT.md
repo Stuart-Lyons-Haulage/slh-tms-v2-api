@@ -94,11 +94,30 @@ Existing Microsoft Entra sign-in can be retained later if useful, but the system
 ## API integrations
 
 Prefer outbound connections initiated by the TMS server:
-- Microsoft Graph / Outlook: poll/subscription handling as supported
-- TachoMaster: scheduled outbound sync
-- RoadTech: outbound telemetry/tracking retrieval
+- Microsoft Graph / Outlook: direct Info mailbox polling for order intake
+- RoadTech: one configured integration source; Falcon supplies tracking/execution evidence and TachoMaster supplies card/duty/legal-hours evidence
 - Sage HR: outbound workforce sync
 - Roadrunner: file/API export as supported
+
+### Info mailbox intake through Microsoft Graph
+
+The canonical V2 deployment polls `info@lyonshaulage.com` directly from the API host. This is the preferred inbound order-intake path for an always-on local server and does not require the planner PC or a public inbound API endpoint.
+
+The poller reuses the canonical `/api/v1/order-intake/email` logic, so parsing, duplicate handling, retained evidence and Order Review staging remain aligned.
+
+Set these values in server/container secret configuration, never in Git:
+
+```text
+Integrations__InfoMailboxGraph__Enabled=true
+Integrations__InfoMailboxGraph__TenantId=<Entra tenant id>
+Integrations__InfoMailboxGraph__ClientId=<Entra app registration client id>
+Integrations__InfoMailboxGraph__ClientSecret=<secret>
+Integrations__InfoMailboxGraph__Mailbox=info@lyonshaulage.com
+```
+
+The Entra app requires Microsoft Graph application permission `Mail.Read`, admin consent and mailbox-restricted application access. Verify `GET /api/v1/health/intake` reports a recent successful poll before retiring the previous Power Automate intake path. Authorised operators can also trigger `POST /api/v1/health/intake/poll`.
+
+During cutover, do not run two competing intake paths continuously. Keep the previous flow only as a stopped/reversible fallback until direct Graph polling is verified.
 
 This works normally behind the office firewall because the server initiates the HTTPS connection.
 
