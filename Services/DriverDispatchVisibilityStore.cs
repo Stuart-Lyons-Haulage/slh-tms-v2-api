@@ -249,6 +249,14 @@ public static class DriverDispatchVisibilityStore
     private static async Task<SageRoster> ReadSageRosterAsync(TmsDbContext db, SageHrClient sageHr, ILogger logger, CancellationToken ct)
     {
         if (!sageHr.IsConfigured) return SageRoster.Unavailable;
+
+        // The scheduled Sage sync stores the exact employee-number roster used by the
+        // rest of the system. Prefer that durable receipt so Dispatch classification
+        // cannot drift from the last successful Sage reconciliation while a live API
+        // response is paged or shaped differently.
+        var persisted = await ReadPersistedSageRosterAsync(db, logger, ct);
+        if (persisted.Available) return persisted;
+
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -271,6 +279,11 @@ public static class DriverDispatchVisibilityStore
             logger.LogWarning(exception, "Sage HR employment roster was unavailable for Driver Dispatch visibility; checking the latest successful Sage roster receipt.");
         }
 
+        return SageRoster.Unavailable;
+    }
+
+    private static async Task<SageRoster> ReadPersistedSageRosterAsync(TmsDbContext db, ILogger logger, CancellationToken ct)
+    {
         try
         {
             var receipt = await db.StagedImports.AsNoTracking()
