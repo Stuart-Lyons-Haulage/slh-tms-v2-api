@@ -241,7 +241,8 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                 {
                     [options.StopExternalIdKey] = stopExternalValue
                 },
-                ["notes"] = string.IsNullOrWhiteSpace(stop.Notes) ? null : Clip(stop.Notes, 2000)
+                ["notes"] = string.IsNullOrWhiteSpace(stop.Notes) ? null : Clip(stop.Notes, 2000),
+                ["sequenceNumber"] = stop.SequenceNumber
             };
 
             if (!string.IsNullOrWhiteSpace(existingStop?.Id))
@@ -278,7 +279,8 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             ["settings"] = new
             {
                 routeStartingCondition = NormaliseStartingCondition(options.RouteStartingCondition),
-                routeCompletionCondition = NormaliseCompletionCondition(options.RouteCompletionCondition)
+                routeCompletionCondition = NormaliseCompletionCondition(options.RouteCompletionCondition),
+                sequencingMethod = NormaliseSequencingMethod(options.SequencingMethod)
             },
             ["stops"] = stops
         };
@@ -329,6 +331,11 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         string.Equals(value, "arriveLastStop", StringComparison.OrdinalIgnoreCase)
             ? "arriveLastStop"
             : "departLastStop";
+
+    private static string NormaliseSequencingMethod(string? value) =>
+        string.Equals(value, "scheduledArrivalTime", StringComparison.OrdinalIgnoreCase)
+            ? "scheduledArrivalTime"
+            : "manual";
 
     private static SamsaraVehicle? ParseVehicle(JsonElement item)
     {
@@ -384,6 +391,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                 .Select(stop => new SamsaraRouteStopSnapshot(
                     Text(stop, "id"),
                     ExternalIds(stop),
+                    Integer(stop, "sequenceNumber"),
                     Text(stop, "name"),
                     Text(stop, "state"),
                     Text(stop, "liveSharingUrl"),
@@ -433,6 +441,13 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         if (!item.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Number)
             return null;
         return value.TryGetDouble(out var number) ? number : null;
+    }
+
+    private static long? Integer(JsonElement item, string propertyName)
+    {
+        if (!item.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Number)
+            return null;
+        return value.TryGetInt64(out var number) ? number : null;
     }
 
     private static DateTimeOffset? ParseDate(JsonElement item, string propertyName)
@@ -494,6 +509,7 @@ public sealed record SamsaraAddressUpsertResult(
 
 public sealed record SamsaraRouteStopRequest(
     Guid StopId,
+    int SequenceNumber,
     string? AddressId,
     string Address,
     double Latitude,
@@ -524,6 +540,7 @@ public sealed record SamsaraRouteSnapshot(
 public sealed record SamsaraRouteStopSnapshot(
     string? Id,
     IReadOnlyDictionary<string, string> ExternalIds,
+    long? SequenceNumber,
     string? Name,
     string? State,
     string? LiveSharingUrl,
