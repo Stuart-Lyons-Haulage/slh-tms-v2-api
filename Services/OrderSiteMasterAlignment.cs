@@ -20,7 +20,9 @@ public static class OrderSiteMasterAlignment
         string? DriverInstructions,
         string? MarketCustomer = null,
         string? MarketStand = null,
-        string? MarketSalesman = null);
+        string? MarketSalesman = null,
+        bool CollectionMatched = false,
+        bool DeliveryMatched = false);
 
     private sealed record MarketContext(string Market, string Customer, string? Stand, string? Salesman);
     private sealed record SiteCacheEntry(DateTimeOffset ExpiresAtUtc, IReadOnlyList<Site> Sites);
@@ -104,7 +106,9 @@ public static class OrderSiteMasterAlignment
             instructions,
             marketContext?.Customer,
             marketContext?.Stand,
-            marketContext?.Salesman);
+            marketContext?.Salesman,
+            collection is not null,
+            delivery is not null);
     }
 
     private static async Task<List<Site>> LoadActiveSitesAsync(TmsDbContext db, CancellationToken ct)
