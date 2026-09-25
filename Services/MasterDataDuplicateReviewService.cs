@@ -39,6 +39,7 @@ public static class MasterDataDuplicateReviewService
         var candidates = type switch
         {
             "site" or "sites" => await FindSiteCandidatesAsync(db, ct),
+            "customer" or "customers" => await FindCustomerCandidatesAsync(db, ct),
             "driver" or "drivers" => await FindDriverCandidatesAsync(db, ct),
             "vehicle" or "vehicles" => await FindVehicleCandidatesAsync(db, ct),
             "trailer" or "trailers" => await FindTrailerCandidatesAsync(db, ct),
@@ -76,6 +77,7 @@ public static class MasterDataDuplicateReviewService
         return type switch
         {
             "site" or "sites" => await MergeSitesAsync(db, request, actor, ct),
+            "customer" or "customers" => await MergeCustomersAsync(db, request, actor, ct),
             "driver" or "drivers" => await MergeDriversAsync(db, request, actor, ct),
             "vehicle" or "vehicles" => await MergeVehiclesAsync(db, request, actor, ct),
             "trailer" or "trailers" => await MergeTrailersAsync(db, request, actor, ct),
@@ -246,6 +248,29 @@ public static class MasterDataDuplicateReviewService
             .ToList();
     }
 
+    private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindCustomerCandidatesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var rows = await db.Customers.AsNoTracking().Where(row => row.Active).ToListAsync(ct);
+        var groups = new Dictionary<string, HashSet<Customer>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var row in rows)
+        {
+            var code = Normalise(row.Code);
+            var name = Normalise(row.Name);
+            var tradingName = Normalise(row.TradingName);
+
+            if (code.Length >= 2) Add(groups, $"customer-code:{code}", row);
+            if (name.Length >= 5) Add(groups, $"customer-name:{name}", row);
+            if (tradingName.Length >= 5) Add(groups, $"customer-trading-name:{tradingName}", row);
+        }
+
+        return DistinctGroups(groups.Values, row => row.Id)
+            .Select(BuildCustomerCandidate)
+            .OrderByDescending(candidate => candidate.Confidence)
+            .ThenBy(candidate => candidate.Canonical.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindVehicleCandidatesAsync(TmsDbContext db, CancellationToken ct)
     {
         var rows = await db.Vehicles.AsNoTracking().Where(row => row.Active).ToListAsync(ct);
@@ -352,6 +377,63 @@ public static class MasterDataDuplicateReviewService
 
         messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {geofences.Count} geofence(s), {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, messages);
+    }
+
+    private static async Task<MasterDataDuplicateMergeResult> MergeCustomersAsync(TmsDbContext db, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct)
+    {
+        var canonical = await db.Customers.FirstOrDefaultAsync(row => row.Id == request.CanonicalId && row.Active, ct);
+        if (canonical is null) return new MasterDataDuplicateMergeResult(0, 0, ["Canonical customer was not found."]);
+
+        var duplicates = await db.Customers.Where(row => request.DuplicateIds.Contains(row.Id) && row.Id != canonical.Id && row.Active).ToListAsync(ct);
+        if (duplicates.Count == 0) return new MasterDataDuplicateMergeResult(0, 1, ["No active customer duplicates were found to merge."]);
+
+        var duplicateCodes = duplicates.Select(row => row.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var canonicalCode = canonical.Code.Trim();
+        foreach (var duplicate in duplicates)
+        {
+            canonical.TradingName = Preserve(canonical.TradingName, duplicate.TradingName);
+            canonical.AccountOwner = Preserve(canonical.AccountOwner, duplicate.AccountOwner);
+            canonical.ServiceNotes = Preserve(canonical.ServiceNotes, duplicate.ServiceNotes);
+            canonical.DefaultSiteCode = Preserve(canonical.DefaultSiteCode, duplicate.DefaultSiteCode);
+            duplicate.Active = false;
+        }
+
+        var contacts = await db.CustomerContacts.Where(row => duplicateCodes.Contains(row.CustomerCode)).ToListAsync(ct);
+        foreach (var contact in contacts) contact.CustomerCode = canonicalCode;
+        var routes = await db.CustomerEmailRoutes.Where(row => duplicateCodes.Contains(row.CustomerCode)).ToListAsync(ct);
+        foreach (var route in routes) route.CustomerCode = canonicalCode;
+        var sites = await db.Sites.Where(row => row.CustomerCode != null && duplicateCodes.Contains(row.CustomerCode)).ToListAsync(ct);
+        foreach (var site in sites) site.CustomerCode = canonicalCode;
+        var movements = await db.OrderMovements.Where(row => duplicateCodes.Contains(row.CustomerCode)).ToListAsync(ct);
+        foreach (var movement in movements) movement.CustomerCode = canonicalCode;
+        var orders = await db.TransportOrders.Where(row => duplicateCodes.Contains(row.CustomerCode)).ToListAsync(ct);
+        foreach (var order in orders) order.CustomerCode = canonicalCode;
+
+        foreach (var duplicate in duplicates)
+            await MasterDetailStore.SaveAsync(db, "customer", duplicate.Code, JsonSerializer.Serialize(duplicate), "Duplicate merge archived source customer", actor, ct);
+
+        db.MasterDataAudits.Add(new MasterDataAudit
+        {
+            EntityType = "Customer",
+            EntityId = canonical.Id,
+            Action = "DuplicateMerge",
+            ChangedBy = actor,
+            ChangesJson = JsonSerializer.Serialize(new
+            {
+                canonical = canonical.Code,
+                merged = duplicates.Select(row => row.Code),
+                request.Note,
+                contactsReassigned = contacts.Count,
+                routesReassigned = routes.Count,
+                sitesReassigned = sites.Count,
+                movementsReassigned = movements.Count,
+                ordersReassigned = orders.Count
+            })
+        });
+        await db.SaveChangesAsync(ct);
+
+        return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1,
+            [$"Merged {duplicates.Count} customer duplicate(s) into {canonical.Name}; reassigned {contacts.Count + routes.Count + sites.Count + movements.Count + orders.Count} linked record(s)."]);
     }
 
     private static async Task<MasterDataDuplicateMergeResult> MergeDriversAsync(TmsDbContext db, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct)
@@ -712,10 +794,31 @@ public static class MasterDataDuplicateReviewService
     }
 
     private static MasterDataDuplicateRecord SiteRecord(Site row) => new(row.Id, row.ExternalCode, row.Name, row.CollectionAddress, ExtractPostcode(row.CollectionAddress), row.Active, new Dictionary<string, object?> { ["customerCode"] = row.CustomerCode, ["driverTextName"] = row.DriverTextName, ["collectionInstructions"] = row.CollectionInstructions, ["mapLink"] = row.MapLink, ["latitude"] = row.Latitude, ["longitude"] = row.Longitude, ["aliases"] = row.Aliases, ["region"] = row.OperationalRegion });
+    private static MasterDataDuplicateRecord CustomerRecord(Customer row) => new(row.Id, row.Code, row.Name, null, null, row.Active, new Dictionary<string, object?> { ["tradingName"] = row.TradingName, ["accountOwner"] = row.AccountOwner, ["serviceNotes"] = row.ServiceNotes, ["defaultSiteCode"] = row.DefaultSiteCode });
     private static MasterDataDuplicateRecord DriverRecord(Driver row) => new(row.Id, row.EmployeeNumber, row.DisplayName, null, null, row.Active, new Dictionary<string, object?> { ["tachoMasterDriverId"] = row.TachoMasterDriverId, ["tachoCardNumber"] = row.TachoCardNumber, ["mobileNumber"] = row.MobileNumber, ["driverType"] = row.DriverType, ["driverGroup"] = row.DriverGroup, ["skills"] = row.Skills, ["licenceNumber"] = row.DrivingLicenceNumber });
     private static MasterDataDuplicateRecord VehicleRecord(Vehicle row) => new(row.Id, row.Registration, row.Registration, null, null, row.Active, new Dictionary<string, object?> { ["fleetNumber"] = row.FleetNumber, ["abbreviation"] = row.Abbreviation, ["fuelProvider"] = row.FuelProvider, ["cabMobile"] = row.CabMobile, ["fuelPin"] = row.FuelPin, ["shellCard"] = row.ShellCard, ["bpRedCard"] = row.BpRedCard, ["bpPlainCard"] = row.BpPlainCard, ["fleetioId"] = row.FleetioId });
     private static MasterDataDuplicateRecord TrailerRecord(Trailer row) => new(row.Id, row.TrailerNumber, row.TrailerNumber, null, null, row.Active, new Dictionary<string, object?> { ["type"] = row.Type, ["standardCapacity"] = row.StandardCapacity, ["euroCapacity"] = row.EuroCapacity });
     private static MasterDataDuplicateRecord MarketRecord(MarketContact row) => new(row.Id, row.MarketKey ?? row.Id.ToString("N"), $"{CanonicalMarket(row.Market)} / {Clean(row.Name) ?? row.Name}", null, null, row.Active, new Dictionary<string, object?> { ["market"] = CanonicalMarket(row.Market), ["standOrLocation"] = Clean(row.StandOrLocation) ?? InferStand(row.Name), ["salesman"] = Clean(row.Salesman), ["sender"] = Clean(row.Sender) });
+    private static MasterDataDuplicateCandidate BuildCustomerCandidate(IReadOnlyList<Customer> group)
+    {
+        var canonical = group
+            .OrderByDescending(row => new[] { row.Code, row.Name, row.TradingName, row.AccountOwner, row.ServiceNotes, row.DefaultSiteCode }.Count(value => !string.IsNullOrWhiteSpace(value)))
+            .ThenBy(row => row.Name)
+            .First();
+        var duplicates = group.Where(row => row.Id != canonical.Id).ToList();
+        var sameCode = duplicates.Any(row => Normalise(row.Code) == Normalise(canonical.Code));
+        var sameName = duplicates.Any(row => Normalise(row.Name) == Normalise(canonical.Name));
+        var confidence = sameCode ? 99 : sameName ? 94 : 90;
+        return new MasterDataDuplicateCandidate(
+            CandidateId($"customer:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
+            "customers",
+            confidence,
+            sameCode ? "Same customer code after normalising spaces and punctuation." : sameName ? "Same customer name after normalising spaces and punctuation." : "Shared trading-name identity; review before merging.",
+            sameCode,
+            CustomerRecord(canonical),
+            duplicates.Select(CustomerRecord).ToList(),
+            ["tradingName", "accountOwner", "serviceNotes", "defaultSiteCode", "linked contacts/routes/sites/orders"]);
+    }
     private static int SiteCompleteness(Site row) => new object?[] { row.CollectionAddress, row.MapLink, row.Latitude, row.Longitude, row.CollectionInstructions, row.DriverTextName, row.Aliases, row.OperationalRegion, row.CustomerCode }.Count(value => value is not null && !string.IsNullOrWhiteSpace(value.ToString()));
     private static string MergeAliases(Site canonical, IReadOnlyCollection<Site> duplicates) => string.Join(", ", new[] { canonical.Name, canonical.DriverTextName, canonical.Aliases }.Concat(duplicates.SelectMany(row => new[] { row.Name, row.DriverTextName, row.Aliases, row.ExternalCode })).Where(value => !string.IsNullOrWhiteSpace(value)).SelectMany(SplitAliases).Distinct(StringComparer.OrdinalIgnoreCase));
     private static string CandidateId(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..16];
