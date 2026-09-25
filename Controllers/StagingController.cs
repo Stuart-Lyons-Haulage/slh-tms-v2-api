@@ -158,6 +158,12 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         var staged = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, ct);
         if (staged is null) return NotFound();
+        if (staged.EntityType == "order")
+        {
+            var readinessIssue = await OrderReadinessIssue(staged, ct);
+            if (readinessIssue is not null)
+                return BadRequest(new ErrorResponse("order_not_ready", readinessIssue, HttpContext.TraceIdentifier));
+        }
         if (staged.EntityType == "order" && IsExplicitPreOrder(staged.PayloadJson))
         {
             return BadRequest(new ErrorResponse(
