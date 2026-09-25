@@ -14,13 +14,13 @@ namespace Slh.Tms.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/v1/health/intake")]
-[AllowAnonymous]
 public sealed class IntakePipelineHealthController(
     TmsDbContext db,
     InfoMailboxGraphOptions graphOptions,
-    InfoMailboxGraphHealthState graphHealth) : ControllerBase
+    InfoMailboxGraphHealthState graphHealth,
+    InfoMailboxGraphPollingService graphPoller) : ControllerBase
 {
-    [HttpGet]
+    [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get(CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
@@ -90,6 +90,23 @@ public sealed class IntakePipelineHealthController(
                 stale = graphPollStale
             },
             checkedAtUtc = now
+        });
+    }
+
+    [HttpPost("poll"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> PollNow(CancellationToken ct)
+    {
+        if (!graphOptions.Enabled || !graphOptions.IsConfigured)
+            return BadRequest(new { message = "Microsoft Graph mailbox polling is not fully configured." });
+
+        await graphPoller.PollOnceAsync(ct);
+        return Ok(new
+        {
+            message = "Graph mailbox poll completed; Order Review is being refreshed from the canonical staging queue.",
+            graphHealth.LastAttemptUtc,
+            graphHealth.LastSuccessUtc,
+            graphHealth.LastMessagesSeen,
+            graphHealth.LastMessagesIngested
         });
     }
 }
