@@ -1115,7 +1115,7 @@ public sealed class TachoDriverMasterBackgroundService(
     // by TachoDriverMasterSyncJobService which runs the orchestrator — the same code path
     // used by manual syncs triggered from the UI. This replaces the old direct SyncAsync
     // call which bypassed the orchestrator and used a separate (now stale) code path.
-    private static readonly TimeSpan FullSyncInterval = TimeSpan.FromMinutes(60);
+    private static readonly TimeSpan FullSyncInterval = TimeSpan.FromMinutes(20);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
