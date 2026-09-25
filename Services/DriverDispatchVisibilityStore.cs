@@ -255,7 +255,11 @@ public static class DriverDispatchVisibilityStore
         // cannot drift from the last successful Sage reconciliation while a live API
         // response is paged or shaped differently.
         var persisted = await ReadPersistedSageRosterAsync(db, logger, ct);
-        if (persisted.Available) return persisted;
+        if (persisted.Available)
+        {
+            logger.LogInformation("Driver Dispatch is using the persisted Sage HR roster with {DriverCount} employed driver employee number(s).", persisted.EmployeeNumbers.Count);
+            return persisted;
+        }
 
         try
         {
