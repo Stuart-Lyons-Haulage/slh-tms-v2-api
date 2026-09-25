@@ -134,7 +134,8 @@ builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
 builder.Services.AddHostedService<NightlyArchiveBackgroundService>();
-builder.Services.AddHostedService<InfoMailboxGraphPollingService>();
+builder.Services.AddSingleton<InfoMailboxGraphPollingService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<InfoMailboxGraphPollingService>());
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
