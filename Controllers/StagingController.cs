@@ -158,7 +158,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         var staged = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, ct);
         if (staged is null) return NotFound();
-        if (staged.EntityType == "order")
+        if (staged.EntityType == "order" && RequiresMasterReadyApproval(staged))
         {
             var readinessIssue = await OrderReadinessIssue(staged, ct);
             if (readinessIssue is not null)
@@ -211,6 +211,25 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
             JsonValueKind.String => decimal.TryParse(pallets.GetString(), out var number) && number <= 0,
             _ => false
         };
+    }
+
+    private static bool RequiresMasterReadyApproval(StagedImport staged)
+    {
+        var source = staged.Source ?? string.Empty;
+        var mailboxLane =
+            source.Contains("Info mailbox", StringComparison.OrdinalIgnoreCase) ||
+            source.Contains("PowerAutomate/InfoMailbox", StringComparison.OrdinalIgnoreCase);
+        if (!mailboxLane) return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(staged.PayloadJson);
+            return TryGetProperty(document.RootElement, "plannerReady", out _);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private async Task<string?> OrderReadinessIssue(StagedImport staged, CancellationToken ct)
