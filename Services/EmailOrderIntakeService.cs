@@ -391,11 +391,17 @@ public sealed class EmailOrderIntakeService
         var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);
         if (barfootsWaitrose.Count > 0) return barfootsWaitrose;
 
+        var aldiShippers = ParseAldiShippersBody(request, body, sourceText, receivedAt);
+        if (aldiShippers.Count > 0) return aldiShippers;
+
         var labelled = ParseLabelledBodyOrder(request, rawPo, body, sourceText, receivedAt);
         if (labelled is not null) return [labelled];
 
         var doubleHWaitrose = ParseDoubleHWaitroseColumnTable(request, rawPo, body, sourceText, receivedAt);
         if (doubleHWaitrose.Count > 0) return doubleHWaitrose;
+
+        var doubleHRequest = ParseDoubleHCollectionRequest(request, body, sourceText, receivedAt);
+        if (doubleHRequest.Count > 0) return doubleHRequest;
 
         var depotSplit = ParseAndoverAvonmouthSplit(request, rawPo, body, receivedAt);
         if (depotSplit.Count > 0) return depotSplit;
@@ -582,6 +588,98 @@ public sealed class EmailOrderIntakeService
                 "Waitrose depot delivery",
                 []))
             .ToList();
+    }
+
+    private static List<ParsedEmailOrder> ParseAldiShippersBody(
+        MailboxEmailIntakeRequest request,
+        string body,
+        string sourceText,
+        DateTimeOffset receivedAt)
+    {
+        if (!sourceText.Contains("Aldi Shippers", StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(body, @"\bcollect\s+shippers\b", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(body, @"\bdeliver\s+to\b", RegexOptions.IgnoreCase))
+            return [];
+
+        var date = ExtractDateAfter(body, @"collect\s+shippers[^0-9\r\n]*") ?? ExtractDate(sourceText, receivedAt);
+        if (date is null) return [];
+
+        var collectionMatch = Regex.Match(body,
+            @"\bcollect\s+shippers[^\r\n]*?\bfrom\s+(?<site>[^\r\n.]+?)(?:\s+depot)?\s+and\s+deliver\s+to\b",
+            RegexOptions.IgnoreCase);
+        var destinationMatch = Regex.Match(body,
+            @"\bdeliver\s+to\s+(?<destination>[^.\r\n]+)",
+            RegexOptions.IgnoreCase);
+        if (!collectionMatch.Success || !destinationMatch.Success) return [];
+
+        var collection = CleanSourceLine(collectionMatch.Groups["site"].Value);
+        var destination = CleanSourceLine(destinationMatch.Groups["destination"].Value);
+        var address = ExtractLabelBlock(body, "toaddress", "deliveryaddress");
+        var pallets = ExtractInt(TotalPalletsRegex, sourceText, "qty")
+                      ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
+                      ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
+        var referenceSource = string.Join("\n", request.Subject, body,
+            (request.Attachments ?? []).Select(item => item.Name));
+        var referenceMatch = Regex.Match(referenceSource,
+            @"(?:order\s+confirmation|order\s+ref(?:erence)?|\bref(?:erence)?)\s*[:#-]?\s*(?<ref>\d{6,})",
+            RegexOptions.IgnoreCase);
+        var reference = referenceMatch.Success
+            ? referenceMatch.Groups["ref"].Value
+            : Regex.Match(referenceSource, @"\b\d{6,}\b").Value;
+
+        var warnings = new List<string>();
+        if (pallets is null or <= 0)
+            warnings.Add("Aldi Shippers source contains a route and order reference but no pallet quantity; confirm quantity before approval.");
+        if (string.IsNullOrWhiteSpace(reference))
+            warnings.Add("Aldi Shippers order reference was not identified; confirm the source reference before approval.");
+
+        return [BuildIncompleteStructuredOrder(
+            request,
+            "aldi-shippers-body-1",
+            "BARFOOTS",
+            string.IsNullOrWhiteSpace(reference) ? null : reference,
+            date.Value,
+            date.Value,
+            pallets,
+            collection,
+            destination,
+            "Aldi Shippers collection",
+            warnings,
+            address)];
+    }
+
+    private static List<ParsedEmailOrder> ParseDoubleHCollectionRequest(
+        MailboxEmailIntakeRequest request,
+        string body,
+        string sourceText,
+        DateTimeOffset receivedAt)
+    {
+        if (!string.Equals(SenderDomain(request.SenderAddress), "doubleh.co.uk", StringComparison.OrdinalIgnoreCase) &&
+            !sourceText.Contains("Double H", StringComparison.OrdinalIgnoreCase))
+            return [];
+        if (!Regex.IsMatch(body, @"(?im)^\s*collection\s+from\s*[–—-]", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(body, @"(?im)^\s*deliver\s+to\s*[–—-]", RegexOptions.IgnoreCase))
+            return [];
+
+        var date = ExtractDate(sourceText, receivedAt);
+        if (date is null) return [];
+        var collection = Regex.Match(body, @"(?im)^\s*collection\s+from\s*[–—-]\s*(?<value>.+)$").Groups["value"].Value.Trim();
+        var destination = Regex.Match(body, @"(?im)^\s*deliver\s+to\s*[–—-]\s*(?<value>.+)$").Groups["value"].Value.Trim();
+        if (string.IsNullOrWhiteSpace(collection) || string.IsNullOrWhiteSpace(destination)) return [];
+
+        return [BuildIncompleteStructuredOrder(
+            request,
+            "doubleh-body-1",
+            "DOUBLEH",
+            ExtractPo(sourceText),
+            date.Value,
+            date.Value,
+            null,
+            CleanSourceLine(collection),
+            CleanSourceLine(destination),
+            "Double H collection request",
+            ["Pallet quantity was not supplied in the Double H request; confirm before approval."],
+            CleanSourceLine(destination))];
     }
 
     private static List<ParsedEmailOrder> ParseAttachmentDrivenRows(
@@ -1485,6 +1583,55 @@ public sealed class EmailOrderIntakeService
                 "C & J Hayward pallet collection",
                 string.IsNullOrWhiteSpace(rawPo) ? ["No customer PO/reference was found; a stable email reference was generated and should be checked before approval."] : []))
             .ToList();
+    }
+
+    private static ParsedEmailOrder BuildIncompleteStructuredOrder(
+        MailboxEmailIntakeRequest request,
+        string sourceKey,
+        string customer,
+        string? rawPo,
+        DateOnly collectionDate,
+        DateOnly deliveryDate,
+        int? pallets,
+        string? collection,
+        string destination,
+        string jobType,
+        IReadOnlyList<string> warnings,
+        string? deliveryAddress = null)
+    {
+        var baseReference = rawPo ?? StableEmailReference(request.MessageId);
+        var orderReference = BuildRowReference(baseReference, customer, destination, deliveryDate, 1);
+        var naturalKey = $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{customer}|{collectionDate:yyyy-MM-dd}|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}";
+        var instructions = BuildInstructions(rawPo, null, null, null, request, null, warnings, jobType, deliveryAddress: deliveryAddress);
+        var payload = new Dictionary<string, object?>
+        {
+            ["poNumber"] = orderReference,
+            ["customerCode"] = customer,
+            ["collectionDate"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["deliveryDate"] = deliveryDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["pallets"] = pallets,
+            ["sellerName"] = collection,
+            ["marketName"] = customer,
+            ["stallNumber"] = destination,
+            ["deliveryAddress"] = deliveryAddress,
+            ["driverInstructions"] = instructions,
+            ["customerPo"] = rawPo,
+            ["jobType"] = jobType,
+            ["plannerReady"] = false,
+            ["intakeStatus"] = "PendingReview",
+            ["sourceMessageId"] = request.MessageId,
+            ["sourceInternetMessageId"] = request.InternetMessageId,
+            ["sourceSender"] = request.SenderAddress,
+            ["sourceSenderName"] = request.SenderName,
+            ["sourceSubject"] = request.Subject,
+            ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+            ["sourceWebLink"] = request.WebLink,
+            ["intakeNaturalKey"] = naturalKey,
+            ["intakeConfidence"] = "Low",
+            ["intakeWarnings"] = warnings,
+            ["intakeParser"] = sourceKey
+        };
+        return new ParsedEmailOrder(sourceKey, naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
 
     private static ParsedEmailOrder BuildStructuredOrder(

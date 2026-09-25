@@ -241,6 +241,58 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void DoubleHBodyOnlyRequest_IsStagedForReviewWhenQuantityIsMissing()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-doubleh-body", null, "info@lyonshaulage.com", "Ramas@doubleh.co.uk", "Ramas",
+            "Week 40 (W/C 28.09) Collection Requests Double H",
+            DateTimeOffset.Parse("2026-09-24T13:42:21Z"),
+            "Hi Guys,\n\nPlease see collection request for Wednesday 30th next week (W/C 28.09)\n\n" +
+            "Collection from – Double H New Milton, 195 gore road, BH25 5NG.\n\n" +
+            "Deliver to – Flower Freight LTD, Pinetops, Theobalds Park Rd, Enfield EN2 9B",
+            null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("DOUBLEH", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-09-28", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Double H New Milton, 195 gore road, BH25 5NG.", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Flower Freight LTD, Pinetops, Theobalds Park Rd, Enfield EN2 9B", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(JsonValueKind.Null, order.Payload.GetProperty("pallets").ValueKind);
+        Assert.Equal("PendingReview", order.Payload.GetProperty("intakeStatus").GetString());
+        Assert.Contains(order.Warnings, warning => warning.Contains("quantity", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void AldiShippersBodyAndAttachmentReference_IsStagedForReview()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-aldi-shippers", null, "info@lyonshaulage.com", "Grazyna.Zalewska@barfoots.co.uk", "Barfoots",
+            "Aldi Shippers collection on 28.09 from Bedford to Jonny Kok, 0228591156 28.09.2026",
+            DateTimeOffset.Parse("2026-09-25T12:10:53Z"),
+            "Hi,\n\nPlease collect shippers on 28.09 from Bedford depot and deliver to Jonny Kok.\n" +
+            "To address:\nJohn Kok\nThe Vineries Nursery\n132 Wisbech Road\nOutwell\nCambridgeshire\nPE14 8PF\n\nHis working hours are 7AM-6PM",
+            null, null,
+            [
+                new MailboxAttachmentRequest(
+                    "Order confirmation 0228591156 28.09.2026.PDF",
+                    "application/pdf",
+                    null,
+                    false,
+                    null,
+                    100,
+                    Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("order confirmation 0228591156")))
+            ]));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("BARFOOTS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Bedford", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Jonny Kok", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("0228591156", order.Payload.GetProperty("customerPo").GetString());
+        Assert.Equal(JsonValueKind.Null, order.Payload.GetProperty("pallets").ValueKind);
+        Assert.Equal("PendingReview", order.Payload.GetProperty("intakeStatus").GetString());
+    }
+
+    [Fact]
     public void BarfootsWaitroseChainedWaves_StageEachWaveWithInheritedCollectionSite()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

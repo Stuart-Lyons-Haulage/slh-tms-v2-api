@@ -312,6 +312,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             ?? nwfParser.TryParse(request)
             ?? sainsburyParser.TryParse(request)
             ?? specialistParser.TryParse(request)
+            ?? (IsVerifiedGenericIntakeSource(request)
+                ? new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct))
+                : null)
             ?? new EmailIntakeParseResult(
                 [],
                 [],
@@ -340,6 +343,22 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 "NWF crate/tray load matched an existing staged order; source evidence retained without creating another order.");
 
         return enriched with { Orders = ordersToStage };
+    }
+
+    private static bool IsVerifiedGenericIntakeSource(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
+            string.Join("\n", (request.Attachments ?? []).Select(item => item.Name)));
+        return sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase)
+            || sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)
+            || sender.EndsWith("@doubleh.co.uk", StringComparison.OrdinalIgnoreCase)
+            || sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase)
+            || sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase)
+            || sender.EndsWith("@hillsplants.com", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Barfoots", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Summer Berry", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Double H", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsSimplifiedIntakeSource(MailboxEmailIntakeRequest request)
@@ -665,6 +684,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||
             (request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase))
             return "BARFOOTS";
+        if (value.Contains("Summer Berry", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "TSBC";
+        if (value.Contains("Double H", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@doubleh.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "DOUBLEH";
+        if (value.Contains("Sainsbury", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@sainsburys.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "SAINSBURY";
         if (value.Contains("Aldi", StringComparison.OrdinalIgnoreCase)) return "ALDI";
         if (value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) || value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase)) return "WAITROSE";
         if (value.Contains("Morrisons", StringComparison.OrdinalIgnoreCase)) return "MORRISONS";

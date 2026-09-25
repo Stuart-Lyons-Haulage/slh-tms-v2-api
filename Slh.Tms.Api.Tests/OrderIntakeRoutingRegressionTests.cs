@@ -165,7 +165,7 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
     }
 
     [Fact]
-    public async Task Preview_endpoint_retains_historic_Barfoots_free_text_as_evidence_only()
+    public async Task Preview_endpoint_parses_verified_Barfoots_wave_format()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
         var request = new MailboxEmailIntakeRequest(
@@ -181,13 +181,12 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var root = await response.Content.ReadFromJsonAsync<JsonElement>();
 
-        Assert.True(root.GetProperty("ignored").GetBoolean());
-        Assert.Equal(0, root.GetProperty("orderCount").GetInt32());
-        Assert.Contains("No verified order format matched", root.GetProperty("ignoredReason").GetString());
+        Assert.False(root.GetProperty("ignored").GetBoolean());
+        Assert.Equal(4, root.GetProperty("orderCount").GetInt32());
     }
 
     [Fact]
-    public async Task Preview_endpoint_retains_historic_SummerBerry_free_text_as_evidence_only()
+    public async Task Preview_endpoint_parses_verified_SummerBerry_coop_format()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
         var request = new MailboxEmailIntakeRequest(
@@ -202,8 +201,7 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var root = await response.Content.ReadFromJsonAsync<JsonElement>();
 
-        Assert.True(root.GetProperty("ignored").GetBoolean());
-        Assert.Equal(0, root.GetProperty("orderCount").GetInt32());
-        Assert.Contains("No verified order format matched", root.GetProperty("ignoredReason").GetString());
+        Assert.False(root.GetProperty("ignored").GetBoolean());
+        Assert.Equal(1, root.GetProperty("orderCount").GetInt32());
     }
 }
