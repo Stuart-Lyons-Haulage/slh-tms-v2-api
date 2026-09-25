@@ -178,33 +178,6 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         catch (DbUpdateException ex) { return BadRequest(new ErrorResponse("staging_promotion_failed", $"The order could not be approved because the planning schema is incomplete: {ex.GetBaseException().Message}", HttpContext.TraceIdentifier)); }
     }
 
-    private async Task<string?> OrderReadinessIssue(StagedImport staged, CancellationToken ct)
-    {
-        using var document = JsonDocument.Parse(staged.PayloadJson);
-        var payload = document.RootElement;
-        var reference = Text(payload, "poNumber");
-        var customerCode = Text(payload, "customerCode");
-        var collection = Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
-        var delivery = Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "destination") ?? Text(payload, "stallNumber");
-        if (string.IsNullOrWhiteSpace(reference)) return "Order reference is missing.";
-        if (string.IsNullOrWhiteSpace(customerCode)) return "Customer is missing from the order master data.";
-        if (!await db.Customers.AsNoTracking().AnyAsync(item => item.Active && item.Code == customerCode, ct)) return $"Customer {customerCode} is not present in active Customer Master.";
-        if (!DateOnly.TryParse(Text(payload, "collectionDate"), out _)) return "Collection date is missing or invalid.";
-        if (string.IsNullOrWhiteSpace(collection)) return "Collection point is missing.";
-        if (string.IsNullOrWhiteSpace(delivery)) return "Delivery point is missing.";
-        var pallets = Text(payload, "pallets") ?? Text(payload, "palletQty") ?? Text(payload, "palletQuantity") ?? Text(payload, "quantity");
-        var jobType = Text(payload, "jobType") ?? string.Empty;
-        var backhaul = jobType.Contains("backhaul", StringComparison.OrdinalIgnoreCase) || jobType.Contains("backload", StringComparison.OrdinalIgnoreCase);
-        if (!backhaul && (!int.TryParse(pallets, out var palletCount) || palletCount <= 0)) return "Pallet quantity is missing or not greater than zero.";
-        if (!IsTrue(payload, "plannerReady")) return "The parser has not marked this order planner-ready; review the source evidence first.";
-        if (!string.Equals(Text(payload, "intakeConfidence"), "High", StringComparison.OrdinalIgnoreCase)) return "Intake confidence is not High; explicit source review is required.";
-        if (payload.TryGetProperty("intakeWarnings", out var warnings) && warnings.ValueKind == JsonValueKind.Array && warnings.GetArrayLength() > 0) return "Source/intake warnings remain; resolve them before approval.";
-        var alignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload, ct);
-        if (!alignment.CollectionMatched) return $"Collection point '{collection}' is not matched to active Site Master.";
-        if (!alignment.DeliveryMatched) return $"Delivery point '{delivery}' is not matched to active Site Master or Market Master.";
-        return null;
-    }
-
     [HttpPost("{id:guid}/reject"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Reject(Guid id, ReviewRequest request, CancellationToken ct)
     {
@@ -334,26 +307,6 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
             return false;
         }
     }
-
-    private static string? Text(JsonElement payload, string name)
-    {
-        if (!payload.TryGetProperty(name, out var value))
-        {
-            foreach (var property in payload.EnumerateObject())
-            {
-                if (!string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
-                value = property.Value;
-                break;
-            }
-        }
-        return value.ValueKind == JsonValueKind.String ? value.GetString()?.Trim() :
-            value.ValueKind == JsonValueKind.Number ? value.GetRawText() : null;
-    }
-
-    private static bool IsTrue(JsonElement payload, string name) =>
-        TryGetProperty(payload, name, out var value) &&
-        (value.ValueKind == JsonValueKind.True ||
-         value.ValueKind == JsonValueKind.String && bool.TryParse(value.GetString(), out var parsed) && parsed);
 
     private static bool TryGetProperty(JsonElement payload, string name, out JsonElement value)
     {
