@@ -96,6 +96,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             {
                 order.Id,
                 order.Reference,
+                lineNote = detail?.LineNote ?? $"Ref: {order.Reference}",
                 order.CustomerCode,
                 order.CollectionDate,
                 order.DeliveryDate,
@@ -339,7 +340,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 var routeType = Text(root, "suggestedRouteType", "routeTiming");
                 var planningReason = Text(root, "planningWindowReason", "pmReason");
                 var runsOvernight = Bool(root, "runsOvernight", "overnightRoute");
-                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight);
+                var lineNote = BuildOrderReferenceNote(root, reference);
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight, lineNote);
             }
             catch (JsonException) { }
         }
@@ -379,7 +381,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 var sequence = existingStops.Count == 0 ? 1 : existingStops.Max(x => x.Sequence) + 1;
                 if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !existingStops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
                     db.LoadStops.Add(new LoadStop { LoadId = load.Id, Sequence = sequence++, Name = $"Collect · {collection}" });
-                db.LoadStops.Add(new LoadStop { LoadId = load.Id, OrderId = order.Id, Sequence = sequence, Name = $"Deliver · {order.CustomerCode} · {destination}" });
+                db.LoadStops.Add(new LoadStop { LoadId = load.Id, OrderId = order.Id, Sequence = sequence, Name = $"Deliver · {order.CustomerCode} · {destination}", PlannerNote = detail?.LineNote ?? $"Ref: {order.Reference}" });
                 await db.SaveChangesAsync(ct);
                 return;
             }
@@ -390,7 +392,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         if (registered is null) return;
         if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !registered.Stops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
             registered.Stops.Add(new LoadStop { LoadId = registered.Id, Sequence = registered.Stops.Count + 1, Name = $"Collect · {collection}" });
-        registered.Stops.Add(new LoadStop { LoadId = registered.Id, OrderId = order.Id, Sequence = registered.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}" });
+        registered.Stops.Add(new LoadStop { LoadId = registered.Id, OrderId = order.Id, Sequence = registered.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}", PlannerNote = detail?.LineNote ?? $"Ref: {order.Reference}" });
         await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
     }
 
@@ -626,12 +628,51 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         return null;
     }
 
+    private static string BuildOrderReferenceNote(JsonElement root, string primaryReference)
+    {
+        var references = new List<(string Label, string Value)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string label, string? value)
+        {
+            var clean = value?.Trim();
+            if (string.IsNullOrWhiteSpace(clean)) return;
+            var key = Normalise(clean);
+            if (key.Length == 0 || !seen.Add(key)) return;
+            references.Add((label, clean));
+        }
+
+        Add("Ref", primaryReference);
+        foreach (var property in root.EnumerateObject())
+        {
+            var key = Normalise(property.Name);
+            var label = key switch
+            {
+                "XNUMBER" or "XNO" or "XREF" or "XREFERENCE" => "X No",
+                "CUSTOMERREFERENCE" or "CUSTOMERREF" => "Customer Ref",
+                "BOOKINGREFERENCE" or "BOOKINGREF" => "Booking Ref",
+                "LOADREFERENCE" or "LOADREF" => "Load Ref",
+                "CONSIGNMENTREFERENCE" or "CONSIGNMENTREF" => "Consignment Ref",
+                "PONUMBER" or "PO" => "PO",
+                "ORDERREFERENCE" or "ORDERREF" or "REFERENCENUMBER" or "REFERENCE" => "Ref",
+                _ => null
+            };
+            if (label is null) continue;
+            var value = property.Value.ValueKind == JsonValueKind.String
+                ? property.Value.GetString()
+                : property.Value.ValueKind is JsonValueKind.Number ? property.Value.ToString() : null;
+            Add(label, value);
+        }
+
+        return string.Join(" · ", references.Select(item => $"{item.Label}: {item.Value}"));
+    }
+
     private static int? Int(JsonElement root, params string[] names) => int.TryParse(Text(root, names), out var value) ? value : null;
     private static bool? Bool(JsonElement root, params string[] names) => bool.TryParse(Text(root, names), out var value) ? value : null;
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight);
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight, string LineNote);
     private async Task<Dictionary<Guid, List<OrderSourceLine>>> ReadCurrentSourceLines(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
     {
         var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
