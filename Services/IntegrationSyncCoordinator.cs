@@ -45,6 +45,18 @@ public sealed class IntegrationSyncCoordinator(
             var byName = UniqueLookup(profiles, profile => NormalisePersonName(profile.DriverName));
             var matched = 0;
             var matchedMemberCodes = new HashSet<int>();
+            var identityConflicts = 0;
+            var memberOwnerIds = (await db.Drivers.AsNoTracking()
+                .Where(driver => driver.TachoMasterDriverId != null)
+                .Select(driver => new { driver.Id, driver.TachoMasterDriverId })
+                .ToListAsync(ct))
+                .Where(item => !string.IsNullOrWhiteSpace(item.TachoMasterDriverId))
+                .GroupBy(item => Normalise(item.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)
+                .Where(group => group.Key.Length > 0)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Select(item => item.Id).ToHashSet(),
+                    StringComparer.OrdinalIgnoreCase);
 
             foreach (var driver in drivers)
             {
@@ -69,7 +81,19 @@ public sealed class IntegrationSyncCoordinator(
 
             if (profile is null) continue;
 
-            driver.TachoMasterDriverId = profile.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var targetMemberCode = profile.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var targetMemberKey = Normalise(targetMemberCode);
+            if (memberOwnerIds.TryGetValue(targetMemberKey, out var existingOwners) &&
+                existingOwners.Any(ownerId => ownerId != driver.Id))
+            {
+                identityConflicts++;
+                logger.LogWarning(
+                    "Skipping TachoMaster member {MemberCode} for driver {DriverId} ({DriverName}) because another Driver Master row already owns that member identity.",
+                    targetMemberCode, driver.Id, driver.DisplayName);
+                continue;
+            }
+
+            driver.TachoMasterDriverId = targetMemberCode;
             driver.TachoCardNumber = profile.CardNumber ?? driver.TachoCardNumber;
             driver.TachoName = string.IsNullOrWhiteSpace(driver.TachoName) ? profile.DriverName : driver.TachoName;
             driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
@@ -79,12 +103,21 @@ public sealed class IntegrationSyncCoordinator(
             await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "TachoMaster driver directory", actor, ct);
             matched++;
             matchedMemberCodes.Add(profile.MemberCode);
+            if (!memberOwnerIds.TryGetValue(targetMemberKey, out var owners))
+            {
+                owners = [];
+                memberOwnerIds[targetMemberKey] = owners;
+            }
+            owners.Add(driver.Id);
             }
 
             await db.SaveChangesAsync(ct);
             var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
+            var conflictNote = identityConflicts == 0
+                ? string.Empty
+                : $" {identityConflicts} conflicting member assignment(s) were skipped safely because another Driver Master row already owns that identity.";
             return new("TachoMaster", true, DateTimeOffset.UtcNow,
-                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched. Identity order: member code, tacho card, employee number, name.", matched);
+                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched.{conflictNote} Identity order: member code, tacho card, employee number, name.", matched);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
