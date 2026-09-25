@@ -50,6 +50,7 @@ public sealed class SamsaraDispatchController(
                 addressSyncEnabled = options.EnableAddressSync,
                 routeStartingCondition = options.RouteStartingCondition,
                 routeCompletionCondition = options.RouteCompletionCondition,
+                sequencingMethod = options.SequencingMethod,
                 missingSettings = Array.Empty<string>(),
                 message = $"Samsara is connected. {summary.VehicleCount} vehicle(s) and {summary.DriverCount} driver(s) are visible to the API token."
             });
@@ -140,6 +141,7 @@ public sealed class SamsaraDispatchController(
                 stops = route?.Stops.Select(stop => new
                 {
                     stop.Id,
+                    stop.SequenceNumber,
                     stop.Name,
                     stop.State,
                     stop.AddressId,
@@ -250,10 +252,20 @@ public sealed class SamsaraDispatchController(
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
             var missingLocations = new List<string>();
+            var missingSchedule = new List<string>();
             var addressFallbacks = new List<string>();
+            var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
+            var departLastStop = !string.Equals(options.RouteCompletionCondition, "arriveLastStop", StringComparison.OrdinalIgnoreCase);
 
             foreach (var (stop, index) in orderedStops.Select((value, index) => (value, index)))
             {
+                var isFirst = index == 0;
+                var isLast = index == orderedStops.Count - 1;
+                if (!isFirst && stop.PlannedArrivalUtc is null)
+                {
+                    missingSchedule.Add(stop.Name);
+                    continue;
+                }
                 var resolved = ResolveLocation(stop, sites);
                 if (resolved.Latitude is null || resolved.Longitude is null)
                 {
@@ -292,15 +304,25 @@ public sealed class SamsaraDispatchController(
 
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var stopNotes = BuildStopNotes(stop, order);
+                var scheduledArrival = isFirst && departFirstStop
+                    ? null
+                    : stop.PlannedArrivalUtc ?? firstScheduled;
+                var scheduledDeparture = isFirst && departFirstStop
+                    ? firstScheduled
+                    : isLast && departLastStop
+                        ? stop.PlannedArrivalUtc
+                        : null;
+
                 samsaraStops.Add(new SamsaraRouteStopRequest(
                     stop.Id,
+                    index + 1,
                     samsaraAddressId,
                     resolved.Address,
                     resolved.Latitude.Value,
                     resolved.Longitude.Value,
                     samsara.StopRadiusMeters,
-                    stop.PlannedArrivalUtc,
-                    index == 0 ? firstScheduled : null,
+                    scheduledArrival,
+                    scheduledDeparture,
                     stopNotes));
             }
 
@@ -309,6 +331,13 @@ public sealed class SamsaraDispatchController(
                 {
                     message = $"Samsara needs coordinates for every route stop. Complete Site Master/geofence mapping for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
                     missingStops = missingLocations
+                });
+
+            if (missingSchedule.Count > 0)
+                return BadRequest(new
+                {
+                    message = $"Every Samsara stop after the route start needs a planned arrival time because SLH TMS owns the schedule. Complete the plan for: {string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    missingStops = missingSchedule
                 });
 
             var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
