@@ -7,6 +7,7 @@ using Azure.Identity;
 using Microsoft.ApplicationInsights;
 using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Timeouts;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -29,6 +30,7 @@ using Slh.Tms.Api.Services;
 [assembly: InternalsVisibleTo("Slh.Tms.Api.Tests")]
 
 var builder = WebApplication.CreateBuilder(args);
+StartupConfigurationValidator.Validate(builder.Configuration, builder.Environment);
 var tenantId = builder.Configuration["Entra:TenantId"];
 var audience = builder.Configuration["Entra:Audience"];
 if (string.IsNullOrWhiteSpace(tenantId))
@@ -82,6 +84,14 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR();
 builder.Services.AddMemoryCache();
+builder.Services.AddRequestTimeouts(options =>
+{
+    options.DefaultPolicy = new RequestTimeoutPolicy
+    {
+        Timeout = TimeSpan.FromSeconds(60),
+        TimeoutStatusCode = StatusCodes.Status504GatewayTimeout
+    };
+});
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<TokenCredential>(_ => new DefaultAzureCredential());
 builder.Services.AddSingleton(_ =>
@@ -366,6 +376,7 @@ if (!string.IsNullOrWhiteSpace(expectedDatabaseName))
 // point, schema review and record-count check.
 var applySchemaChangesOnStartup = builder.Configuration.GetValue<bool>("Database:ApplySchemaChangesOnStartup");
 var applyDeferredSchemaMigrations = builder.Configuration.GetValue<bool>("Database:ApplyDeferredSchemaMigrations");
+var migrationOnly = builder.Configuration.GetValue<bool>("Database:MigrationOnly");
 if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
 {
     await using var scope = app.Services.CreateAsyncScope();
@@ -393,8 +404,18 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
     }
 }
 
+if (migrationOnly)
+{
+    if (!applySchemaChangesOnStartup)
+        throw new InvalidOperationException("Database:MigrationOnly requires Database:ApplySchemaChangesOnStartup=true.");
+
+    app.Logger.LogInformation("SLH TMS database migration job completed successfully; API host will exit without serving requests.");
+    return;
+}
+
 app.UseHttpsRedirection();
 app.UseCors("Portal");
+app.UseRequestTimeouts();
 app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -420,8 +441,8 @@ app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 }).AllowAnonymous();
 
 app.MapControllers();
-app.MapHub<DispatchHub>("/dispatch-hub");
-app.MapHub<EtaHub>("/eta-hub");
+app.MapHub<DispatchHub>("/dispatch-hub").WithMetadata(new DisableRequestTimeoutAttribute());
+app.MapHub<EtaHub>("/eta-hub").WithMetadata(new DisableRequestTimeoutAttribute());
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
 app.Run();
