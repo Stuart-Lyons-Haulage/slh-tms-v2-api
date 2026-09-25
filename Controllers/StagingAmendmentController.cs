@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -28,14 +29,20 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
         if (request.Payload.ValueKind != JsonValueKind.Object)
             return BadRequest(new { message = "Order payload must be a JSON object." });
 
-        var po = Text(request.Payload, "poNumber");
-        var customer = Text(request.Payload, "customerCode");
-        var date = Text(request.Payload, "collectionDate");
+        var po = FirstText(request.Payload, "poNumber", "customerPo", "customerRef", "poRef", "orderReference", "reference");
+        var customer = FirstText(request.Payload, "customerCode", "customer", "customer_supplier");
+        var date = FirstText(request.Payload, "collectionDate", "collectDate", "pickupDate", "date");
         if (string.IsNullOrWhiteSpace(po) || string.IsNullOrWhiteSpace(customer) || !DateOnly.TryParse(date, out _))
             return BadRequest(new { message = "Order requires poNumber/reference, customerCode and a valid collectionDate before it can be saved." });
 
+        var amendedPayload = JsonNode.Parse(request.Payload.GetRawText())?.AsObject();
+        if (amendedPayload is null) return BadRequest(new { message = "Order payload must be a JSON object." });
+        amendedPayload["poNumber"] = po;
+        amendedPayload["customerCode"] = customer;
+        amendedPayload["collectionDate"] = date;
+
         var previousStatus = item.Status;
-        item.PayloadJson = request.Payload.GetRawText();
+        item.PayloadJson = amendedPayload.ToJsonString();
         item.ReviewNote = string.Join(" | ", new[]
         {
             item.ReviewNote,
@@ -180,6 +187,9 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
         }
         return null;
     }
+
+    private static string? FirstText(JsonElement payload, params string[] names) =>
+        names.Select(name => Text(payload, name)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 }
 
 public sealed record StagedPayloadAmendment(JsonElement Payload, string? Note);

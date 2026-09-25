@@ -38,6 +38,26 @@ public sealed class StagingAuditHistoryTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Amendment_accepts_existing_order_reference_aliases_and_normalises_them()
+    {
+        var client = factory.CreateClientWithUser(Planner, "Tms.Approve");
+        var id = await StageOrder(client, "alias-amend", 12);
+
+        var amended = Json("""
+            {"payload":{"customerPo":"BEDFORD-25","customer":"BEDFORD","collectDate":"2026-09-25","pallets":14},"note":"Corrected Bedford overnight order"}
+            """);
+        var amendmentResponse = await client.PutAsync($"/api/v1/staging/{id}/payload", amended);
+        Assert.Equal(HttpStatusCode.OK, amendmentResponse.StatusCode);
+
+        var stagedResponse = await client.GetAsync($"/api/v1/staging/{id}");
+        using var staged = JsonDocument.Parse(await stagedResponse.Content.ReadAsStringAsync());
+        using var payload = JsonDocument.Parse(staged.RootElement.GetProperty("payloadJson").GetString()!);
+        Assert.Equal("BEDFORD-25", payload.RootElement.GetProperty("poNumber").GetString());
+        Assert.Equal("BEDFORD", payload.RootElement.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-09-25", payload.RootElement.GetProperty("collectionDate").GetString());
+    }
+
+    [Fact]
     public async Task Archive_pending_retains_record_and_writes_history_event()
     {
         // Production defect caught: the legacy clear-pending operation performs
