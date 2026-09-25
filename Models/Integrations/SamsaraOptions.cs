@@ -19,6 +19,7 @@ public sealed class SamsaraOptions
     public bool RecomputeScheduledTimes { get; set; } = false;
     public string RouteStartingCondition { get; set; } = "departFirstStop";
     public string RouteCompletionCondition { get; set; } = "departLastStop";
+    public string SequencingMethod { get; set; } = "manual";
 
     // Known Site Master locations should be reusable Samsara Addresses. Single-use
     // locations remain as a safe fallback for an ad-hoc stop that cannot be mapped.
