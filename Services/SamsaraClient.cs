@@ -241,6 +241,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                 {
                     [options.StopExternalIdKey] = stopExternalValue
                 },
+                ["name"] = Clip(stop.Name, 200),
                 ["notes"] = string.IsNullOrWhiteSpace(stop.Notes) ? null : Clip(stop.Notes, 2000),
                 ["sequenceNumber"] = stop.SequenceNumber
             };
@@ -288,9 +289,15 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         // Samsara permits a route to be assigned to a driver OR a vehicle, never both.
         // The TMS still retains both allocations; driver assignment is preferred.
         if (!string.IsNullOrWhiteSpace(route.DriverId))
+        {
             body["driverId"] = route.DriverId;
+            if (existing is not null) body["vehicleId"] = null;
+        }
         else if (!string.IsNullOrWhiteSpace(route.VehicleId))
+        {
             body["vehicleId"] = route.VehicleId;
+            if (existing is not null) body["driverId"] = null;
+        }
 
         return body;
     }
@@ -510,6 +517,7 @@ public sealed record SamsaraAddressUpsertResult(
 public sealed record SamsaraRouteStopRequest(
     Guid StopId,
     int SequenceNumber,
+    string Name,
     string? AddressId,
     string Address,
     double Latitude,
