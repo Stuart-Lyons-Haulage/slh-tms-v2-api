@@ -17,6 +17,7 @@ public sealed class SystemSyncController(
         var providers = new[]
         {
             RoadTechProvider(snapshot),
+            Provider("TachoMaster", "TachoMaster", snapshot),
             Provider("Fleetio", "Fleetio", snapshot),
             Provider("Sage HR", "Sage HR", snapshot)
         };
@@ -61,44 +62,22 @@ public sealed class SystemSyncController(
     private static ProviderSnapshot RoadTechProvider(DependencyHealthSnapshot snapshot)
     {
         snapshot.Dependencies.TryGetValue("RoadTech", out var tracking);
-        snapshot.Dependencies.TryGetValue("TachoMaster", out var tacho);
-
-        var trackingConfigured = tracking is not null && !string.Equals(tracking.Detail, "Dependency is not configured.", StringComparison.OrdinalIgnoreCase);
-        var tachoConfigured = tacho is not null && !string.Equals(tacho.Detail, "Dependency is not configured.", StringComparison.OrdinalIgnoreCase);
-        var configured = trackingConfigured || tachoConfigured;
-
-        static int Severity(string? status) => status switch
-        {
-            "Unavailable" => 2,
-            "Degraded" => 1,
-            "Healthy" => 0,
-            _ => 2
-        };
-
-        var worst = new[] { tracking, tacho }
-            .Where(item => item is not null)
-            .OrderByDescending(item => Severity(item!.Status))
-            .FirstOrDefault();
-
-        var state = !configured ? "not-configured" : worst?.Status switch
+        var configured = tracking is not null && !string.Equals(tracking.Detail, "Dependency is not configured.", StringComparison.OrdinalIgnoreCase);
+        var state = !configured ? "not-configured" : tracking!.Status switch
         {
             "Healthy" => "current",
             "Degraded" => "delayed",
             _ => "stale"
         };
-
-        var updated = new[] { tracking?.LastSuccessfulContactUtc, tacho?.LastSuccessfulContactUtc }
-            .Where(value => value is not null)
-            .Max();
-        var detail = $"Tracking: {tracking?.Status ?? "Not configured"}; Tacho: {tacho?.Status ?? "Not configured"}.";
-        var cadence = "tracking live every minute · history every 5 minutes · tacho every 20 minutes";
+        var detail = $"Tracking: {tracking?.Status ?? "Not configured"}.";
+        var cadence = "live every minute · history every 5 minutes";
 
         return new ProviderSnapshot(
             "RoadTech",
             configured,
             state,
-            updated,
-            worst?.AgeSeconds is null ? null : Math.Round(worst.AgeSeconds.Value / 60d, 1),
+            tracking?.LastSuccessfulContactUtc,
+            tracking?.AgeSeconds is null ? null : Math.Round(tracking.AgeSeconds.Value / 60d, 1),
             detail,
             cadence);
     }
