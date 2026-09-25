@@ -31,6 +31,8 @@ public sealed class SamsaraDispatchController(
                 samsaraRole = "Execution and route progress",
                 recomputeScheduledTimes = options.RecomputeScheduledTimes,
                 addressSyncEnabled = options.EnableAddressSync,
+                routeProgressSyncEnabled = options.EnableRouteProgressSync,
+                routeProgressPollSeconds = options.RouteProgressPollSeconds,
                 missingSettings = samsara.MissingSettings,
                 message = $"Samsara runtime settings are incomplete: {string.Join(", ", samsara.MissingSettings)}."
             });
@@ -48,6 +50,8 @@ public sealed class SamsaraDispatchController(
                 samsaraRole = "Execution and route progress",
                 recomputeScheduledTimes = options.RecomputeScheduledTimes,
                 addressSyncEnabled = options.EnableAddressSync,
+                routeProgressSyncEnabled = options.EnableRouteProgressSync,
+                routeProgressPollSeconds = options.RouteProgressPollSeconds,
                 routeStartingCondition = options.RouteStartingCondition,
                 routeCompletionCondition = options.RouteCompletionCondition,
                 sequencingMethod = options.SequencingMethod,
@@ -68,6 +72,8 @@ public sealed class SamsaraDispatchController(
                 samsaraRole = "Execution and route progress",
                 recomputeScheduledTimes = options.RecomputeScheduledTimes,
                 addressSyncEnabled = options.EnableAddressSync,
+                routeProgressSyncEnabled = options.EnableRouteProgressSync,
+                routeProgressPollSeconds = options.RouteProgressPollSeconds,
                 missingSettings = Array.Empty<string>(),
                 message = $"Samsara could not be reached or rejected the API token: {exception.GetBaseException().Message}"
             });
@@ -98,23 +104,72 @@ public sealed class SamsaraDispatchController(
                 .OrderByDescending(item => item.UpdatedAtUtc)
                 .ToListAsync(ct);
 
+        var stopIds = byId.Values
+            .SelectMany(load => load.Stops)
+            .Select(stop => stop.Id)
+            .Distinct()
+            .ToList();
+
+        var stopMappings = stopIds.Count == 0
+            ? []
+            : await db.IntegrationMappings.AsNoTracking()
+                .Where(item => item.Active &&
+                               item.Provider == "Samsara" &&
+                               item.TmsEntityType == "LoadStop" &&
+                               stopIds.Contains(item.TmsEntityId))
+                .OrderByDescending(item => item.UpdatedAtUtc)
+                .ToListAsync(ct);
+
+        var progressByStop = stopMappings
+            .GroupBy(item => item.TmsEntityId)
+            .Select(group => group.First())
+            .Select(item => new SamsaraStopProgressEnvelope(
+                item.TmsEntityId,
+                item.ExternalLabel,
+                item.UpdatedAtUtc,
+                SamsaraRouteProgressService.ReadProgress(item.Notes)))
+            .Where(item => item.Progress is not null)
+            .ToDictionary(item => item.StopId);
+
+        var rows = mappings
+            .GroupBy(item => item.TmsEntityId)
+            .Select(group => group.First())
+            .Select(item =>
+            {
+                var load = byId.GetValueOrDefault(item.TmsEntityId);
+                var latest = load?.Stops
+                    .Where(stop => progressByStop.ContainsKey(stop.Id))
+                    .Select(stop => new
+                    {
+                        stop.Name,
+                        Envelope = progressByStop[stop.Id]
+                    })
+                    .OrderByDescending(value =>
+                        value.Envelope.Progress?.OccurredAtUtc ?? value.Envelope.UpdatedAtUtc)
+                    .FirstOrDefault();
+
+                return new
+                {
+                    runId = item.TmsEntityId,
+                    reference = load?.Reference,
+                    routeId = item.ExternalKey,
+                    exportedAtUtc = item.UpdatedAtUtc,
+                    executionState = latest?.Envelope.Progress?.State,
+                    executionOperation = latest?.Envelope.Progress?.Operation,
+                    executionUpdatedAtUtc = latest?.Envelope.Progress?.OccurredAtUtc ?? latest?.Envelope.UpdatedAtUtc,
+                    lastStopName = latest?.Name
+                };
+            })
+            .OrderBy(item => item.reference)
+            .ToList();
+
         return Ok(new
         {
             planningDate = date,
             configured = samsara.IsConfigured,
             planningAuthority = "SLH TMS",
-            runs = mappings
-                .GroupBy(item => item.TmsEntityId)
-                .Select(group => group.First())
-                .Select(item => new
-                {
-                    runId = item.TmsEntityId,
-                    reference = byId.GetValueOrDefault(item.TmsEntityId)?.Reference,
-                    routeId = item.ExternalKey,
-                    exportedAtUtc = item.UpdatedAtUtc
-                })
-                .OrderBy(item => item.reference)
-                .ToList()
+            routeProgressSyncEnabled = options.EnableRouteProgressSync,
+            runs = rows
         });
     }
 
@@ -685,6 +740,12 @@ public sealed class SamsaraDispatchController(
 
     private static string Normalise(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private sealed record SamsaraStopProgressEnvelope(
+        Guid StopId,
+        string? Label,
+        DateTimeOffset UpdatedAtUtc,
+        SamsaraStopProgressState? Progress);
 
     private sealed record ResolvedStopLocation(string Address, double? Latitude, double? Longitude, Site? Site);
 }
