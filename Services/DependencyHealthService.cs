@@ -20,7 +20,7 @@ public sealed class DependencyHealthService(
     public static readonly IReadOnlyDictionary<string, string> CanonicalCadences = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["RoadTech"] = "live every minute · history every 5 minutes",
-        ["TachoMaster"] = "every 5 minutes",
+        ["TachoMaster"] = "every 20 minutes",
         ["Fleetio"] = "every hour",
         ["Sage HR"] = "05:30 Europe/London daily"
     };
