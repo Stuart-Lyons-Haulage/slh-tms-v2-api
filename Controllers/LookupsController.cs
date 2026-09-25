@@ -64,94 +64,12 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         if (records.Count > 1000)
             return BadRequest(new { message = "Roadrunner Site Master import is limited to 1,000 rows per request." });
 
-        const string reviewType = "masterdata:roadrunner-site-review";
-        const string reviewSource = "Roadrunner Site Master reconciliation";
-
-        var allSites = await db.Sites
-            .OrderBy(site => site.Name)
-            .ToListAsync(ct);
-
+        var allSites = await db.Sites.OrderBy(site => site.Name).ToListAsync(ct);
         await MasterDetailStore.EnrichSitesAsync(db, allSites, ct);
-        var sites = allSites.Where(site => site.Active).ToList();
-
-        // Roadrunner reconciliation is proposal-only.
-        // It must never mutate canonical Site Master data.
-        var existingReviews = await db.StagedImports
-            .Where(x => x.EntityType == reviewType)
-            .ToListAsync(ct);
-
-        var reviewsByKey = existingReviews
-            .GroupBy(x => x.IdempotencyKey, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
 
         var results = new List<object>();
         var linked = 0;
-        var review = 0;
         var unmatched = 0;
-
-        void StageReview(
-            string roadRunnerCode,
-            string company,
-            string reason,
-            int confidence,
-            string proposedAction,
-            IEnumerable<Site> candidates,
-            RoadrunnerSiteProfileRequest record)
-        {
-            var normalCode = SiteMasterIdentityResolver.Normalise(roadRunnerCode);
-            var key = $"{reviewType}:{normalCode}";
-            if (key.Length > 200) key = key[..200];
-
-            var candidateRows = candidates
-                .GroupBy(x => x.Id)
-                .Select(group => group.First())
-                .Select(site => new
-                {
-                    site.Id,
-                    site.ExternalCode,
-                    site.Name,
-                    site.DriverTextName,
-                    site.CollectionAddress,
-                    site.RoadrunnerCode
-                })
-                .ToArray();
-
-            var payload = JsonSerializer.Serialize(new
-            {
-                reason,
-                confidence,
-                proposedAction,
-                roadRunner = record,
-                candidates = candidateRows
-            });
-
-            if (!reviewsByKey.TryGetValue(key, out var staged))
-            {
-                staged = new StagedImport
-                {
-                    EntityType = reviewType,
-                    IdempotencyKey = key,
-                    PayloadJson = payload,
-                    Status = StagingStatus.PendingReview,
-                    Source = reviewSource,
-                    ReviewNote = "Roadrunner Site identity requires explicit Master Data approval."
-                };
-
-                db.StagedImports.Add(staged);
-                reviewsByKey[key] = staged;
-            }
-            else if (staged.Status == StagingStatus.PendingReview)
-            {
-                staged.PayloadJson = payload;
-                staged.Source ??= reviewSource;
-
-                // Pending proposals are refreshed; historical decisions retain
-                // their original evidence and review trail unchanged.
-                staged.ReviewedAtUtc = null;
-                staged.ReviewedBy = null;
-                staged.ReviewNote = "Roadrunner Site identity requires explicit Master Data approval.";
-            }
-        }
 
         foreach (var record in records)
         {
@@ -167,38 +85,22 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
                     company,
                     status = "unmatched",
                     confidence = 0,
-                    reason = "Roadrunner row has no Code; no persistent link can be created."
+                    reason = "Roadrunner row has no Code."
                 });
                 continue;
             }
 
-            var address = string.Join(", ", new[]
-            {
-                record.Add1,
-                record.Add2,
-                record.Add3,
-                record.AddTown,
-                record.AddCounty,
-                record.AddPostcode,
-                record.AddCountry
-            }.Where(value => !string.IsNullOrWhiteSpace(value))
-             .Select(value => value!.Trim()));
-
             var normalRoadrunnerCode = SiteMasterIdentityResolver.Normalise(roadRunnerCode);
-
-            var existingRoadrunnerMatches = allSites
+            var existing = allSites
                 .Where(site =>
                     !string.IsNullOrWhiteSpace(site.RoadrunnerCode) &&
                     SiteMasterIdentityResolver.Normalise(site.RoadrunnerCode) == normalRoadrunnerCode)
                 .ToList();
 
-            // A previously approved one-to-one Roadrunner link is authoritative.
-            // Reading it is safe; reconciliation does not refresh or modify the Site.
-            if (existingRoadrunnerMatches.Count == 1)
+            if (existing.Count == 1)
             {
-                var site = existingRoadrunnerMatches[0];
+                var site = existing[0];
                 linked++;
-
                 results.Add(new
                 {
                     code = roadRunnerCode,
@@ -210,172 +112,23 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
                     siteCode = site.ExternalCode,
                     siteName = site.Name
                 });
-
                 continue;
             }
 
-            if (existingRoadrunnerMatches.Count > 1)
-            {
-                review++;
-
-                const string reason = "Roadrunner Code is linked to more than one canonical Site Master record.";
-
-                StageReview(
-                    roadRunnerCode,
-                    company ?? string.Empty,
-                    reason,
-                    100,
-                    "Resolve duplicate Roadrunner Code links and select one canonical Site.",
-                    existingRoadrunnerMatches,
-                    record);
-
-                results.Add(new
-                {
-                    code = roadRunnerCode,
-                    company,
-                    status = "review",
-                    confidence = 100,
-                    reason,
-                    candidates = existingRoadrunnerMatches
-                        .Select(site => new { site.Id, site.ExternalCode, site.Name })
-                        .ToArray()
-                });
-
-                continue;
-            }
-
-            var suggestedCandidates = new List<Site>();
-            var confidence = 0;
-            var reasonText = string.Empty;
-            var proposedAction = "Create new Site or select an existing canonical Site.";
-
-            if (!string.IsNullOrWhiteSpace(record.AddPostcode))
-            {
-                var postcode = SiteMasterIdentityResolver.Normalise(record.AddPostcode);
-
-                var postcodeMatches = sites
-                    .Where(site => SiteMasterIdentityResolver.ExtractPostcode(site.CollectionAddress) == postcode)
-                    .ToList();
-
-                if (postcodeMatches.Count == 1)
-                {
-                    suggestedCandidates.Add(postcodeMatches[0]);
-                    confidence = 99;
-                    reasonText = "Unique postcode suggests an existing Site Master record.";
-                    proposedAction = "Link Roadrunner identity to the suggested canonical Site.";
-                }
-                else if (postcodeMatches.Count > 1)
-                {
-                    suggestedCandidates.AddRange(postcodeMatches);
-                    confidence = 95;
-                    reasonText = "Postcode matches multiple Site Master records.";
-                    proposedAction = "Choose the correct canonical Site.";
-                }
-            }
-
-            SiteIdentityResolution? resolution = null;
-
-            if (suggestedCandidates.Count == 0)
-            {
-                resolution = SiteMasterIdentityResolver.Resolve(
-                    new IncomingSiteIdentity(
-                        null,
-                        company,
-                        company,
-                        address,
-                        SiteMasterIdentityResolver.MergeAliases(
-                            record.Code,
-                            record.LookupCode,
-                            record.Company,
-                            record.AddTown),
-                        null),
-                    sites);
-
-                if (resolution.Matched && resolution.Site is not null)
-                {
-                    suggestedCandidates.Add(resolution.Site);
-                    confidence = resolution.Confidence;
-                    reasonText = resolution.Reason;
-                    proposedAction = "Link Roadrunner identity to the suggested canonical Site.";
-                }
-
-                if (resolution.PossibleDuplicates.Count > 0)
-                {
-                    suggestedCandidates.AddRange(resolution.PossibleDuplicates);
-
-                    if (confidence == 0)
-                        confidence = resolution.Confidence;
-
-                    if (string.IsNullOrWhiteSpace(reasonText))
-                        reasonText = resolution.Reason;
-
-                    if (suggestedCandidates.Select(x => x.Id).Distinct().Count() > 1)
-                        proposedAction = "Choose the correct canonical Site.";
-                }
-            }
-
-            suggestedCandidates = suggestedCandidates
-                .GroupBy(site => site.Id)
-                .Select(group => group.First())
-                .ToList();
-
-            if (suggestedCandidates.Count == 0)
-            {
-                unmatched++;
-                reasonText = "No existing Site Master record could be matched safely.";
-
-                StageReview(
-                    roadRunnerCode,
-                    company ?? string.Empty,
-                    reasonText,
-                    confidence,
-                    "Review and create a new canonical Site if required.",
-                    Array.Empty<Site>(),
-                    record);
-
-                results.Add(new
-                {
-                    code = roadRunnerCode,
-                    company,
-                    status = "unmatched",
-                    confidence,
-                    reason = reasonText,
-                    reviewCreated = true
-                });
-
-                continue;
-            }
-
-            review++;
-
-            StageReview(
-                roadRunnerCode,
-                company ?? string.Empty,
-                reasonText,
-                confidence,
-                proposedAction,
-                suggestedCandidates,
-                record);
-
+            unmatched++;
             results.Add(new
             {
                 code = roadRunnerCode,
                 company,
-                status = "review",
-                confidence,
-                reason = reasonText,
-                candidates = suggestedCandidates
-                    .Select(site => new { site.Id, site.ExternalCode, site.Name })
-                    .ToArray(),
-                reviewCreated = true
+                status = "unmatched",
+                confidence = 0,
+                reason = existing.Count > 1
+                    ? "Roadrunner Code is linked to multiple Site Master records. RoadRunner Review has been retired; resolve the canonical Site directly in Master Data."
+                    : "No explicit Roadrunner link exists. RoadRunner Review has been retired; no review record was staged and Site Master was not changed."
             });
         }
 
-        // This SaveChanges persists review proposals only.
-        // Canonical Sites are deliberately untouched by this endpoint.
-        await db.SaveChangesAsync(ct);
-
-        return Ok(new { received = records.Count, linked, review, unmatched, results });
+        return Ok(new { received = records.Count, linked, review = 0, unmatched, results });
     }
 
     [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct)
