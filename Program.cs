@@ -414,6 +414,7 @@ if (migrationOnly)
 }
 
 app.UseHttpsRedirection();
+app.UseRouting();
 app.UseCors("Portal");
 app.UseRequestTimeouts();
 app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
