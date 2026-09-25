@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using UglyToad.PdfPig;
 
 namespace Slh.Tms.Api.Services;
 
@@ -101,6 +102,8 @@ public sealed class EmailOrderIntakeService
         var subject = (request.Subject ?? string.Empty).Trim();
         var sender = (request.SenderAddress ?? string.Empty).Trim();
         var body = NormaliseBody(request.BodyText, request.BodyHtml);
+        var pdfText = ReadPdfAttachmentText(request, out var pdfWarnings);
+        if (!string.IsNullOrWhiteSpace(pdfText)) body = string.Join("\n\n", body, pdfText).Trim();
         var attachmentNames = string.Join("\n", (request.Attachments ?? [])
             .Where(attachment => attachment.IsInline != true)
             .Select(attachment => attachment.Name)
@@ -119,7 +122,7 @@ public sealed class EmailOrderIntakeService
         var receivedAt = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
         var sourceDate = ExtractDate(sourceText, receivedAt);
         var rawPo = ExtractPo(sourceText);
-        var globalWarnings = new List<string>();
+        var globalWarnings = new List<string>(pdfWarnings);
         var orders = new List<ParsedEmailOrder>();
 
         foreach (var attachment in request.Attachments ?? [])
@@ -165,6 +168,35 @@ public sealed class EmailOrderIntakeService
             .Select(order => ApplyPrecedenceOverrides(order, request, body, masterSiteNames ?? []))
             .ToList();
         return new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    private static string ReadPdfAttachmentText(MailboxEmailIntakeRequest request, out List<string> warnings)
+    {
+        warnings = [];
+        var text = new StringBuilder();
+        foreach (var attachment in request.Attachments ?? [])
+        {
+            if (attachment.IsInline == true || !string.Equals(Path.GetExtension(attachment.Name ?? string.Empty), ".pdf", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.IsNullOrWhiteSpace(attachment.EffectiveContentBase64))
+            {
+                warnings.Add($"Attachment '{attachment.Name}' was retained but has no downloadable content for parsing.");
+                continue;
+            }
+            try
+            {
+                using var stream = new MemoryStream(DecodeBase64(attachment.EffectiveContentBase64!));
+                using var document = PdfDocument.Open(stream);
+                var pages = document.GetPages().Select(page => page.Text).Where(page => !string.IsNullOrWhiteSpace(page));
+                var pageText = string.Join("\n", pages);
+                if (!string.IsNullOrWhiteSpace(pageText)) text.AppendLine($"Source attachment {attachment.Name}:\n{pageText}");
+                else warnings.Add($"Attachment '{attachment.Name}' was read but contained no selectable text; review the retained PDF manually.");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Attachment '{attachment.Name}' could not be read as PDF: {ex.GetBaseException().Message}");
+            }
+        }
+        return text.ToString().Trim();
     }
 
     private static List<ParsedEmailOrder> ParseBarfootsWaitroseWaveBody(
