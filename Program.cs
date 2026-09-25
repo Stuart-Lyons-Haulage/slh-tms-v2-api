@@ -230,6 +230,7 @@ builder.Services.AddSingleton(fleetioOptions);
 var samsaraOptions = new SamsaraOptions();
 builder.Configuration.GetSection("Integrations:Samsara").Bind(samsaraOptions);
 builder.Services.AddSingleton(samsaraOptions);
+builder.Services.AddScoped<SamsaraRouteProgressService>();
 builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<DistributedLeaseManager>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
@@ -284,6 +285,7 @@ builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
+builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
