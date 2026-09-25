@@ -170,6 +170,9 @@ public static class MasterDetailStore
                     site.RoadrunnerProfileJson = Text(payload, "roadrunnerProfileJson") ?? Text(payload, "roadRunnerProfileJson");
                     site.Latitude = Decimal(payload, "latitude");
                     site.Longitude = Decimal(payload, "longitude");
+                    site.GeofenceRadiusMetres = Int(payload, "geofenceRadiusMetres")
+                        ?? Int(payload, "geofenceRadiusMeters")
+                        ?? Int(payload, "radiusMeters");
                     site.OperationalRegion = Text(payload, "operationalRegion") ?? Text(payload, "region") ?? site.OperationalRegion;
                 }
             }
