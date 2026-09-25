@@ -9,11 +9,32 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/operational-master-data/duplicates")]
 [Authorize]
-public sealed class MasterDataDuplicateReviewController(TmsDbContext db) : ControllerBase
+public sealed class MasterDataDuplicateReviewController(
+    TmsDbContext db,
+    ILogger<MasterDataDuplicateReviewController> logger) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<MasterDataDuplicateCandidate>>> Candidates([FromQuery] string? entityType, CancellationToken ct)
-        => Ok(await MasterDataDuplicateReviewService.FindCandidatesAsync(db, entityType, ct));
+    {
+        var type = string.IsNullOrWhiteSpace(entityType) ? "sites" : entityType.Trim().ToLowerInvariant();
+        try
+        {
+            return Ok(await MasterDataDuplicateReviewService.FindCandidatesAsync(db, type, ct));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Master-data duplicate scan failed for {EntityType}.", type);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "master_duplicate_scan_failed",
+                message = $"{type} duplicate check could not complete: {ex.GetBaseException().Message}"
+            });
+        }
+    }
 
     [HttpPost("auto-merge"), Authorize(Policy = "TmsApprove")]
     public async Task<ActionResult<MasterDataDuplicateMergeResult>> AutoMerge([FromQuery] string? entityType, CancellationToken ct)
