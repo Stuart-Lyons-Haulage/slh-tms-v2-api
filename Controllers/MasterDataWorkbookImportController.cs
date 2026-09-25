@@ -288,7 +288,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
     {
         var rows = workbook.Sheets
             .Where(sheet => sheet.Key.Contains("vehicle", StringComparison.OrdinalIgnoreCase)
-                || sheet.Key.Contains("fuel", StringComparison.OrdinalIgnoreCase))
+                || sheet.Key.Contains("fuel", StringComparison.OrdinalIgnoreCase)
+                || sheet.Key.Contains("cab", StringComparison.OrdinalIgnoreCase))
             .SelectMany(sheet => sheet.Value)
             .ToList();
         if (rows.Count == 0) return;
