@@ -50,10 +50,28 @@ public static class OrderPlanningWindowClassifier
         var collectionDate = DateOnlyOrNull(payload, "collectionDate");
         var deliveryDate = DateOnlyOrNull(payload, "deliveryDate");
         var collectionTime = TimeOnlyOrNull(payload, "collectionTimeFrom") ?? TimeOnlyOrNull(payload, "requestedTime");
+        var wave = IntOrNull(payload, "wave");
         var reasons = new List<string>();
         var score = 0;
         var window = "AM";
         var isMarket = ContainsAny(haystack, MarketWords);
+
+        // Waitrose wave is an explicit operational instruction. It must take
+        // precedence over the generic collection-date-before-delivery-date heuristic:
+        // Wave 1 is AM; Wave 3 is PM/overnight, while both may deliver the following
+        // calendar day.
+        if (wave == 1)
+        {
+            score += 100;
+            window = isMarket ? "Market" : "AM";
+            reasons.Add("Wave 1 explicitly matched the AM planning window");
+        }
+        else if (wave >= 3)
+        {
+            score += 100;
+            window = isMarket ? "Market" : "PM";
+            reasons.Add($"Wave {wave} explicitly matched the PM/overnight planning window");
+        }
 
         if (isMarket)
         {
@@ -62,7 +80,7 @@ public static class OrderPlanningWindowClassifier
             reasons.Add("Market wording/site matched");
         }
 
-        if (collectionDate is not null && deliveryDate is not null && collectionDate.Value < deliveryDate.Value)
+        if (wave is null && collectionDate is not null && deliveryDate is not null && collectionDate.Value < deliveryDate.Value)
         {
             score += 95;
             window = isMarket ? "Market" : "PM";
@@ -103,11 +121,11 @@ public static class OrderPlanningWindowClassifier
             reasons.Add("Delivery date supplied but collection date is missing; treat as PM candidate rather than pre-order");
         }
 
-        var runsOvernight = collectionDate is not null && deliveryDate is not null && collectionDate.Value < deliveryDate.Value;
+        var runsOvernight = wave >= 3 || (wave is null && collectionDate is not null && deliveryDate is not null && collectionDate.Value < deliveryDate.Value);
         if (!runsOvernight && Text(payload, "overnightRoute")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true) runsOvernight = true;
         if (!runsOvernight && Text(payload, "routeTiming")?.Contains("overnight", StringComparison.OrdinalIgnoreCase) == true) runsOvernight = true;
 
-        if (window == "AM" && score >= 70) window = "PM";
+        if (wave is null && window == "AM" && score >= 70) window = "PM";
         var confidence = score >= 80 ? "High" : score >= 40 ? "Medium" : "Low";
         var routeType = window switch
         {
@@ -152,6 +170,13 @@ public static class OrderPlanningWindowClassifier
         }
         value = default;
         return false;
+    }
+
+    private static int? IntOrNull(JsonElement payload, string name)
+    {
+        if (!TryGetProperty(payload, name, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)) return number;
+        return int.TryParse(value.ToString(), out number) ? number : null;
     }
     private static string NormaliseKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static DateOnly? DateOnlyOrNull(JsonElement payload, string name) => DateOnly.TryParse(Text(payload, name), out var value) ? value : null;

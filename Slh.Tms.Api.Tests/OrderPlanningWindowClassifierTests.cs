@@ -67,6 +67,48 @@ public sealed class OrderPlanningWindowClassifierTests
     }
 
     [Fact]
+    public void Waitrose_wave_one_is_am_even_when_delivery_is_next_day()
+    {
+        var result = Classify(new
+        {
+            customerCode = "WAITROSE",
+            poNumber = "O78925",
+            collectionDate = "2026-09-25",
+            deliveryDate = "2026-09-26",
+            sellerName = "Sefter",
+            stallNumber = "Aylesford",
+            pallets = 3,
+            wave = 1
+        });
+
+        Assert.Equal("AM", result.PlanningWindow);
+        Assert.False(result.RunsOvernight);
+        Assert.Equal("AM", result.SuggestedRouteType);
+        Assert.Contains("Wave 1", result.Reason);
+    }
+
+    [Fact]
+    public void Waitrose_wave_three_is_pm_overnight_on_collection_date()
+    {
+        var result = Classify(new
+        {
+            customerCode = "WAITROSE",
+            poNumber = "O78933",
+            collectionDate = "2026-09-25",
+            deliveryDate = "2026-09-26",
+            sellerName = "Sefter",
+            stallNumber = "Aylesford",
+            pallets = 14,
+            wave = 3
+        });
+
+        Assert.Equal("PM", result.PlanningWindow);
+        Assert.True(result.RunsOvernight);
+        Assert.Equal("PM Overnight", result.SuggestedRouteType);
+        Assert.Contains("Wave 3", result.Reason);
+    }
+
+    [Fact]
     public void Markets_are_pm_market_routes()
     {
         var result = Classify(new

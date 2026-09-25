@@ -149,10 +149,18 @@ public sealed class EmailOrderIntakeService
             }
         }
 
-        if (orders.Count == 0)
-        {
-            orders.AddRange(ParseStructuredBodyOrders(request, sourceDate, rawPo, body, sourceText, receivedAt));
-        }
+        // Body and attachments are complementary sources.  A workbook/PDF parser can
+        // successfully return some rows while omitting a row that is only expressed in
+        // the email text (for example a chained Waitrose Wave 1 line).  Do not let a
+        // partially successful attachment parse suppress the body parser.
+        var structuredBodyOrders = ParseStructuredBodyOrders(request, sourceDate, rawPo, body, sourceText, receivedAt).ToList();
+        if (structuredBodyOrders.Count > 0)
+            orders.AddRange(structuredBodyOrders);
+
+        orders = orders
+            .GroupBy(BuildOrderMergeKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
 
         if (orders.Count == 0)
         {
@@ -168,6 +176,27 @@ public sealed class EmailOrderIntakeService
             .Select(order => ApplyPrecedenceOverrides(order, request, body, masterSiteNames ?? []))
             .ToList();
         return new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    private static string BuildOrderMergeKey(ParsedEmailOrder order)
+    {
+        var payload = order.Payload;
+        var customer = PayloadText(payload, "customerCode", "customer") ?? string.Empty;
+        var po = PayloadText(payload, "customerPo", "poNumber", "poRef", "customerRef") ?? string.Empty;
+        var collectionDate = PayloadText(payload, "collectionDate") ?? string.Empty;
+        var deliveryDate = PayloadText(payload, "deliveryDate") ?? string.Empty;
+        var collection = PayloadText(payload, "sellerName", "collectionSite", "collectionLocation") ?? string.Empty;
+        var delivery = PayloadText(payload, "stallNumber", "deliverySite", "deliveryLocation") ?? string.Empty;
+        var pallets = PayloadText(payload, "pallets", "palletQty", "palletQuantity") ?? string.Empty;
+        var wave = PayloadText(payload, "wave") ?? string.Empty;
+        // Without a customer reference, two identical-looking rows may be legitimate
+        // repeat work. Keep both source rows for planner review instead of applying
+        // broad duplicate suppression.
+        if (string.IsNullOrWhiteSpace(po))
+            return $"SOURCE|{order.SourceKey}".ToUpperInvariant();
+        return string.Join('|', customer, po, collectionDate, deliveryDate, collection, delivery, pallets, wave)
+            .Trim()
+            .ToUpperInvariant();
     }
 
     private static string ReadPdfAttachmentText(MailboxEmailIntakeRequest request, out List<string> warnings)
@@ -1422,6 +1451,22 @@ public sealed class EmailOrderIntakeService
         if (value is JsonElement element)
             return element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined ? null : element.ToString();
         return Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    private static string? PayloadText(JsonElement payload, params string[] keys)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return null;
+        foreach (var key in keys)
+        {
+            foreach (var property in payload.EnumerateObject())
+            {
+                if (!property.Name.Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+                return property.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+                    ? null
+                    : property.Value.ToString();
+            }
+        }
+        return null;
     }
 
     private static bool IsTemplateSource(string sourceKey) =>
