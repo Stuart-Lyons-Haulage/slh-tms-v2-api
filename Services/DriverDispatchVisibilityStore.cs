@@ -117,6 +117,13 @@ public static class DriverDispatchVisibilityStore
                 evidence));
         }
 
+        logger.LogInformation("Driver Dispatch employment classification: {Employed} Sage employed, {Agency} agency, {Casual} casual, {Subcontractor} subcontractor, {Unmatched} unmatched.",
+            visible.Count(item => item.EmploymentType == "Employed"),
+            visible.Count(item => item.EmploymentType == "Agency"),
+            visible.Count(item => item.EmploymentType == "Casual"),
+            visible.Count(item => item.EmploymentType == "Subcontractor"),
+            visible.Count(item => item.EmploymentType == "Unmatched"));
+
         return new DriverDispatchVisibilitySnapshot(
             planningDate,
             DriverDispatchVisibilityRules.RecentWindowDays,
