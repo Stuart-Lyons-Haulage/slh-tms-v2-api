@@ -16,8 +16,7 @@ public sealed class SystemSyncController(
         var snapshot = await health.GetSnapshotAsync(ct);
         var providers = new[]
         {
-            Provider("DOT / Falcon", "RoadTech", snapshot),
-            Provider("TachoMaster", "TachoMaster", snapshot),
+            RoadTechProvider(snapshot),
             Provider("Fleetio", "Fleetio", snapshot),
             Provider("Sage HR", "Sage HR", snapshot)
         };
@@ -37,9 +36,7 @@ public sealed class SystemSyncController(
             displaySource = "Canonical TMS integration state",
             schedules = new
             {
-                dotLive = "every minute",
-                trackingHistory = "every 5 minutes",
-                tachoMaster = "every 5 minutes",
+                roadTech = "tracking live every minute · history every 5 minutes · tacho every 20 minutes",
                 fleetio = "every hour",
                 sageHr = "05:30 Europe/London daily"
             },
@@ -53,12 +50,57 @@ public sealed class SystemSyncController(
         var actor = User.Identity?.Name ?? "admin:manual";
         return provider.Trim().ToLowerInvariant() switch
         {
-            "tacho" or "tachomaster" => Ok(await coordinator.SyncTachoMasterAsync(actor, ct)),
+            "roadtech" or "road-tech" or "tacho" or "tachomaster" => Ok(await coordinator.SyncTachoMasterAsync(actor, ct)),
             "sage" or "sagehr" or "sage-hr" => Ok(await coordinator.SyncSageHrAsync(actor, ct)),
             "fleetio" => Ok(await coordinator.SyncFleetioAsync(actor, ct)),
             "all" => Ok(await coordinator.ForceAllAsync(actor, ct)),
-            _ => BadRequest(new { message = "Provider must be tacho, sage, fleetio or all." })
+            _ => BadRequest(new { message = "Provider must be roadtech, sage, fleetio or all. RoadTech tracking itself refreshes continuously; a manual RoadTech sync refreshes its TachoMaster evidence." })
         };
+    }
+
+    private static ProviderSnapshot RoadTechProvider(DependencyHealthSnapshot snapshot)
+    {
+        snapshot.Dependencies.TryGetValue("RoadTech", out var tracking);
+        snapshot.Dependencies.TryGetValue("TachoMaster", out var tacho);
+
+        var trackingConfigured = tracking is not null && !string.Equals(tracking.Detail, "Dependency is not configured.", StringComparison.OrdinalIgnoreCase);
+        var tachoConfigured = tacho is not null && !string.Equals(tacho.Detail, "Dependency is not configured.", StringComparison.OrdinalIgnoreCase);
+        var configured = trackingConfigured || tachoConfigured;
+
+        static int Severity(string? status) => status switch
+        {
+            "Unavailable" => 2,
+            "Degraded" => 1,
+            "Healthy" => 0,
+            _ => 2
+        };
+
+        var worst = new[] { tracking, tacho }
+            .Where(item => item is not null)
+            .OrderByDescending(item => Severity(item!.Status))
+            .FirstOrDefault();
+
+        var state = !configured ? "not-configured" : worst?.Status switch
+        {
+            "Healthy" => "current",
+            "Degraded" => "delayed",
+            _ => "stale"
+        };
+
+        var updated = new[] { tracking?.LastSuccessfulContactUtc, tacho?.LastSuccessfulContactUtc }
+            .Where(value => value is not null)
+            .Max();
+        var detail = $"Tracking: {tracking?.Status ?? "Not configured"}; Tacho: {tacho?.Status ?? "Not configured"}.";
+        var cadence = "tracking live every minute · history every 5 minutes · tacho every 20 minutes";
+
+        return new ProviderSnapshot(
+            "RoadTech",
+            configured,
+            state,
+            updated,
+            worst?.AgeSeconds is null ? null : Math.Round(worst.AgeSeconds.Value / 60d, 1),
+            detail,
+            cadence);
     }
 
     private static ProviderSnapshot Provider(string displayName, string dependencyName, DependencyHealthSnapshot snapshot)
