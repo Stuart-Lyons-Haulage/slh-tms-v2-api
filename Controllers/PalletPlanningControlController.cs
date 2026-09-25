@@ -642,26 +642,57 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             references.Add((label, clean));
         }
 
-        Add("Ref", primaryReference);
-        foreach (var property in root.EnumerateObject())
+        static string? ReferenceLabel(string propertyName)
         {
-            var key = Normalise(property.Name);
-            var label = key switch
+            var key = Normalise(propertyName);
+            return key switch
             {
-                "XNUMBER" or "XNO" or "XREF" or "XREFERENCE" => "X No",
-                "CUSTOMERREFERENCE" or "CUSTOMERREF" => "Customer Ref",
-                "BOOKINGREFERENCE" or "BOOKINGREF" => "Booking Ref",
-                "LOADREFERENCE" or "LOADREF" => "Load Ref",
-                "CONSIGNMENTREFERENCE" or "CONSIGNMENTREF" => "Consignment Ref",
-                "PONUMBER" or "PO" => "PO",
-                "ORDERREFERENCE" or "ORDERREF" or "REFERENCENUMBER" or "REFERENCE" => "Ref",
+                "XNUMBER" or "XNO" or "XREF" or "XREFERENCE" or "XREFERENCENUMBER" => "X No",
+                "CUSTOMERREFERENCE" or "CUSTOMERREF" or "CUSTOMERREFERENCENUMBER" => "Customer Ref",
+                "BOOKINGREFERENCE" or "BOOKINGREF" or "BOOKINGNUMBER" or "BOOKINGNO" => "Booking Ref",
+                "LOADREFERENCE" or "LOADREF" or "LOADNUMBER" or "LOADNO" => "Load Ref",
+                "CONSIGNMENTREFERENCE" or "CONSIGNMENTREF" or "CONSIGNMENTNUMBER" => "Consignment Ref",
+                "PONUMBER" or "PO" or "POREF" or "POREFERENCE" => "PO",
+                "ORDERREFERENCE" or "ORDERREF" or "ORDERNUMBER" or "ORDERNO" or
+                "REFERENCENUMBER" or "REFERENCENO" or "REFERENCE" or "REF" => "Ref",
                 _ => null
             };
-            if (label is null) continue;
-            var value = property.Value.ValueKind == JsonValueKind.String
-                ? property.Value.GetString()
-                : property.Value.ValueKind is JsonValueKind.Number ? property.Value.ToString() : null;
-            Add(label, value);
+        }
+
+        void ReadReferenceProperties(JsonElement value)
+        {
+            if (value.ValueKind != JsonValueKind.Object) return;
+            foreach (var property in value.EnumerateObject())
+            {
+                var label = ReferenceLabel(property.Name);
+                if (label is not null)
+                {
+                    var text = property.Value.ValueKind == JsonValueKind.String
+                        ? property.Value.GetString()
+                        : property.Value.ValueKind == JsonValueKind.Number ? property.Value.ToString() : null;
+                    Add(label, text);
+                }
+
+                // Some parser payloads group identifiers under a references/order/details object.
+                if (property.Value.ValueKind == JsonValueKind.Object &&
+                    (property.Name.Contains("ref", StringComparison.OrdinalIgnoreCase) ||
+                     property.Name.Contains("order", StringComparison.OrdinalIgnoreCase) ||
+                     property.Name.Contains("detail", StringComparison.OrdinalIgnoreCase)))
+                    ReadReferenceProperties(property.Value);
+            }
+        }
+
+        Add("Ref", primaryReference);
+        ReadReferenceProperties(root);
+
+        var instructions = Text(root, "driverInstructions", "notes");
+        if (!string.IsNullOrWhiteSpace(instructions))
+        {
+            var xMatch = System.Text.RegularExpressions.Regex.Match(
+                instructions,
+                @"\bX\s*(?:No|Number|Ref|Reference)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\/-]{2,})\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (xMatch.Success) Add("X No", xMatch.Groups[1].Value);
         }
 
         return string.Join(" · ", references.Select(item => $"{item.Label}: {item.Value}"));
