@@ -572,7 +572,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var sender = request.SenderAddress ?? string.Empty;
         var subject = request.Subject ?? string.Empty;
         var body = $"{request.BodyText} {request.BodyHtml}";
-        var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => item.Name));
+        var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => $"{item.Name} {item.SourceUrl} {item.RetrievalError}"));
         var value = $"{sender} {subject} {body} {attachments}";
         if (LooksOperationalNoise(value))
             return false;
@@ -582,7 +582,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             return true;
         var hasAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true);
         var internalPlannerAttachment = sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase) &&
-                                        hasAttachment &&
+                                        (hasAttachment || (request.Attachments ?? []).Any(item => !string.IsNullOrWhiteSpace(item.SourceUrl))) &&
                                         (value.Contains("load plan", StringComparison.OrdinalIgnoreCase) ||
                                          value.Contains("daily times", StringComparison.OrdinalIgnoreCase) ||
                                          value.Contains("aldi times", StringComparison.OrdinalIgnoreCase) ||
@@ -964,6 +964,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 attachment.ContentId,
                 attachment.Size,
                 attachment.IsInline,
+                attachment.SourceUrl,
+                attachment.RetrievalError,
                 contentBase64 = attachment.EffectiveContentBase64
             }).ToList(),
             bodyTruncated = (request.BodyText?.Length ?? 0) > SourceBodyTextLimit || (request.BodyHtml?.Length ?? 0) > SourceBodyHtmlLimit,
@@ -1112,7 +1114,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 ["contentType"] = attachment.ContentType,
                 ["contentId"] = attachment.ContentId,
                 ["size"] = attachment.Size,
-                ["isInline"] = attachment.IsInline
+                ["isInline"] = attachment.IsInline,
+                ["sourceUrl"] = attachment.SourceUrl,
+                ["retrievalError"] = attachment.RetrievalError
             });
         }
         root["sourceAttachments"] = attachments;

@@ -2260,7 +2260,9 @@ public sealed record MailboxAttachmentRequest(
     bool? IsInline = false,
     string? ContentId = null,
     long? Size = null,
-    string? ContentBytes = null)
+    string? ContentBytes = null,
+    string? SourceUrl = null,
+    string? RetrievalError = null)
 {
     [JsonIgnore]
     public string? EffectiveContentBase64 => ContentBase64 ?? ContentBytes;

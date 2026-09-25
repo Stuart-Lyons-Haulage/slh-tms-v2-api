@@ -81,4 +81,26 @@ public sealed class InfoMailboxGraphPollingServiceTests
         options.ClientSecret = "";
         Assert.False(options.IsConfigured);
     }
+
+    [Fact]
+    public void GraphBody_ExtractsSupportedSharePointWorkbookLinksOnly()
+    {
+        var links = InfoMailboxGraphPollingService.ExtractSupportedDocumentLinks(
+            "<p>See <a href=\"https://stuartlyonshaulage-my.sharepoint.com/:x:/g/personal/joe_lyonshaulage_com/file/Lyons%20collections%20260926%20REAL.xlsm?e=abc\">workbook</a></p>",
+            "See https://example.com/not-an-order.txt");
+
+        var link = Assert.Single(links);
+        Assert.Contains("Lyons%20collections%20260926%20REAL.xlsm", link);
+        Assert.StartsWith("u!", InfoMailboxGraphPollingService.ToGraphShareId(link));
+    }
+
+    [Fact]
+    public void GraphBody_RecognisesExcelShareLinksWithoutAFileExtension()
+    {
+        var links = InfoMailboxGraphPollingService.ExtractSupportedDocumentLinks(
+            "https://stuartlyonshaulage-my.sharepoint.com/:x:/g/personal/joe_lyonshaulage_com/IQTest?e=abc",
+            null);
+
+        Assert.Single(links);
+    }
 }

@@ -7,6 +7,15 @@ public sealed class NwfWorkbookSnapshotParserTests
 {
     private readonly NwfWorkbookSnapshotParser parser = new();
 
+    [Theory]
+    [InlineData("Aldi", "Aldi GOLDTHORPE Distribution Centre", "Aldi-Goldthorpe")]
+    [InlineData("Morrisons", "Morrisons FRUITLATIMER 952", "Morrisons-LatimerPark")]
+    [InlineData("Morrisons", "Morrisons STOCKTON 994", "Morrisons-Stockton")]
+    public void PlannerDestination_IsNormalisedToOperationalSite(string customer, string depot, string expected)
+    {
+        Assert.Equal(expected, NwfWorkbookSnapshotParser.NormaliseNwfPlannerDestination(customer, depot));
+    }
+
     [Fact]
     public void WorkbookSnapshot_KeepsIncompleteFreshCutRowAsPreOrder()
     {

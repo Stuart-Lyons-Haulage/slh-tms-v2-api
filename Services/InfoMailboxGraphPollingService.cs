@@ -1,5 +1,8 @@
 using System.Net.Http.Headers;
+using System.Net;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Azure.Core;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
@@ -162,13 +165,25 @@ public sealed class InfoMailboxGraphPollingService(
             ct.ThrowIfCancellationRequested();
 
             var evidenceKey = SourceEvidenceKey(message.Id);
-            if (await db.StagedImports.AsNoTracking()
+            var linkedUrls = ExtractSupportedDocumentLinks(message.BodyHtml, message.BodyPreview);
+            var existingEvidence = linkedUrls.Count == 0
+                ? null
+                : await db.StagedImports.AsNoTracking()
+                    .Where(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey)
+                    .Select(item => item.PayloadJson)
+                    .FirstOrDefaultAsync(ct);
+            if (existingEvidence is not null && linkedUrls.All(url =>
+                    existingEvidence.Contains(url, StringComparison.Ordinal) &&
+                    !existingEvidence.Contains("retrievalError", StringComparison.Ordinal)))
+                continue;
+            if (existingEvidence is null && linkedUrls.Count == 0 && await db.StagedImports.AsNoTracking()
                 .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct))
                 continue;
 
             var attachments = message.HasAttachments
                 ? await FetchAttachmentsAsync(client, token.Token, message.Id, ct)
                 : [];
+            attachments.AddRange(await FetchLinkedDocumentAttachmentsAsync(client, token.Token, message, ct));
 
             var request = ToIntakeRequest(message, attachments, options.Mailbox);
 
@@ -298,6 +313,114 @@ public sealed class InfoMailboxGraphPollingService(
         }
 
         return result;
+    }
+
+    private async Task<List<MailboxAttachmentRequest>> FetchLinkedDocumentAttachmentsAsync(
+        HttpClient client,
+        string accessToken,
+        GraphMailboxMessage message,
+        CancellationToken ct)
+    {
+        var result = new List<MailboxAttachmentRequest>();
+        foreach (var url in ExtractSupportedDocumentLinks(message.BodyHtml, message.BodyPreview))
+        {
+            var name = LinkedDocumentName(url);
+            try
+            {
+                var encodedShareId = Uri.EscapeDataString(ToGraphShareId(url));
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"shares/{encodedShareId}/driveItem/content");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+                await EnsureGraphSuccessAsync(response, request.RequestUri, ct);
+                var declaredLength = response.Content.Headers.ContentLength;
+                if (declaredLength is > 0 && declaredLength > options.MaxAttachmentBytes)
+                    throw new InvalidOperationException($"linked document is {declaredLength:N0} bytes and exceeds the configured Graph intake limit");
+
+                await using var content = await response.Content.ReadAsStreamAsync(ct);
+                await using var buffer = new MemoryStream();
+                var chunk = new byte[81920];
+                var total = 0L;
+                int read;
+                while ((read = await content.ReadAsync(chunk, ct)) > 0)
+                {
+                    total += read;
+                    if (total > options.MaxAttachmentBytes)
+                        throw new InvalidOperationException($"linked document exceeds the configured Graph intake limit of {options.MaxAttachmentBytes:N0} bytes");
+                    await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
+                }
+
+                result.Add(new MailboxAttachmentRequest(
+                    name,
+                    response.Content.Headers.ContentType?.MediaType,
+                    Convert.ToBase64String(buffer.ToArray()),
+                    false,
+                    null,
+                    total,
+                    null,
+                    url,
+                    null));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Could not retrieve linked order document {Url} from Graph message {MessageId}.", url, message.Id);
+                result.Add(new MailboxAttachmentRequest(
+                    name,
+                    null,
+                    null,
+                    false,
+                    null,
+                    null,
+                    null,
+                    url,
+                    $"Linked document could not be fetched: {ex.GetBaseException().Message}"));
+            }
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<string> ExtractSupportedDocumentLinks(string? bodyHtml, string? bodyPreview)
+    {
+        var values = new[] { bodyHtml, bodyPreview };
+        var links = new List<string>();
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            var decoded = WebUtility.HtmlDecode(value);
+            foreach (Match match in Regex.Matches(decoded, "https://[^\\s\"'<>]+", RegexOptions.IgnoreCase))
+            {
+                var candidate = match.Value.TrimEnd('.', ',', ';', ':', ')', ']', '}');
+                if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri) || !IsSupportedDocumentHost(uri.Host)) continue;
+                var extension = Path.GetExtension(Uri.UnescapeDataString(uri.AbsolutePath));
+                var sharePointExcelLink = uri.AbsolutePath.Contains("/:x:/", StringComparison.OrdinalIgnoreCase);
+                if ((!SupportedExtensions.Contains(extension) && !sharePointExcelLink) || links.Contains(candidate, StringComparer.OrdinalIgnoreCase)) continue;
+                links.Add(candidate);
+            }
+        }
+        return links;
+    }
+
+    internal static string ToGraphShareId(string url)
+    {
+        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(url))
+            .TrimEnd('=')
+            .Replace('+', '-').Replace('/', '_');
+        return $"u!{encoded}";
+    }
+
+    private static bool IsSupportedDocumentHost(string host) =>
+        host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase) ||
+        host.EndsWith(".sharepoint-df.com", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("onedrive.live.com", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("1drv.ms", StringComparison.OrdinalIgnoreCase);
+
+    private static string LinkedDocumentName(string url)
+    {
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            var name = Path.GetFileName(Uri.UnescapeDataString(uri.AbsolutePath));
+            if (!string.IsNullOrWhiteSpace(name)) return name;
+        }
+        return "linked-order-document.xlsx";
     }
 
     private static async Task EnsureGraphSuccessAsync(HttpResponseMessage response, Uri? requestUri, CancellationToken ct)

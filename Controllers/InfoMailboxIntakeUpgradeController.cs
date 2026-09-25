@@ -178,6 +178,8 @@ public sealed class InfoMailboxIntakeUpgradeController(
             FillIfMissing(match, "name", incoming.Name);
             FillIfMissing(match, "contentType", incoming.ContentType);
             FillIfMissing(match, "contentId", incoming.ContentId);
+            FillIfMissing(match, "sourceUrl", incoming.SourceUrl);
+            FillIfMissing(match, "retrievalError", incoming.RetrievalError);
             if (ReadLong(match["size"]) <= 0 && incoming.Size is > 0) match["size"] = incoming.Size;
             if (match["isInline"] is null && incoming.IsInline is not null) match["isInline"] = incoming.IsInline;
 
@@ -200,6 +202,8 @@ public sealed class InfoMailboxIntakeUpgradeController(
         ["contentId"] = attachment.ContentId,
         ["size"] = attachment.Size,
         ["isInline"] = attachment.IsInline,
+        ["sourceUrl"] = attachment.SourceUrl,
+        ["retrievalError"] = attachment.RetrievalError,
         ["contentBase64"] = attachment.EffectiveContentBase64
     };
 

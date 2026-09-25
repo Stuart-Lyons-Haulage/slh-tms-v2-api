@@ -320,7 +320,10 @@ public sealed class RetainedOrderEvidenceReplayController(
                     Text(item, "contentBase64"),
                     Bool(item, "isInline"),
                     Text(item, "contentId"),
-                    Long(item, "size")));
+                    Long(item, "size"),
+                    null,
+                    Text(item, "sourceUrl"),
+                    Text(item, "retrievalError")));
             }
         }
 

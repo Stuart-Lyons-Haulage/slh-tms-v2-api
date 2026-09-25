@@ -21,11 +21,14 @@ public sealed class NwfWorkbookSnapshotParser
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
         var subject = request.Subject ?? string.Empty;
-        var attachment = (request.Attachments ?? []).FirstOrDefault(item =>
-            item.IsInline != true &&
-            !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
-            IsWorkbook(item.Name) &&
-            (LooksLikeNwfTracker(item.Name) || LooksLikeNwfTracker(subject)));
+        var attachment = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true &&
+                          !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
+                          IsWorkbook(item.Name) &&
+                          (LooksLikeNwfTracker(item.Name) || LooksLikeNwfTracker(subject) ||
+                           LooksLikeNwfPlannerWorkbook(item.Name) || LooksLikeNwfPlannerWorkbook(subject)))
+            .OrderByDescending(item => LooksLikeNwfTracker(item.Name) || LooksLikeNwfPlannerWorkbook(item.Name))
+            .FirstOrDefault();
 
         if (attachment is null)
             return null;
@@ -60,6 +63,12 @@ public sealed class NwfWorkbookSnapshotParser
                     recognisedSheet = true;
                     ParseCrateSheet(request, attachment, sheetName, rows, minDate, maxDate, orders, warnings);
                 }
+                else if (string.Equals(normalisedSheet, "NWF", StringComparison.OrdinalIgnoreCase) ||
+                         normalisedSheet.Contains("NWF", StringComparison.OrdinalIgnoreCase))
+                {
+                    recognisedSheet = true;
+                    ParseNwfPlannerSheet(request, attachment, sheetName, rows, minDate, maxDate, orders, warnings);
+                }
             }
             while (reader.NextResult());
 
@@ -82,6 +91,123 @@ public sealed class NwfWorkbookSnapshotParser
                 [],
                 [$"NWF tracker workbook could not be parsed: {ex.GetBaseException().Message}"],
                 "NWF workbook parsing failed; retain the email for manual review.");
+        }
+    }
+
+    private static void ParseNwfPlannerSheet(
+        MailboxEmailIntakeRequest request,
+        MailboxAttachmentRequest attachment,
+        string sheetName,
+        IReadOnlyList<object?[]> rows,
+        DateOnly minDate,
+        DateOnly maxDate,
+        List<ParsedEmailOrder> orders,
+        List<string> globalWarnings)
+    {
+        var headerIndex = rows.ToList().FindIndex(row =>
+        {
+            var keys = row.Select(value => Normalise(CellText(value))).ToHashSet();
+            return keys.Contains("REQUESTEDSHIPDATE") && keys.Contains("COLLECTIONSITE") &&
+                   keys.Contains("CUSTOMERNAME") && keys.Contains("DEPOTDESCRIPTION") &&
+                   keys.Contains("PALLETQTY");
+        });
+        if (headerIndex < 0)
+        {
+            globalWarnings.Add($"NWF planner sheet '{sheetName}' was recognised but its expected headers were not found.");
+            return;
+        }
+
+        var columns = HeaderMap(rows[headerIndex]);
+        var dateIndex = Find(columns, "REQUESTEDSHIPDATE");
+        var collectionIndex = Find(columns, "COLLECTIONSITE");
+        var customerIndex = Find(columns, "CUSTOMERNAME");
+        var depotIdIndex = Find(columns, "DEPOTID");
+        var depotIndex = Find(columns, "DEPOTDESCRIPTION");
+        var addressIndex = Find(columns, "DELIVERYADDRESS");
+        var salesOrderIndex = Find(columns, "SALESORDERID");
+        var customerRefIndex = Find(columns, "CUSTOMERREF");
+        var palletNameIndex = Find(columns, "PALLETNAME");
+        var palletsIndex = Find(columns, "PALLETQTY");
+        var poIndex = Find(columns, "POREF");
+
+        for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+        {
+            var row = rows[rowIndex];
+            var date = CellDate(row, dateIndex);
+            if (date is null || date < minDate || date > maxDate) continue;
+
+            var collection = Clean(CellText(row, collectionIndex));
+            var customer = Clean(CellText(row, customerIndex));
+            var depotId = Clean(CellText(row, depotIdIndex));
+            var depot = Clean(CellText(row, depotIndex));
+            var address = Clean(CellText(row, addressIndex));
+            var salesOrder = Clean(CellText(row, salesOrderIndex));
+            var customerRef = Clean(CellText(row, customerRefIndex));
+            var palletName = Clean(CellText(row, palletNameIndex));
+            var pallets = CellInt(row, palletsIndex);
+            var po = Clean(CellText(row, poIndex));
+            if (string.IsNullOrWhiteSpace(customer) && string.IsNullOrWhiteSpace(depot) && string.IsNullOrWhiteSpace(salesOrder)) continue;
+
+            var warnings = new List<string>();
+            if (pallets is not > 0) warnings.Add("NWF planner row has no positive pallet quantity; it remains for manual review.");
+            if (string.IsNullOrWhiteSpace(collection)) warnings.Add("NWF collection site is blank.");
+            if (string.IsNullOrWhiteSpace(depot)) warnings.Add("NWF depot description is blank.");
+            if (string.IsNullOrWhiteSpace(salesOrder) && string.IsNullOrWhiteSpace(customerRef)) warnings.Add("NWF row has no sales order or customer reference.");
+
+            var destination = NormaliseNwfPlannerDestination(customer, depot);
+            var movement = $"NWF|{date:yyyy-MM-dd}|SO:{Normalise(salesOrder)}|REF:{Normalise(customerRef)}|DEPOT:{Normalise(depotId)}|PALLET:{Normalise(palletName)}";
+            var naturalKey = $"{movement}|COLLECTION:{Normalise(collection)}";
+            var reference = BuildReference(FirstUseful(salesOrder, customerRef, po) ?? $"NWF-{date:yyyyMMdd}", destination);
+            var instructions = $"NWF planner row · Collection: {collection ?? "TBC"} · Delivery: {depot ?? "TBC"} ({address ?? "address TBC"}) · Sales order: {salesOrder ?? "TBC"} · Customer ref: {customerRef ?? "TBC"} · Pallet type: {palletName ?? "TBC"} · Source: {attachment.Name} / {sheetName} row {rowIndex + 1}";
+            if (warnings.Count > 0) instructions += $" · Intake warning: {string.Join("; ", warnings)}";
+
+            var payload = new Dictionary<string, object?>
+            {
+                ["poNumber"] = reference,
+                ["customerPo"] = po ?? salesOrder ?? customerRef,
+                ["customerCode"] = "NWF",
+                ["customerName"] = customer,
+                ["collectionDate"] = date.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                ["deliveryDate"] = date.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                ["pallets"] = pallets,
+                ["sellerName"] = collection,
+                ["collectionLocation"] = collection,
+                ["marketName"] = "NWF",
+                ["stallNumber"] = destination,
+                ["deliveryLocation"] = depot,
+                ["deliveryAddress"] = address,
+                ["jobType"] = "NWF planner order",
+                ["driverInstructions"] = instructions.Length <= 1000 ? instructions : instructions[..1000],
+                ["nwfSalesOrderId"] = salesOrder,
+                ["nwfCustomerRef"] = customerRef,
+                ["nwfDepotId"] = depotId,
+                ["nwfDepotDescription"] = depot,
+                ["nwfPalletName"] = palletName,
+                ["nwfPoRef"] = po,
+                ["plannerReady"] = pallets is > 0 && !string.IsNullOrWhiteSpace(collection) && !string.IsNullOrWhiteSpace(depot),
+                ["intakeStatus"] = pallets is > 0 ? "ReadyForReview" : "MappingException",
+                ["intakeMovementKey"] = movement,
+                ["intakeMatchKeys"] = new[] { movement, $"NWF|{date:yyyy-MM-dd}|SO:{Normalise(salesOrder)}", $"NWF|{date:yyyy-MM-dd}|REF:{Normalise(customerRef)}" },
+                ["intakeNaturalKey"] = naturalKey,
+                ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
+                ["intakeWarnings"] = warnings,
+                ["intakeParser"] = "NWF Planner Workbook",
+                ["sourceMessageId"] = request.MessageId,
+                ["sourceInternetMessageId"] = request.InternetMessageId,
+                ["sourceSender"] = request.SenderAddress,
+                ["sourceSenderName"] = request.SenderName,
+                ["sourceSubject"] = request.Subject,
+                ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+                ["sourceWebLink"] = request.WebLink,
+                ["sourceAttachmentName"] = attachment.Name,
+                ["sourceSheet"] = sheetName,
+                ["sourceRow"] = rowIndex + 1
+            };
+            orders.Add(new ParsedEmailOrder(
+                $"nwf-planner-{rowIndex + 1}-{Normalise(depotId ?? depot)}-{Normalise(salesOrder ?? customerRef)}",
+                naturalKey,
+                JsonSerializer.SerializeToElement(payload),
+                warnings));
         }
     }
 
@@ -499,6 +625,29 @@ public sealed class NwfWorkbookSnapshotParser
                text.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("DAILY TRACKER", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("DAILY CONTROL TRACKER", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeNwfPlannerWorkbook(string? value)
+    {
+        var text = value ?? string.Empty;
+        return text.Contains("LYONS COLLECTIONS", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("NWF", StringComparison.OrdinalIgnoreCase) &&
+               text.Contains("COLLECTION", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string NormaliseNwfPlannerDestination(string? customer, string? depotDescription)
+    {
+        var value = $"{customer} {depotDescription}".Trim();
+        if (value.Contains("GOLDTHORPE", StringComparison.OrdinalIgnoreCase)) return "Aldi-Goldthorpe";
+        if (value.Contains("DARLINGTON", StringComparison.OrdinalIgnoreCase)) return "Aldi-Darlington";
+        if (value.Contains("SITTINGBOURNE", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Sittingbourne";
+        if (value.Contains("LATIMER", StringComparison.OrdinalIgnoreCase)) return "Morrisons-LatimerPark";
+        if (value.Contains("STOCKTON", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Stockton";
+        if (value.Contains("WAKEFIELD", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Wakefield";
+        if (value.Contains("DORDON", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Dordon";
+        if (value.Contains("GADBROOK", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Gadbrook";
+        if (value.Contains("BRIDGWATER", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Bridgwater";
+        return string.IsNullOrWhiteSpace(depotDescription) ? "NWF-Unallocated" : depotDescription.Trim();
     }
 
     private static bool IsWorkbook(string? name)
