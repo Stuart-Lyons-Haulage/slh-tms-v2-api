@@ -10,6 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class DriverDispatchVisibilityController(
     TmsDbContext db,
+    SageHrClient sageHr,
     ILogger<DriverDispatchVisibilityController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
@@ -18,6 +19,6 @@ public sealed class DriverDispatchVisibilityController(
     public async Task<ActionResult<DriverDispatchVisibilitySnapshot>> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
-        return Ok(await DriverDispatchVisibilityStore.ReadAsync(db, planningDate, logger, ct));
+        return Ok(await DriverDispatchVisibilityStore.ReadAsync(db, planningDate, sageHr, logger, ct));
     }
 }

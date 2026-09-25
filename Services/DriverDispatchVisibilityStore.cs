@@ -39,6 +39,7 @@ public static class DriverDispatchVisibilityStore
     public static async Task<DriverDispatchVisibilitySnapshot> ReadAsync(
         TmsDbContext db,
         DateOnly planningDate,
+        SageHrClient sageHr,
         ILogger logger,
         CancellationToken ct)
     {
@@ -70,6 +71,7 @@ public static class DriverDispatchVisibilityStore
         var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
         var profiles = await ReadProfilesAsync(db, logger, ct);
         var liveStatuses = await ReadLiveStatusesAsync(db, logger, ct);
+        var sageRoster = await ReadSageRosterAsync(sageHr, logger, ct);
 
         var visible = new List<DriverDispatchVisibilityItem>();
         foreach (var driver in drivers)
@@ -103,7 +105,7 @@ public static class DriverDispatchVisibilityStore
 
             visible.Add(new DriverDispatchVisibilityItem(
                 driver.Id,
-                EmploymentType(driver),
+                EmploymentType(driver, sageRoster),
                 Clean(driver.Skills),
                 Clean(driver.Coding),
                 lastTachoRead,
@@ -217,24 +219,57 @@ public static class DriverDispatchVisibilityStore
         return null;
     }
 
-    private static string EmploymentType(Driver driver)
-    {
-        if (DriverPopulationRules.IsSubcontractor(driver)) return "Subcontractor";
-        var token = Normalise($"{driver.DriverType} {driver.DriverGroup} {driver.AgencyName}");
-        if (token.Contains("AGENCY", StringComparison.Ordinal)) return "Agency";
-        if (token.Contains("CASUAL", StringComparison.Ordinal) || token.Contains("ZEROHOUR", StringComparison.Ordinal)) return "Casual";
-        return "Employed";
-    }
-
     private static int EmploymentOrder(string value) => value switch
     {
         "Employed" => 0,
         "Casual" => 1,
         "Agency" => 2,
         "Subcontractor" => 3,
+        "Unmatched" => 4,
         _ => 9
     };
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    internal static string EmploymentType(Driver driver, SageRoster roster)
+    {
+        var employeeNumber = Normalise(driver.EmployeeNumber);
+        if (roster.Available && employeeNumber.Length > 0 && roster.EmployeeNumbers.Contains(employeeNumber))
+            return "Employed";
+        if (DriverPopulationRules.IsSubcontractor(driver)) return "Subcontractor";
+        var token = Normalise($"{driver.DriverType} {driver.DriverGroup} {driver.AgencyName}");
+        if (token.Contains("AGENCY", StringComparison.Ordinal)) return "Agency";
+        if (token.Contains("CASUAL", StringComparison.Ordinal) || token.Contains("ZEROHOUR", StringComparison.Ordinal)) return "Casual";
+        // Do not call a local Driver Master row Employed when Sage HR is the employment authority.
+        // Keep it visible for reconciliation rather than silently promoting it.
+        return "Unmatched";
+    }
+
+    private static async Task<SageRoster> ReadSageRosterAsync(SageHrClient sageHr, ILogger logger, CancellationToken ct)
+    {
+        if (!sageHr.IsConfigured) return SageRoster.Unavailable;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(6));
+            var employees = await sageHr.GetActiveEmployeesAsync(timeout.Token);
+            var numbers = employees
+                .Where(employee => DriverPopulationRules.IsSageDriver(employee, sageHr.DriverTeamName, sageHr.DriverPositionKeyword))
+                .Select(employee => Normalise(employee.EmployeeNumber))
+                .Where(number => number.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return new SageRoster(true, numbers);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(exception, "Sage HR employment roster was unavailable for Driver Dispatch visibility; local employed labels will not be promoted.");
+            return SageRoster.Unavailable;
+        }
+    }
+
+    internal sealed record SageRoster(bool Available, IReadOnlySet<string> EmployeeNumbers)
+    {
+        public static SageRoster Unavailable { get; } = new(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    }
 }
