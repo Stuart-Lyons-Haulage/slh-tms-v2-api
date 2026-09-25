@@ -101,12 +101,27 @@ public static class MasterDataDuplicateReviewService
     {
         if (candidates.Count == 0) return candidates;
 
-        var rejectedPayloads = await db.MasterDataAudits.AsNoTracking()
-            .Where(audit => audit.Action == "RejectedDuplicateCandidate" && audit.EntityType.StartsWith("Duplicate:"))
-            .OrderByDescending(audit => audit.ChangedAtUtc)
-            .Select(audit => audit.ChangesJson)
-            .Take(500)
-            .ToListAsync(ct);
+        List<string?> rejectedPayloads;
+        try
+        {
+            rejectedPayloads = await db.MasterDataAudits.AsNoTracking()
+                .Where(audit => audit.Action == "RejectedDuplicateCandidate" && audit.EntityType.StartsWith("Duplicate:"))
+                .OrderByDescending(audit => audit.ChangedAtUtc)
+                .Select(audit => audit.ChangesJson)
+                .Take(500)
+                .ToListAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Duplicate scanning is read-only. Missing/legacy audit evidence must not make
+            // the operational Master Data duplicate check unavailable.
+            db.ChangeTracker.Clear();
+            return candidates;
+        }
 
         if (rejectedPayloads.Count == 0) return candidates;
 
@@ -140,7 +155,20 @@ public static class MasterDataDuplicateReviewService
     private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindSiteCandidatesAsync(TmsDbContext db, CancellationToken ct)
     {
         var rows = await db.Sites.AsNoTracking().Where(row => row.Active).ToListAsync(ct);
-        await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Aliases and provider detail improve confidence, but the core Site Master
+            // fields remain sufficient for a safe duplicate scan.
+            db.ChangeTracker.Clear();
+        }
         var groups = new Dictionary<string, HashSet<Site>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var row in rows)
@@ -178,9 +206,22 @@ public static class MasterDataDuplicateReviewService
     private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindDriverCandidatesAsync(TmsDbContext db, CancellationToken ct)
     {
         var rows = await db.Drivers.AsNoTracking().Where(row => row.Active).ToListAsync(ct);
-        // TachoMasterDriverId is [NotMapped] — it must be populated by EnrichDriversAsync
-        // or sameTacho will always be false and drivers will incorrectly score at 96 instead of 99.
-        await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
+        // TachoMasterDriverId is persisted on Driver Master. Master-detail enrichment adds
+        // card/licence/legacy evidence but must never be required just to run duplicate review.
+        try
+        {
+            await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Fall back to persisted Member Code / employee identity if historical detail
+            // evidence is malformed or unavailable.
+            db.ChangeTracker.Clear();
+        }
         var groups = new Dictionary<string, HashSet<Driver>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var row in rows)

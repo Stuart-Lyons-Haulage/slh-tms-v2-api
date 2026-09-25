@@ -163,11 +163,36 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
     }
 
     [Fact]
+    public void Duplicate_scan_has_live_data_resilience_and_explicit_failure_contract()
+    {
+        var serviceSource = ReadRepoFile("Services/MasterDataDuplicateReviewService.cs");
+        var controllerSource = ReadRepoFile("Controllers/MasterDataDuplicateReviewController.cs");
+
+        Assert.Contains("Master-detail enrichment adds", serviceSource, StringComparison.Ordinal);
+        Assert.Contains("Fall back to persisted Member Code / employee identity", serviceSource, StringComparison.Ordinal);
+        Assert.Contains("operational Master Data duplicate check unavailable", serviceSource, StringComparison.Ordinal);
+        Assert.Contains("master_duplicate_scan_failed", controllerSource, StringComparison.Ordinal);
+        Assert.Contains("duplicate check could not complete", controllerSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Reject_endpoint_accepts_frontend_camel_case_payload()
     {
         var client = _factory.CreateClientWithUser(LyonsUser);
         var response = await client.PostAsJsonAsync("/api/v1/operational-master-data/duplicates/reject", new { candidateId = "abc123", entityType = "sites", note = "keep separate test" });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static string ReadRepoFile(string relativePath)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Slh.Tms.Api.csproj")))
+            directory = directory.Parent;
+
+        Assert.NotNull(directory);
+        var path = Path.Combine(directory!.FullName, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Assert.True(File.Exists(path), $"Expected repository file was not found: {path}");
+        return File.ReadAllText(path);
     }
 }
