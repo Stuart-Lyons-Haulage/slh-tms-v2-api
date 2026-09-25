@@ -73,6 +73,7 @@ public sealed class InfoMailboxGraphPollingService(
     InfoMailboxGraphHealthState health,
     ILogger<InfoMailboxGraphPollingService> logger) : BackgroundService
 {
+    private readonly SemaphoreSlim pollGate = new(1, 1);
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -120,7 +121,20 @@ public sealed class InfoMailboxGraphPollingService(
         }
     }
 
-    internal async Task PollOnceAsync(CancellationToken ct)
+    public async Task PollOnceAsync(CancellationToken ct)
+    {
+        await pollGate.WaitAsync(ct);
+        try
+        {
+            await PollCoreAsync(ct);
+        }
+        finally
+        {
+            pollGate.Release();
+        }
+    }
+
+    private async Task PollCoreAsync(CancellationToken ct)
     {
         var credential = new ClientSecretCredential(options.TenantId, options.ClientId, options.ClientSecret);
         var token = await credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
