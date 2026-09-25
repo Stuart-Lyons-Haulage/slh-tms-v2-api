@@ -31,7 +31,8 @@ public sealed class DriverDispatchEmploymentClassificationTests
         var subcontractor = new Driver { EmployeeNumber = "SUB-1", DriverType = "Subcontractor", DisplayName = "Subbie" };
         var roster = new DriverDispatchVisibilityStore.SageRoster(true, new HashSet<string>());
 
-        Assert.Equal("Agency", DriverDispatchVisibilityStore.EmploymentType(agency, roster));
+        Assert.Equal("Unmatched", DriverDispatchVisibilityStore.EmploymentType(agency, roster));
+        Assert.Equal("Agency", DriverDispatchVisibilityStore.EmploymentType(agency, roster, rosteredAgency: true));
         Assert.Equal("Subcontractor", DriverDispatchVisibilityStore.EmploymentType(subcontractor, roster));
     }
 }

@@ -85,15 +85,14 @@ public static class DriverDispatchVisibilityStore
             var allocated = current.Contains(driver.Id);
             var rosteredAgency = roster.ContainsKey(driver.Id);
             var subcontractor = DriverPopulationRules.IsSubcontractor(driver);
-            if (!DriverDispatchVisibilityRules.IsVisible(
-                    planningDate,
-                    lastTachoRead,
-                    lastLiveActivity,
-                    lastExecutedRun == default ? null : lastExecutedRun,
-                    allocated,
-                    rosteredAgency,
-                    subcontractor))
-                continue;
+            var recentlyOperational = DriverDispatchVisibilityRules.IsVisible(
+                planningDate,
+                lastTachoRead,
+                lastLiveActivity,
+                lastExecutedRun == default ? null : lastExecutedRun,
+                allocated,
+                rosteredAgency,
+                subcontractor);
 
             var evidence = allocated ? "Allocated today"
                 : rosteredAgency ? "Rostered agency"
@@ -101,11 +100,11 @@ public static class DriverDispatchVisibilityStore
                 : lastTachoRead is DateOnly tacho && tacho >= cutoff ? $"Tacho read {tacho:dd/MM/yyyy}"
                 : lastLiveActivity is DateTimeOffset tracked && DateOnly.FromDateTime(tracked.UtcDateTime) >= cutoff ? "Live tracking"
                 : lastExecutedRun != default ? $"Live run {lastExecutedRun:dd/MM/yyyy}"
-                : "Recent operational evidence";
+                : recentlyOperational ? "Recent operational evidence" : "Driver Master record";
 
             visible.Add(new DriverDispatchVisibilityItem(
                 driver.Id,
-                EmploymentType(driver, sageRoster),
+                EmploymentType(driver, sageRoster, rosteredAgency),
                 Clean(driver.Skills),
                 Clean(driver.Coding),
                 lastTachoRead,
@@ -239,14 +238,14 @@ public static class DriverDispatchVisibilityStore
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
-    internal static string EmploymentType(Driver driver, SageRoster roster)
+    internal static string EmploymentType(Driver driver, SageRoster roster, bool rosteredAgency = false)
     {
         var employeeNumber = Normalise(driver.EmployeeNumber);
         if (roster.Available && employeeNumber.Length > 0 && roster.EmployeeNumbers.Contains(employeeNumber))
             return "Employed";
+        if (rosteredAgency) return "Agency";
         if (DriverPopulationRules.IsSubcontractor(driver)) return "Subcontractor";
         var token = Normalise($"{driver.DriverType} {driver.DriverGroup} {driver.AgencyName}");
-        if (token.Contains("AGENCY", StringComparison.Ordinal)) return "Agency";
         if (token.Contains("CASUAL", StringComparison.Ordinal) || token.Contains("ZEROHOUR", StringComparison.Ordinal)) return "Casual";
         // Do not call a local Driver Master row Employed when Sage HR is the employment authority.
         // Keep it visible for reconciliation rather than silently promoting it.
