@@ -54,7 +54,7 @@ public sealed class SamsaraClientTests
                 null,
                 [
                     new SamsaraRouteStopRequest(firstStop, 1, "SLH Depot", "address-1", "Depot", 50.0, -0.1, 250, null, start, "Start"),
-                    new SamsaraRouteStopRequest(lastStop, 2, "Customer", "address-2", "Customer", 51.0, -0.2, 250, finish, finish, "Deliver")
+                    new SamsaraRouteStopRequest(lastStop, 2, "Customer", "address-2", "Customer", 51.0, -0.2, 250, finish, null, "Deliver")
                 ]),
             CancellationToken.None);
 
@@ -65,7 +65,7 @@ public sealed class SamsaraClientTests
         Assert.False(root.GetProperty("recomputeScheduledTimes").GetBoolean());
         Assert.Equal("manual", root.GetProperty("settings").GetProperty("sequencingMethod").GetString());
         Assert.Equal("departFirstStop", root.GetProperty("settings").GetProperty("routeStartingCondition").GetString());
-        Assert.Equal("departLastStop", root.GetProperty("settings").GetProperty("routeCompletionCondition").GetString());
+        Assert.Equal("arriveLastStop", root.GetProperty("settings").GetProperty("routeCompletionCondition").GetString());
 
         var stops = root.GetProperty("stops");
         Assert.Equal(1, stops[0].GetProperty("sequenceNumber").GetInt32());
@@ -75,7 +75,7 @@ public sealed class SamsaraClientTests
 
         Assert.Equal(2, stops[1].GetProperty("sequenceNumber").GetInt32());
         Assert.True(stops[1].TryGetProperty("scheduledArrivalTime", out _));
-        Assert.True(stops[1].TryGetProperty("scheduledDepartureTime", out _));
+        Assert.False(stops[1].TryGetProperty("scheduledDepartureTime", out _));
     }
 
     [Fact]
@@ -135,7 +135,7 @@ public sealed class SamsaraClientTests
             SiteExternalIdKey = "slhTmsSite",
             RecomputeScheduledTimes = false,
             RouteStartingCondition = "departFirstStop",
-            RouteCompletionCondition = "departLastStop",
+            RouteCompletionCondition = "arriveLastStop",
             SequencingMethod = "manual",
             EnableAddressSync = true
         };

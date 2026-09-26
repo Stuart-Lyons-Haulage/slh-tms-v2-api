@@ -18,7 +18,7 @@ public sealed class SamsaraOptions
     // it must not rewrite the HGV-aware schedule created by the TMS.
     public bool RecomputeScheduledTimes { get; set; } = false;
     public string RouteStartingCondition { get; set; } = "departFirstStop";
-    public string RouteCompletionCondition { get; set; } = "departLastStop";
+    public string RouteCompletionCondition { get; set; } = "arriveLastStop";
     public string SequencingMethod { get; set; } = "manual";
 
     // Known Site Master locations should be reusable Samsara Addresses. Single-use
