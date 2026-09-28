@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
@@ -17,6 +18,59 @@ public sealed class WeeklyDriverTimesheetsController(
     ILogger<WeeklyDriverTimesheetsController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+
+    [HttpPost("review")]
+    [Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> Review([FromBody] TimesheetReviewRequest request, CancellationToken ct)
+    {
+        var allowed = new[] { "Confirmed Night Out - Regular Rest", "Confirmed Night Out - Reduced Rest", "No Night Out" };
+        if (!allowed.Contains(request.Decision, StringComparer.Ordinal))
+            return BadRequest(new { message = "Choose a supported night-out decision." });
+
+        if (!await db.Drivers.AnyAsync(x => x.Id == request.DriverId && x.Active, ct))
+            return NotFound(new { message = "Driver Master record was not found." });
+
+        var key = ReviewKey(request.DriverId, request.Date, request.DutyStartUtc);
+        var existing = await db.StagedImports.FirstOrDefaultAsync(x => x.EntityType == "timesheet-review" && x.IdempotencyKey == key, ct);
+        var previousStatus = existing?.Status;
+        var payload = new TimesheetReviewPayload(request.DriverId, request.Date, request.DutyStartUtc, request.Decision, request.Reason, User.Identity?.Name, DateTimeOffset.UtcNow);
+        var json = JsonSerializer.Serialize(payload);
+        if (existing is null)
+        {
+            existing = new StagedImport
+            {
+                EntityType = "timesheet-review",
+                IdempotencyKey = key,
+                PayloadJson = json,
+                Source = "Driver timesheets",
+                Status = StagingStatus.Promoted,
+                ReviewedAtUtc = DateTimeOffset.UtcNow,
+                ReviewedBy = User.Identity?.Name,
+                ReviewNote = request.Reason
+            };
+            db.StagedImports.Add(existing);
+        }
+        else
+        {
+            existing.PayloadJson = json;
+            existing.Status = StagingStatus.Promoted;
+            existing.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            existing.ReviewedBy = User.Identity?.Name;
+            existing.ReviewNote = request.Reason;
+        }
+
+        db.StagedImportEvents.Add(StagingAudit.Create(existing, "TimesheetReviewRecorded", previousStatus, request.Reason, User.Identity?.Name));
+        db.MasterDataAudits.Add(new MasterDataAudit
+        {
+            EntityType = "Timesheet",
+            EntityId = request.DriverId,
+            Action = "NightOutReviewDecision",
+            ChangesJson = json,
+            ChangedBy = User.Identity?.Name
+        });
+        await db.SaveChangesAsync(ct);
+        return Ok(new { key, decision = request.Decision, source = "Manual" });
+    }
 
     [HttpGet]
     public async Task<IActionResult> Range([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken ct)
@@ -46,6 +100,13 @@ public sealed class WeeklyDriverTimesheetsController(
             logger.LogWarning(ex, "Driver detail enrichment was unavailable for timesheets.");
         }
         drivers = drivers.Where(DriverPopulationRules.IsDriver).ToList();
+
+        var manualReviews = (await db.StagedImports.AsNoTracking()
+            .Where(x => x.EntityType == "timesheet-review" && x.Status == StagingStatus.Promoted)
+            .ToListAsync(ct))
+            .Select(row => JsonSerializer.Deserialize<TimesheetReviewPayload>(row.PayloadJson))
+            .Where(item => item is not null)
+            .ToDictionary(item => ReviewKey(item!.DriverId, item.Date, item.DutyStartUtc), item => item!);
 
         IReadOnlyList<SageHrEmployee> sageEmployees = [];
         string? sageError = null;
@@ -386,6 +447,18 @@ public sealed class WeeklyDriverTimesheetsController(
                 var sameVehicle = nextDuty is not null && string.Equals(Normalise(nextDuty.VehicleCode), Normalise(duties.LastOrDefault()?.VehicleCode), StringComparison.OrdinalIgnoreCase);
                 var nightOut = TimesheetEvidenceRules.AssessNightOut(tachoEnd, nextDuty?.DutyStartUtc, lastMovementEvent?.EventTimeUtc, lastMovementEvent?.Latitude, lastMovementEvent?.Longitude, depotPoints, sameVehicle);
                 if (nightOut.Status == "Possible Night Out") reviewReasons.Add(nightOut.Reason);
+                var reviewKey = ReviewKey(driver.Id, day, tachoStart);
+                manualReviews.TryGetValue(reviewKey, out var manualReview);
+                if (manualReview is not null)
+                {
+                    nightOut = manualReview.Decision switch
+                    {
+                        "Confirmed Night Out - Regular Rest" => new NightOutAssessment(manualReview.Decision, nightOut.RestMinutes, "Manually confirmed by planner."),
+                        "Confirmed Night Out - Reduced Rest" => new NightOutAssessment(manualReview.Decision, nightOut.RestMinutes, "Manually confirmed by planner."),
+                        _ => new NightOutAssessment("No Night Out", nightOut.RestMinutes, "Manually reviewed; no night out confirmed.")
+                    };
+                    reviewReasons.RemoveAll(reason => reason.Contains("night out", StringComparison.OrdinalIgnoreCase) || reason.Contains("rest", StringComparison.OrdinalIgnoreCase));
+                }
 
                 var hasTacho = duties.Count > 0;
                 var hasTracker = movement.Count > 0;
@@ -435,7 +508,10 @@ public sealed class WeeklyDriverTimesheetsController(
                     notes,
                     reviewReasons = reviewReasons.Distinct().ToArray(),
                     nightOutStatus = nightOut.Status,
-                    nightOutSource = "Inferred",
+                    nightOutSource = manualReview is null ? "Inferred" : "Manual",
+                    reviewDecision = manualReview?.Decision,
+                    reviewDecisionBy = manualReview?.ReviewedBy,
+                    reviewDecisionAtUtc = manualReview?.ReviewedAtUtc,
                     restDurationMinutes = nightOut.RestMinutes,
                     restType = nightOut.Status.Contains("Regular", StringComparison.OrdinalIgnoreCase) ? "Regular daily rest" : nightOut.Status.Contains("Reduced", StringComparison.OrdinalIgnoreCase) ? "Reduced daily rest" : null,
                     payUnits = employmentType == "Employed" ? $"1 day{(nightOut.Status.StartsWith("Confirmed Night Out", StringComparison.Ordinal) ? " + 1 night out" : string.Empty)}" : null,
@@ -574,4 +650,10 @@ public sealed class WeeklyDriverTimesheetsController(
 
     private static string Normalise(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static string ReviewKey(Guid driverId, DateOnly date, DateTimeOffset? dutyStartUtc) =>
+        $"timesheet-review:{driverId:N}:{date:yyyy-MM-dd}:{dutyStartUtc?.ToUniversalTime().Ticks ?? 0}";
 }
+
+public sealed record TimesheetReviewRequest(Guid DriverId, DateOnly Date, DateTimeOffset? DutyStartUtc, string Decision, string? Reason);
+public sealed record TimesheetReviewPayload(Guid DriverId, DateOnly Date, DateTimeOffset? DutyStartUtc, string Decision, string? Reason, string? ReviewedBy, DateTimeOffset ReviewedAtUtc = default);
