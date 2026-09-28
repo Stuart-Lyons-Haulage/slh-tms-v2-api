@@ -406,7 +406,10 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 ["name"] = entry.Name,
                 ["standOrLocation"] = entry.StandOrLocation,
                 ["salesman"] = entry.Salesman,
-                ["sender"] = entry.Sender,
+                // Sender is a separate reusable master list, not a property of a
+                // particular market seller/stall. Include null deliberately so a
+                // workbook replay also clears stale per-market sender values.
+                ["sender"] = null,
                 ["readOnlyMapPdfUrl"] = entry.ReadOnlyMapPdfUrl,
                 ["active"] = true
             };

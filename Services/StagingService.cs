@@ -371,6 +371,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             contact = await db.MarketContacts.FirstOrDefaultAsync(item => item.MarketKey == marketKey, ct);
         contact ??= await db.MarketContacts.FirstOrDefaultAsync(item => item.Market == market && item.Name == name && item.StandOrLocation == standOrLocation, ct);
         var salesman = Clip(Text(payload, "salesman"), 200);
+        var senderProvided = payload.TryGetProperty("sender", out _);
         var sender = Clip(Text(payload, "sender"), 200);
         var readOnlyMapPdfUrl = Clip(Text(payload, "readOnlyMapPdfUrl"), 1000);
         if (contact is null)
@@ -384,7 +385,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             contact.Name = name;
             contact.StandOrLocation = standOrLocation;
             contact.Salesman = salesman ?? contact.Salesman;
-            contact.Sender = sender ?? contact.Sender;
+            contact.Sender = senderProvided ? sender : contact.Sender;
             contact.ReadOnlyMapPdfUrl = readOnlyMapPdfUrl ?? contact.ReadOnlyMapPdfUrl;
             contact.Active = Bool(payload, "active", contact.Active);
         }
