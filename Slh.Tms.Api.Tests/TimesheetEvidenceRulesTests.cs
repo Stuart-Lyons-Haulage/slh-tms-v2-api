@@ -66,5 +66,14 @@ public sealed class TimesheetEvidenceRulesTests
         Assert.Equal("Possible Night Out", result.Status);
     }
 
+    [Fact]
+    public void Friday_to_monday_full_rest_is_not_a_night_out()
+    {
+        var end = DateTimeOffset.Parse("2026-09-25T18:00:00Z");
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(59), end, 53.8m, -1.2m, Array.Empty<DepotPoint>(), true);
+        Assert.Equal("No Night Out", result.Status);
+        Assert.Contains("full/weekly rest", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static DotTelemetryRecord Event(string vehicle, DateTimeOffset time) => new("id-" + vehicle + time.Ticks, vehicle, time, 53.8m, -1.2m, 20m, true, true, "Received", "{}");
 }
