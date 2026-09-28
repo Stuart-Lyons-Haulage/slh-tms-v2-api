@@ -226,6 +226,12 @@ public static class SchemaMigrationRunner
         "076_Customer_Collection_Sites_Geofence_Links.sql",
         "077_Order_Amendment_Replan_Flag.sql",
         "078_Active_Driver_Tacho_Identity_Index.sql",
+        // These two migrations were applied to the existing standalone SQL volume
+        // before the booking-history work was added. Their names/checksums and
+        // ordering are immutable; keep them in the catalogue so the volume can
+        // start safely and the newer migrations can be appended after version 72.
+        "079_Summer_Berry_Physical_Sites.sql",
+        "080_Repair_Barfoots_Leythorne_Geofence.sql",
         "079_Booking_Invoice_History.sql",
         "080_Invoice_Line_Booking_Reservation.sql",
         "081_Booking_Allocation_Unmatch.sql",

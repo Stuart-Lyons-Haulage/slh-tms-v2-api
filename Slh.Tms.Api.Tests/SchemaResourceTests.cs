@@ -37,6 +37,8 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.074_Local_Tms_Users.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.075_Canonical_Identity_Uniqueness.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.076_Customer_Collection_Sites_Geofence_Links.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.079_Summer_Berry_Physical_Sites.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.080_Repair_Barfoots_Leythorne_Geofence.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.079_Booking_Invoice_History.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.080_Invoice_Line_Booking_Reservation.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.081_Booking_Allocation_Unmatch.sql", resources);
@@ -89,6 +91,8 @@ public sealed class SchemaResourceTests
             "076_Customer_Collection_Sites_Geofence_Links.sql",
             "077_Order_Amendment_Replan_Flag.sql",
             "078_Active_Driver_Tacho_Identity_Index.sql",
+            "079_Summer_Berry_Physical_Sites.sql",
+            "080_Repair_Barfoots_Leythorne_Geofence.sql",
             "079_Booking_Invoice_History.sql",
             "080_Invoice_Line_Booking_Reservation.sql",
             "081_Booking_Allocation_Unmatch.sql",
