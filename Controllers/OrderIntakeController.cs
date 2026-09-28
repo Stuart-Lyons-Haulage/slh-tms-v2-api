@@ -94,7 +94,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             .Where(item => !existingByKey.ContainsKey(item.IdempotencyKey))
             .Select(item => item.Order)
             .ToList();
-        var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct);
+        var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct, allowSameMessageId: true);
         var createdByKey = new Dictionary<string, StagedImport>(StringComparer.Ordinal);
 
         foreach (var preparedOrder in prepared)
@@ -725,7 +725,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         IReadOnlyCollection<ParsedEmailOrder> missingOrders,
         IReadOnlyCollection<ParsedEmailOrder> allOrders,
         string currentMessageId,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool allowSameMessageId = false)
     {
         var naturalKeys = missingOrders
             .Select(order => order.NaturalKey)
@@ -748,7 +749,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             {
                 using var document = JsonDocument.Parse(candidate.PayloadJson);
                 var root = document.RootElement;
-                if (string.Equals(ReadText(root, "sourceMessageId"), currentMessageId, StringComparison.Ordinal))
+                if (!allowSameMessageId && string.Equals(ReadText(root, "sourceMessageId"), currentMessageId, StringComparison.Ordinal))
                     continue;
 
                 var naturalKey = ReadText(root, "intakeNaturalKey");
