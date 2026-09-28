@@ -66,12 +66,13 @@ public static class OrderSiteMasterAlignment
         }
 
         var collection = Match(sites, rawCollection);
-        var marketContext = await MatchMarketContextAsync(db, marketName, rawDelivery, ct);
+        var effectiveMarketName = InferMarketName(marketName, rawDelivery, rawDriverInstructions);
+        var marketContext = await MatchMarketContextAsync(db, effectiveMarketName, rawDelivery, ct);
 
         // The market is the physical delivery location and therefore owns the geofence.
         // Resolve it independently of the trader/stall lookup so a missing or ambiguous
         // Market Master contact can never turn a market delivery into a fake site.
-        var marketSite = Match(sites, marketName)
+        var marketSite = Match(sites, effectiveMarketName)
             ?? (marketContext is null ? null : Match(sites, marketContext.Market));
         var delivery = marketSite ?? Match(sites, rawDelivery);
 
@@ -198,6 +199,17 @@ public static class OrderSiteMasterAlignment
         if (unique.Count != 1) return null;
         var match = unique[0];
         return new MarketContext(match.Market.Trim(), match.Name.Trim(), Clean(match.StandOrLocation), Clean(match.Salesman));
+    }
+
+    private static string? InferMarketName(string? marketName, string? destination, string? instructions)
+    {
+        if (!string.IsNullOrWhiteSpace(marketName)) return marketName;
+        var text = $"{destination} {instructions}";
+        if (text.Contains("Covent Garden", StringComparison.OrdinalIgnoreCase)) return "Covent Garden Market";
+        if (text.Contains("Spitalfields", StringComparison.OrdinalIgnoreCase) || text.Contains("SPIT", StringComparison.OrdinalIgnoreCase)) return "Spitalfields Market";
+        if (text.Contains("Western International", StringComparison.OrdinalIgnoreCase) || text.Contains("Western Market", StringComparison.OrdinalIgnoreCase)) return "Western International Market";
+        if (text.Contains("Brighton Market", StringComparison.OrdinalIgnoreCase)) return "Brighton Market";
+        return null;
     }
 
     private static Site? Match(IEnumerable<Site> sites, string? value)
