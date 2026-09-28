@@ -43,8 +43,10 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.All(result.Orders, order => Assert.StartsWith("Aldi", order.Payload.GetProperty("stallNumber").GetString(), StringComparison.OrdinalIgnoreCase));
         Assert.All(result.Orders, order => Assert.Equal("29.09.2026.xlsm", order.Payload.GetProperty("sourceAttachmentName").GetString()));
         Assert.All(result.Orders, order => Assert.Equal("Orders", order.Payload.GetProperty("sourceWorkbookSheet").GetString()));
-        Assert.All(result.Orders, order => Assert.Equal("Euro", order.Payload.GetProperty("palletType").GetString()));
+        Assert.All(result.Orders, order => Assert.False(string.IsNullOrWhiteSpace(order.Payload.GetProperty("palletType").GetString())));
         Assert.All(result.Orders, order => Assert.Equal("+3°C", order.Payload.GetProperty("temperatureRequirement").GetString()));
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("palletType").GetString() == "Euro");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("palletType").GetString() == "STD");
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Walton Farm (+3°C)");
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Ham Farm (+3°C)");
     }
