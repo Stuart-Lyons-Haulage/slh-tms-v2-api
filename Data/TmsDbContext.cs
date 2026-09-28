@@ -74,6 +74,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         foreach (var loadId in completionTransitions)
             await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(this, loadId, cancellationToken);
 
+        await EnsureUniqueActiveSiteGeofenceLinksAsync(cancellationToken);
         NormalizeMarketOrderProjection();
         EnqueuePendingMasterDataAudits();
         return await base.SaveChangesAsync(cancellationToken);
@@ -81,6 +82,61 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
     internal Task<int> SaveAuditReplayChangesAsync(CancellationToken cancellationToken = default) =>
         base.SaveChangesAsync(cancellationToken);
+
+    private async Task EnsureUniqueActiveSiteGeofenceLinksAsync(CancellationToken cancellationToken)
+    {
+        var allTracked = ChangeTracker.Entries<SiteGeofence>()
+            .Where(entry => entry.State is not EntityState.Detached and not EntityState.Deleted)
+            .ToList();
+
+        var linkChanges = allTracked
+            .Where(entry => entry.Entity.Active && entry.Entity.SiteId.HasValue)
+            .Where(entry =>
+                entry.State == EntityState.Added
+                || entry.State == EntityState.Modified
+                && (entry.Property(fence => fence.SiteId).IsModified || entry.Property(fence => fence.Active).IsModified))
+            .ToList();
+
+        if (linkChanges.Count == 0) return;
+
+        var changedIds = linkChanges.Select(entry => entry.Entity.Id).ToHashSet();
+        var trackedActiveLinks = allTracked
+            .Where(entry => entry.Entity.Active && entry.Entity.SiteId.HasValue)
+            .Select(entry => new
+            {
+                entry.Entity.Id,
+                entry.Entity.Name,
+                SiteId = entry.Entity.SiteId!.Value
+            })
+            .ToList();
+
+        var trackedConflict = trackedActiveLinks
+            .GroupBy(row => row.SiteId)
+            .FirstOrDefault(group => group.Count() > 1 && group.Any(row => changedIds.Contains(row.Id)));
+
+        if (trackedConflict is not null)
+        {
+            var names = string.Join("', '", trackedConflict.Select(row => row.Name).Distinct(StringComparer.OrdinalIgnoreCase));
+            throw new InvalidOperationException(
+                $"A Site can only have one active geofence. Site {trackedConflict.Key} is being assigned to '{names}'. Archive or unlink the existing geofence before assigning another.");
+        }
+
+        var changedSiteIds = linkChanges.Select(entry => entry.Entity.SiteId!.Value).Distinct().ToList();
+        var trackedIds = allTracked.Select(entry => entry.Entity.Id).ToHashSet();
+        var persistedConflict = await SiteGeofences.AsNoTracking()
+            .Where(fence => fence.Active
+                && fence.SiteId.HasValue
+                && changedSiteIds.Contains(fence.SiteId.Value)
+                && !trackedIds.Contains(fence.Id))
+            .Select(fence => new { fence.Id, fence.Name, SiteId = fence.SiteId!.Value })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (persistedConflict is null) return;
+
+        var incoming = linkChanges.First(entry => entry.Entity.SiteId == persistedConflict.SiteId).Entity;
+        throw new InvalidOperationException(
+            $"A Site can only have one active geofence. '{persistedConflict.Name}' is already assigned to Site {persistedConflict.SiteId}; '{incoming.Name}' cannot also be linked. Archive or unlink the existing geofence first.");
+    }
 
     private void NormalizeMarketOrderProjection()
     {

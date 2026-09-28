@@ -74,6 +74,10 @@ public static partial class SiteGeofenceMasterSync
         }
 
         var sitesById = sites.ToDictionary(x => x.Id);
+        var claimedSiteIds = fences
+            .Where(fence => fence.Active && fence.SiteId.HasValue)
+            .Select(fence => fence.SiteId!.Value)
+            .ToHashSet();
         var linked = 0;
         var unlinked = 0;
         var canonicalized = 0;
@@ -104,9 +108,17 @@ public static partial class SiteGeofenceMasterSync
             if (candidates.Count == 1)
             {
                 var site = candidates[0];
+                if (fence.SiteId != site.Id && claimedSiteIds.Contains(site.Id))
+                {
+                    warnings.Add($"Geofence '{fence.Name}' was left unlinked because Site {site.ExternalCode} ({site.Name}) already has an active geofence. Review the duplicate Site assignment before linking.");
+                    unlinked++;
+                    continue;
+                }
+
                 if (fence.SiteId != site.Id)
                 {
                     fence.SiteId = site.Id;
+                    claimedSiteIds.Add(site.Id);
                     linked++;
                 }
                 if (!string.Equals(fence.SiteNumber, site.ExternalCode, StringComparison.OrdinalIgnoreCase))
@@ -187,6 +199,10 @@ public static partial class SiteGeofenceMasterSync
         var requested = sites.FirstOrDefault(x => string.Equals(x.ExternalCode, siteCode.Trim(), StringComparison.OrdinalIgnoreCase))
             ?? throw new KeyNotFoundException("Site code not found.");
         var fence = await ResolveLinkableGeofenceAsync(db, geofenceId, ct);
+        var existingSiteFence = await db.SiteGeofences.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Active && x.SiteId == requested.Id && x.Id != fence.Id, ct);
+        if (existingSiteFence is not null)
+            throw new InvalidOperationException($"Site {requested.ExternalCode} ({requested.Name}) is already linked to active geofence '{existingSiteFence.Name}'. Archive or unlink that geofence before assigning another.");
 
         // This method is called by the authenticated operator dropdown. The selected
         // canonical Site is therefore an explicit manual decision and is authoritative.
