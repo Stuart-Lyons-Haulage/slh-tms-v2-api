@@ -3,7 +3,7 @@ namespace Slh.Tms.Api.Models.Integrations;
 public sealed class SamsaraOptions
 {
     public bool Enabled { get; set; }
-    public string BaseUrl { get; set; } = "https://api.samsara.com";
+    public string BaseUrl { get; set; } = "https://api.eu.samsara.com";
     public string ApiToken { get; set; } = string.Empty;
 
     // External IDs are deliberately split by entity so Samsara can be reconciled
