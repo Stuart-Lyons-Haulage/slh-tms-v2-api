@@ -363,8 +363,40 @@ public static class MasterDataDuplicateReviewService
             await MasterDetailStore.SaveAsync(db, "site", duplicate.ExternalCode, JsonSerializer.Serialize(duplicate), "Duplicate merge archived source site", actor, ct);
         }
 
-        var geofences = await db.SiteGeofences.Where(row => row.SiteId.HasValue && duplicateIds.Contains(row.SiteId.Value)).ToListAsync(ct);
-        foreach (var geofence in geofences) geofence.SiteId = canonical.Id;
+        var canonicalActiveGeofences = await db.SiteGeofences
+            .Where(row => row.Active && row.SiteId == canonical.Id)
+            .OrderByDescending(row => row.UpdatedAtUtc)
+            .ToListAsync(ct);
+        var geofences = await db.SiteGeofences
+            .Where(row => row.SiteId.HasValue && duplicateIds.Contains(row.SiteId.Value))
+            .OrderByDescending(row => row.UpdatedAtUtc)
+            .ToListAsync(ct);
+
+        var activeDuplicateGeofences = geofences.Where(row => row.Active).ToList();
+        var retainedGeofence = canonicalActiveGeofences.FirstOrDefault();
+        var geofencesReassigned = 0;
+        var geofencesUnlinkedForReview = 0;
+
+        if (retainedGeofence is null)
+        {
+            retainedGeofence = activeDuplicateGeofences.FirstOrDefault();
+            if (retainedGeofence is not null)
+            {
+                retainedGeofence.SiteId = canonical.Id;
+                retainedGeofence.SiteNumber = canonical.ExternalCode;
+                retainedGeofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                geofencesReassigned++;
+            }
+        }
+
+        foreach (var geofence in activeDuplicateGeofences.Where(row => retainedGeofence is null || row.Id != retainedGeofence.Id))
+        {
+            geofence.SiteId = null;
+            geofence.SiteNumber = null;
+            geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            geofencesUnlinkedForReview++;
+            messages.Add($"Geofence '{geofence.Name}' was left unlinked for review because canonical Site {canonical.ExternalCode} already has an active geofence.");
+        }
 
         var runStops = await db.RunStops.Where(row => duplicateIds.Contains(row.SiteId)).ToListAsync(ct);
         foreach (var runStop in runStops) runStop.SiteId = canonical.Id;
@@ -379,11 +411,11 @@ public static class MasterDataDuplicateReviewService
             EntityId = canonical.Id,
             Action = "DuplicateMerge",
             ChangedBy = actor,
-            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(row => row.ExternalCode), request.Note, geofencesReassigned = geofences.Count, runStopsReassigned = runStops.Count, mappingsReassigned = mappingCount, messages })
+            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(row => row.ExternalCode), request.Note, geofencesReassigned, geofencesUnlinkedForReview, runStopsReassigned = runStops.Count, mappingsReassigned = mappingCount, messages })
         });
         await db.SaveChangesAsync(ct);
 
-        messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {geofences.Count} geofence(s), {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
+        messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {geofencesReassigned} geofence(s), left {geofencesUnlinkedForReview} additional geofence(s) unlinked for review, reassigned {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, messages);
     }
 
