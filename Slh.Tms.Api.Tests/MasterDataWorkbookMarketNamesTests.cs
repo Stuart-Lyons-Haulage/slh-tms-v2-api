@@ -46,4 +46,26 @@ public sealed class MasterDataWorkbookMarketNamesTests
         Assert.Equal("APS", sender.Sender);
         Assert.Null(sender.Salesman);
     }
+
+    [Fact]
+    public void Market_contacts_sheet_reads_combined_stand_header_and_keeps_sender_separate()
+    {
+        var rows = new[]
+        {
+            new WorkbookRow("Market Contacts", 2, new Dictionary<string, string?>
+            {
+                ["market"] = "Covent",
+                ["name"] = "Example Seller (Unit B53)",
+                ["standorlocation"] = null,
+                ["sender"] = "APS"
+            })
+        };
+
+        var result = MasterDataWorkbookImportController.ExpandMarketRows(rows).ToList();
+
+        var seller = Assert.Single(result);
+        Assert.Equal("Unit B53", seller.StandOrLocation);
+        Assert.Null(seller.Salesman);
+        Assert.Equal("APS", seller.Sender);
+    }
 }
