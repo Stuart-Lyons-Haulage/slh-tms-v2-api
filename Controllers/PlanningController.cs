@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -114,6 +115,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         var masterCompliance = await compliance.CheckAsync(request.DriverId, request.VehicleId, ct);
         if (!masterCompliance.Allowed) return Conflict(new { code = "master_compliance_blocked", errors = masterCompliance.Errors, warnings = masterCompliance.Warnings });
 
+        var previousAllocation = new { load.DriverId, load.VehicleId, load.TrailerId, load.Status };
         load.VehicleId = request.VehicleId;
         load.DriverId = request.DriverId;
         load.TrailerId = request.TrailerId;
@@ -125,6 +127,16 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 : trailer.StandardCapacity ?? trailer.EuroCapacity;
         }
         load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "Load", EntityId = load.Id, EventType = "AllocationChanged", Actor = User.Identity?.Name,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                previous = previousAllocation,
+                current = new { load.DriverId, load.VehicleId, load.TrailerId, load.Status },
+                register
+            }), OccurredAtUtc = DateTimeOffset.UtcNow
+        });
         await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }
@@ -177,6 +189,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         if (!CanTransition(load.Status, next)) return BadRequest($"A load cannot move from {load.Status} to {next}.");
         if ((next is LoadStatus.Dispatched or LoadStatus.InProgress) && (load.DriverId is null || load.VehicleId is null)) return BadRequest("Allocate both a driver and vehicle before dispatching a load.");
 
+        var previousStatus = load.Status;
         load.Status = next;
         if (!register)
         {
@@ -201,6 +214,12 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 }
             }
         }
+        if (previousStatus != next)
+            db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+            {
+                EntityType = "Load", EntityId = load.Id, EventType = "LoadStatusChanged", Actor = User.Identity?.Name,
+                PayloadJson = JsonSerializer.Serialize(new { previous = previousStatus, current = next, register }), OccurredAtUtc = DateTimeOffset.UtcNow
+            });
         await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }

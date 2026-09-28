@@ -18,15 +18,20 @@ internal static class StagedOrderPayloadAmendment
             payload["collectionLocation"] = collection;
             payload["sellerName"] = collection;
         }
+
         if (!string.IsNullOrWhiteSpace(delivery))
         {
             payload["deliverySite"] = delivery;
             payload["deliveryLocation"] = delivery;
             payload["stallNumber"] = delivery;
         }
-        if (!string.IsNullOrWhiteSpace(temperature)) payload["temperatureRequirement"] = temperature;
-        if (!string.IsNullOrWhiteSpace(orderType)) payload["jobType"] = orderType;
-        if (!string.IsNullOrWhiteSpace(notes)) payload["driverInstructions"] = notes;
+
+        if (!string.IsNullOrWhiteSpace(temperature))
+            payload["temperatureRequirement"] = temperature;
+        if (!string.IsNullOrWhiteSpace(orderType))
+            payload["jobType"] = orderType;
+        if (!string.IsNullOrWhiteSpace(notes))
+            payload["driverInstructions"] = notes;
 
         if (payload["sourceLines"] is JsonArray sourceLines && sourceLines.Count == 1 && sourceLines[0] is JsonObject sourceLine)
         {
@@ -37,6 +42,7 @@ internal static class StagedOrderPayloadAmendment
             if (!string.IsNullOrWhiteSpace(orderType)) sourceLine["jobType"] = orderType;
             if (!string.IsNullOrWhiteSpace(notes)) sourceLine["driverInstructions"] = notes;
         }
+
         return payload;
     }
 
@@ -45,9 +51,12 @@ internal static class StagedOrderPayloadAmendment
         foreach (var name in names)
         {
             var property = payload.FirstOrDefault(item => string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase));
-            if (property.Value is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text)) return text.Trim();
-            if (property.Value is JsonValue number && number.TryGetValue<int>(out var numeric)) return numeric.ToString();
+            if (property.Value is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text))
+                return text.Trim();
+            if (property.Value is JsonValue number && number.TryGetValue<int>(out var numeric))
+                return numeric.ToString();
         }
+
         return null;
     }
 }

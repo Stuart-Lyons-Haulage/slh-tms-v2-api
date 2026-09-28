@@ -38,7 +38,6 @@ public sealed class SchemaMigrationException : Exception
 /// </summary>
 public static class SchemaMigrationRunner
 {
-    // The ordered catalogue is intentionally rebuilt from the checked-out source so local images cannot reuse an older migration manifest.
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
     internal const string MarketContactsStableKeyPreparationSql = """
@@ -155,17 +154,6 @@ public static class SchemaMigrationRunner
         "043_Customer_Site_Crm_Links.sql"
     };
 
-    // Some local/server databases were advanced by the booking branch before
-    // those migration files were brought back into this canonical checkout.
-    // Their applied history is still authoritative; do not rewrite or rerun it.
-    private static readonly IReadOnlyDictionary<int, string> HistoricalAppliedMigrations = new Dictionary<int, string>
-    {
-        [73] = "079_Booking_Invoice_History.sql",
-        [74] = "080_Invoice_Line_Booking_Reservation.sql",
-        [75] = "081_Booking_Allocation_Unmatch.sql",
-        [76] = "082_Barfoots_Physical_North_South_Sites.sql"
-    };
-
     private static readonly string[] OrderedMigrationFiles =
     [
         "000_Critical_Master_Site_Compatibility.sql",
@@ -238,8 +226,16 @@ public static class SchemaMigrationRunner
         "076_Customer_Collection_Sites_Geofence_Links.sql",
         "077_Order_Amendment_Replan_Flag.sql",
         "078_Active_Driver_Tacho_Identity_Index.sql",
+        // These two migrations were applied to the existing standalone SQL volume
+        // before the booking-history work was added. Their names/checksums and
+        // ordering are immutable; keep them in the catalogue so the volume can
+        // start safely and the newer migrations can be appended after version 72.
         "079_Summer_Berry_Physical_Sites.sql",
-        "080_Repair_Barfoots_Leythorne_Geofence.sql"
+        "080_Repair_Barfoots_Leythorne_Geofence.sql",
+        "079_Booking_Invoice_History.sql",
+        "080_Invoice_Line_Booking_Reservation.sql",
+        "081_Booking_Allocation_Unmatch.sql",
+        "082_Barfoots_Physical_North_South_Sites.sql"
     ];
 
     internal const string HistoryTableSql = """
@@ -640,8 +636,6 @@ public static class SchemaMigrationRunner
                     (DeferredStartupMigrations.Contains(missingMigration.Name) ||
                      CatchUpMigrationGaps.Contains(missingMigration.Name)))
                     continue;
-                if (HistoricalAppliedMigrations.ContainsKey(version))
-                    continue;
                 throw new InvalidOperationException(
                     $"SchemaMigration history has a gap at version {version}. Refusing to apply migrations out of order.");
             }
@@ -650,13 +644,8 @@ public static class SchemaMigrationRunner
         foreach (var pair in applied.OrderBy(pair => pair.Key))
         {
             if (!migrationByVersion.TryGetValue(pair.Key, out var expected))
-            {
-                if (HistoricalAppliedMigrations.TryGetValue(pair.Key, out var historicalName) &&
-                    string.Equals(pair.Value.Name, historicalName, StringComparison.Ordinal))
-                    continue;
                 throw new InvalidOperationException(
                     $"SchemaMigration history contains unknown version {pair.Key} ({pair.Value.Name}).");
-            }
 
             var actual = pair.Value;
             if (!string.Equals(actual.Name, expected.Name, StringComparison.Ordinal))

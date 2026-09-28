@@ -24,6 +24,7 @@ public sealed class BackloadOperationsService(
     IBackloadMatchingService matchingService,
     IHubContext<DispatchHub> dispatchHub,
     IOptions<HgvVehicleProfile> defaultProfile,
+    IOptions<BackloadMatchingOptions> matchingOptions,
     ILogger<BackloadOperationsService> logger)
 {
     private static readonly string[] CollectionKeys = ["collectionSite", "collectionLocation", "collection", "collectionAddress", "from"];
@@ -81,6 +82,8 @@ public sealed class BackloadOperationsService(
 
         var candidate = (await ReadCandidatesAsync(load.PlanningDate, ct)).SingleOrDefault(item => item.OrderId == order.Id)
             ?? throw new InvalidOperationException($"Order {order.Reference} no longer has complete Site Master coordinates for backload allocation.");
+        if (candidate.DeliveryPoint.Latitude >= candidate.CollectionPoint.Latitude - matchingOptions.Value.SouthboundLatitudeThresholdDegrees)
+            throw new InvalidOperationException($"Order {order.Reference} is not southbound enough for a return-load allocation.");
 
         var usedBefore = load.PalletSpacesUsed ?? await ResolveUsedPalletsAsync(load, ct);
         var remaining = await ResolveRemainingPalletCapacityAsync(load, ct);
@@ -112,6 +115,19 @@ public sealed class BackloadOperationsService(
         });
         load.PalletSpacesUsed = usedBefore + candidate.PalletCount;
         order.Status = OrderStatus.Planned;
+        await AttachBookingReservationAsync(order, candidate.DeliveryPointName, candidate.PalletCount, actor, ct);
+
+        var acceptedAt = DateTimeOffset.UtcNow;
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "Load", EntityId = load.Id, EventType = "SouthboundReturnOrderAccepted", Actor = actor,
+            PayloadJson = JsonSerializer.Serialize(new { orderId = order.Id, orderReference = order.Reference, loadReference = load.Reference, collectionSequence, deliverySequence, palletCount = candidate.PalletCount }), OccurredAtUtc = acceptedAt
+        });
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "TransportOrder", EntityId = order.Id, EventType = "AssignedToSouthboundReturnLoad", Actor = actor,
+            PayloadJson = JsonSerializer.Serialize(new { load.Id, load.Reference, collectionSequence, deliverySequence }), OccurredAtUtc = acceptedAt
+        });
 
         if (db.Entry(load).State != EntityState.Detached)
             await db.SaveChangesAsync(ct);
@@ -121,6 +137,44 @@ public sealed class BackloadOperationsService(
 
         logger.LogInformation("Backload {OrderReference} accepted onto {LoadReference} by {Actor}.", order.Reference, load.Reference, actor);
         return new AcceptBackloadResult(load.Id, order.Id, order.Reference, collectionSequence, deliverySequence);
+    }
+
+    private async Task AttachBookingReservationAsync(TransportOrder order, string destination, int units, string actor, CancellationToken ct)
+    {
+        if (order.SourceMovementId is not Guid sourceMovementId || !string.Equals(order.CustomerCode, "NWF", StringComparison.OrdinalIgnoreCase)) return;
+        var reservation = await db.BookingReservations.SingleOrDefaultAsync(item =>
+            item.CustomerCode == "NWF" && item.SourceMovementId == sourceMovementId &&
+            item.Status != BookingReservationStatus.Cancelled && item.Status != BookingReservationStatus.Superseded &&
+            item.Status != BookingReservationStatus.Expired, ct);
+        if (reservation is null || await db.BookingReservationAllocations.AnyAsync(item => item.BookingReservationId == reservation.Id && item.TransportOrderId == order.Id && item.IsActive, ct)) return;
+
+        var assigned = await db.BookingReservationAllocations
+            .Where(item => item.BookingReservationId == reservation.Id && item.IsActive)
+            .SumAsync(item => (decimal?)item.Units, ct) ?? 0;
+        if (assigned + units > reservation.ReservedUnits)
+            throw new InvalidOperationException($"Order {order.Reference} would exceed NWF reservation {reservation.CollectionReference ?? reservation.StableBookingKey} by {assigned + units - reservation.ReservedUnits:0.##} units. Amend the booking capacity before accepting the return load.");
+
+        var now = DateTimeOffset.UtcNow;
+        db.BookingReservationAllocations.Add(new BookingReservationAllocation
+        {
+            BookingReservationId = reservation.Id,
+            TransportOrderId = order.Id,
+            Destination = destination,
+            Units = units,
+            UnitType = reservation.UnitType,
+            Note = "Automatically matched while accepting southbound return load",
+            CreatedBy = actor,
+            CreatedAtUtc = now
+        });
+        reservation.Status = assigned + units == reservation.ReservedUnits
+            ? BookingReservationStatus.Assigned
+            : BookingReservationStatus.PartiallyAssigned;
+        reservation.UpdatedAtUtc = now;
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "BookingReservation", EntityId = reservation.Id, EventType = "MatchedToSouthboundReturnOrder", Actor = actor,
+            PayloadJson = JsonSerializer.Serialize(new { order.Id, order.Reference, load = "southbound return load", units }), OccurredAtUtc = now
+        });
     }
 
     public async Task RecordDeclineAsync(DeclineBackloadRequest request, string actor, CancellationToken ct)
@@ -157,6 +211,16 @@ public sealed class BackloadOperationsService(
             ReviewNote = reason
         };
         db.StagedImports.Add(row);
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "Load", EntityId = load.Id, EventType = "SouthboundReturnOrderDeclined", Actor = actor,
+            PayloadJson = JsonSerializer.Serialize(new { orderId = order.Id, orderReference = order.Reference, loadReference = load.Reference, reason, note = request.Note }), OccurredAtUtc = now
+        });
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "TransportOrder", EntityId = order.Id, EventType = "SouthboundReturnLoadDeclined", Actor = actor,
+            PayloadJson = JsonSerializer.Serialize(new { load.Id, load.Reference, reason, request.Note }), OccurredAtUtc = now
+        });
         await db.SaveChangesAsync(ct);
     }
 

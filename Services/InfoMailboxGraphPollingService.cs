@@ -27,7 +27,10 @@ public sealed class InfoMailboxGraphOptions
     public string Mailbox { get; set; } = "info@lyonshaulage.com";
     public int PollIntervalSeconds { get; set; } = 60;
     public int InitialLookbackHours { get; set; } = 48;
-    public int OverlapMinutes { get; set; } = 30;
+    // Graph delivery order is not a reliable watermark: a later-received message can
+    // be visible before an earlier one. Revisit a full operational day so that such
+    // messages cannot be skipped merely because another email was retained first.
+    public int OverlapMinutes { get; set; } = 1440;
     public int MaxMessagesPerPoll { get; set; } = 250;
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
 
@@ -154,7 +157,7 @@ public sealed class InfoMailboxGraphPollingService(
 
         var since = lastEvidenceUtc is null
             ? DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.InitialLookbackHours, 1, 168))
-            : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 5, 1440));
+            : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 60, 10080));
 
         var messages = await FetchMessagesAsync(client, token.Token, since, ct);
         var seen = messages.Count;

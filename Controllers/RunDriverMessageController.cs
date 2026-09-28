@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -137,6 +138,11 @@ public sealed class RunDriverMessageController(
                 Status = request.Dispatch ? "Driver dispatched" : "Driver text update sent",
                 Notes = $"{(request.Dispatch ? "Dispatch" : "Plain text update")} sent via {provider ?? "SMS"} to ***{mobileSuffix}. Message ID {messageId ?? "not returned"}. {message}",
                 CapturedBy = User.Identity?.Name ?? "TMS planner"
+            });
+            db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+            {
+                EntityType = "Load", EntityId = load.Id, EventType = request.Dispatch ? "DriverDispatchMessageSent" : "DriverMessageSent", Actor = User.Identity?.Name,
+                PayloadJson = JsonSerializer.Serialize(new { request.Dispatch, provider, mobileSuffix, messageId, message }), OccurredAtUtc = DateTimeOffset.UtcNow
             });
             await db.SaveChangesAsync(ct);
         }

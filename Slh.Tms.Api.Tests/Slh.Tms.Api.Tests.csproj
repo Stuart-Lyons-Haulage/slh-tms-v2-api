@@ -19,4 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Slh.Tms.Api.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Update="Fixtures\29.09.2026.xlsm" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -335,6 +335,12 @@ public sealed class DispatchService(
                     allocation.UseReducedDailyRest ? "Locked smart dispatch plan · reduced 9h daily rest" : "Locked smart dispatch plan · regular 11h daily rest",
                     allocation.DriverId,
                     allocation.UseReducedDailyRest);
+                db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+                {
+                    EntityType = "Load", EntityId = allocation.RunId, EventType = "DispatchLocked", Actor = actor,
+                    PayloadJson = JsonSerializer.Serialize(new { allocation.DriverId, allocation.VehicleId, allocation.TrailerId, allocation.PlannedStartTime, request.PlanningDate }),
+                    OccurredAtUtc = DateTimeOffset.UtcNow
+                });
             }
 
             await transaction.CommitAsync(ct);

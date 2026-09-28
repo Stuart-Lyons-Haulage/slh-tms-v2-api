@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -165,10 +166,32 @@ public sealed class SamsaraDispatchController(
             .OrderBy(item => item.reference)
             .ToList();
 
+        var connected = false;
+        string? connectionMessage = null;
+        if (samsara.IsConfigured)
+        {
+            try
+            {
+                connected = await samsara.CheckConnectivityAsync(ct);
+                connectionMessage = connected ? "Samsara EU API connected." : "Samsara is configured but did not pass the connection check.";
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara dispatch connectivity probe failed.");
+                connectionMessage = $"Samsara is configured but not reachable: {exception.GetBaseException().Message}";
+            }
+        }
+        else
+        {
+            connectionMessage = $"Samsara runtime settings are incomplete: {string.Join(", ", samsara.MissingSettings)}.";
+        }
+
         return Ok(new
         {
             planningDate = date,
             configured = samsara.IsConfigured,
+            connected,
+            connectionMessage,
             planningAuthority = "SLH TMS",
             routeProgressSyncEnabled = options.EnableRouteProgressSync,
             runs = rows
@@ -217,6 +240,203 @@ public sealed class SamsaraDispatchController(
             logger.LogWarning(exception, "Samsara route status failed for run {RunId}.", runId);
             return StatusCode(StatusCodes.Status502BadGateway, new { message = exception.GetBaseException().Message });
         }
+    }
+
+    [HttpPost("dispatch/mappings/sync")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SyncDispatchMappings([FromQuery] DateOnly date, CancellationToken ct)
+    {
+        if (!samsara.IsConfigured)
+            return BadRequest(new
+            {
+                message = $"Samsara cannot sync mappings until these settings are complete: {string.Join(", ", samsara.MissingSettings)}.",
+                missingSettings = samsara.MissingSettings
+            });
+
+        var loads = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+        if (loads.Count == 0)
+            loads = await db.Loads.AsNoTracking().Where(load => load.PlanningDate == date).ToListAsync(ct);
+
+        var driverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).Distinct().ToList();
+        var vehicleIds = loads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).Distinct().ToList();
+        var localDrivers = driverIds.Count == 0
+            ? []
+            : await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToListAsync(ct);
+        var localVehicles = vehicleIds.Count == 0
+            ? []
+            : await db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToListAsync(ct);
+
+        var remoteDriversTask = samsara.GetDriversAsync(ct);
+        var remoteVehiclesTask = samsara.GetVehiclesAsync(ct);
+        await Task.WhenAll(remoteDriversTask, remoteVehiclesTask);
+        var remoteDrivers = await remoteDriversTask;
+        var remoteVehicles = await remoteVehiclesTask;
+
+        var unmatchedDrivers = new List<string>();
+        var unmatchedVehicles = new List<string>();
+        var driversMapped = 0;
+        var vehiclesMapped = 0;
+
+        foreach (var driver in localDrivers)
+        {
+            if (!string.IsNullOrWhiteSpace(await ExistingMappingAsync("Driver", driver.Id, ct)))
+            {
+                driversMapped++;
+                continue;
+            }
+
+            var match = MatchDriver(driver, remoteDrivers);
+            if (match is null)
+            {
+                unmatchedDrivers.Add(driver.DisplayName);
+                continue;
+            }
+
+            await SaveMappingAsync("Driver", driver.Id, match.Id, match.Username ?? match.Name ?? driver.DisplayName, ct);
+            driversMapped++;
+        }
+
+        foreach (var vehicle in localVehicles)
+        {
+            if (!string.IsNullOrWhiteSpace(await ExistingMappingAsync("Vehicle", vehicle.Id, ct)))
+            {
+                vehiclesMapped++;
+                continue;
+            }
+
+            var match = MatchVehicle(vehicle, remoteVehicles);
+            if (match is null)
+            {
+                unmatchedVehicles.Add(vehicle.Registration);
+                continue;
+            }
+
+            await SaveMappingAsync("Vehicle", vehicle.Id, match.Id, vehicle.Registration, ct);
+            vehiclesMapped++;
+        }
+
+        return Ok(new
+        {
+            planningDate = date,
+            driversMapped,
+            vehiclesMapped,
+            unmatchedDrivers,
+            unmatchedVehicles,
+            message = unmatchedDrivers.Count == 0 && unmatchedVehicles.Count == 0
+                ? "Samsara driver and vehicle mappings are ready for dispatch."
+                : "Samsara mappings were refreshed; unmatched resources still need attention."
+        });
+    }
+
+    [HttpGet("dispatch/{runId:guid}/csv")]
+    public async Task<IActionResult> DownloadDispatchCsv(Guid runId, CancellationToken ct)
+    {
+        var load = await FindLoadAsync(runId, ct);
+        if (load is null)
+            return NotFound(new { message = "The selected run could not be found." });
+        if (load.VehicleId is null)
+            return BadRequest(new { message = "Allocate a vehicle before downloading the Samsara CSV." });
+        if (load.Stops.Count < 2)
+            return BadRequest(new { message = "Samsara routes require at least two stops." });
+
+        var orderedStops = load.Stops.OrderBy(stop => stop.Sequence).ToList();
+        if (orderedStops.Any(stop => stop.PlannedArrivalUtc is null))
+            return BadRequest(new
+            {
+                message = "Every stop needs a planned time before the Samsara CSV can be generated.",
+                missingStops = orderedStops.Where(stop => stop.PlannedArrivalUtc is null).Select(stop => stop.Name).ToList()
+            });
+
+        var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+        if (vehicle is null)
+            return BadRequest(new { message = "The allocated vehicle could not be found in Vehicle Master." });
+        var driver = load.DriverId is null
+            ? null
+            : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var trailer = load.TrailerId is null
+            ? null
+            : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
+
+        var orderIds = orderedStops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
+        var orders = orderIds.Count == 0
+            ? new Dictionary<Guid, TransportOrder>()
+            : await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+
+        var sites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Site Master coordinate enrichment was unavailable during Samsara CSV generation.");
+        }
+
+        var samsaraDriverUsername = string.Empty;
+        if (driver is not null && samsara.IsConfigured)
+        {
+            try
+            {
+                var remoteDrivers = await samsara.GetDriversAsync(ct);
+                var mappedId = await ExistingMappingAsync("Driver", driver.Id, ct);
+                var match = !string.IsNullOrWhiteSpace(mappedId)
+                    ? remoteDrivers.SingleOrDefault(item => string.Equals(item.Id, mappedId, StringComparison.Ordinal))
+                    : MatchDriver(driver, remoteDrivers);
+                samsaraDriverUsername = match?.Username ?? string.Empty;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara driver username lookup failed during CSV fallback generation.");
+            }
+        }
+
+        var csv = new StringBuilder();
+        csv.AppendLine("Route Name,Assigned Driver Username,Assigned Vehicle Name,Stop Name,Stop Arrival Time,Stop Departure Time,Stop Notes,Address Name,Latitude,Longitude,Full Address");
+
+        for (var index = 0; index < orderedStops.Count; index++)
+        {
+            var stop = orderedStops[index];
+            var resolved = ResolveLocation(stop, sites);
+            if (resolved.Latitude is null || resolved.Longitude is null)
+                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Complete Site Master/geofence mapping for {stop.Name}." });
+
+            orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
+            var stopNotes = BuildStopNotes(stop, order);
+            if (index == 0)
+            {
+                stopNotes = string.Join("\n", new[]
+                {
+                    stopNotes,
+                    driver is null ? null : $"Driver: {driver.DisplayName}",
+                    $"Vehicle: {vehicle.Registration}",
+                    trailer is null ? null : $"Trailer: {trailer.TrailerNumber}"
+                }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+
+            var isFirst = index == 0;
+            var isLast = index == orderedStops.Count - 1;
+            var arrival = isFirst ? null : stop.PlannedArrivalUtc;
+            var departure = isFirst || isLast ? stop.PlannedArrivalUtc : null;
+            var addressName = resolved.Site?.DriverTextName ?? resolved.Site?.Name ?? CleanStopName(stop.Name);
+
+            csv.AppendLine(string.Join(",", new[]
+            {
+                Csv($"SLH {load.Reference}"),
+                Csv(samsaraDriverUsername),
+                Csv(vehicle.Registration),
+                Csv(CleanStopName(stop.Name)),
+                Csv(FormatCsvTime(arrival)),
+                Csv(FormatCsvTime(departure)),
+                Csv(stopNotes),
+                Csv(addressName),
+                Csv(resolved.Latitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                Csv(resolved.Longitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                Csv(resolved.Address)
+            }));
+        }
+
+        var fileName = $"SLH-{Normalise(load.Reference)}-Samsara.csv";
+        return File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", fileName);
     }
 
     [HttpGet("dispatch/progress-feed")]
@@ -276,6 +496,9 @@ public sealed class SamsaraDispatchController(
         var driver = load.DriverId is null
             ? null
             : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var trailer = load.TrailerId is null
+            ? null
+            : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
 
         try
         {
@@ -302,6 +525,13 @@ public sealed class SamsaraDispatchController(
                     driver.Id,
                     state?.UseReducedDailyRest == true);
             }
+
+            var firstPlannedStopTime = orderedStops[0].PlannedArrivalUtc;
+            if (firstPlannedStopTime is DateTimeOffset firstStopTime && firstStopTime < firstScheduled)
+                return BadRequest(new
+                {
+                    message = $"The first planned stop {orderedStops[0].Name} is timed at {firstStopTime:O}, before the driver's legal Tacho start {firstScheduled:O}."
+                });
 
             var orderIds = orderedStops
                 .Where(stop => stop.OrderId is not null)
@@ -455,7 +685,7 @@ public sealed class SamsaraDispatchController(
                     ? null
                     : stop.PlannedArrivalUtc ?? firstScheduled;
                 var scheduledDeparture = isFirst && departFirstStop
-                    ? firstScheduled
+                    ? stop.PlannedArrivalUtc ?? firstScheduled
                     : isLast && departLastStop
                         ? stop.PlannedArrivalUtc
                         : null;
@@ -488,6 +718,8 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingSchedule
                 });
 
+            // Mapping pre-sync normally means these are local lookups only. Keep them
+            // sequential because EF Core does not permit concurrent operations on one DbContext.
             var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
             var samsaraVehicleId = await ResolveVehicleIdAsync(vehicle, ct);
             if (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId))
@@ -503,7 +735,7 @@ public sealed class SamsaraDispatchController(
                 driver is null ? null : $"Driver: {driver.DisplayName}",
                 $"Vehicle: {vehicle.Registration}",
                 state?.PlannedStartUtc is null ? null : $"Planned yard start: {state.PlannedStartUtc:O}",
-                load.TrailerId is null ? null : $"Trailer TMS ID: {load.TrailerId}",
+                trailer is null ? null : $"Trailer: {trailer.TrailerNumber}",
                 string.IsNullOrWhiteSpace(load.PlannerNotes) ? null : $"Planner: {load.PlannerNotes}"
             }.Where(line => !string.IsNullOrWhiteSpace(line)));
 
@@ -556,6 +788,7 @@ public sealed class SamsaraDispatchController(
                 samsaraVehicleId,
                 allocatedVehicle = vehicle.Registration,
                 allocatedDriver = driver?.DisplayName,
+                allocatedTrailer = trailer?.TrailerNumber,
                 stopCount = samsaraStops.Count,
                 reusableAddressStops = samsaraStops.Count(stop => !string.IsNullOrWhiteSpace(stop.AddressId)),
                 singleUseFallbackStops = samsaraStops.Count(stop => string.IsNullOrWhiteSpace(stop.AddressId)),
@@ -624,17 +857,10 @@ public sealed class SamsaraDispatchController(
         if (!string.IsNullOrWhiteSpace(mapped)) return mapped;
 
         var vehicles = await samsara.GetVehiclesAsync(ct);
-        var registration = Normalise(vehicle.Registration);
-        var vin = Normalise(vehicle.VIN);
-        var matches = vehicles.Where(item =>
-                (!string.IsNullOrWhiteSpace(registration) &&
-                    (Normalise(item.LicensePlate) == registration || Normalise(item.Name) == registration)) ||
-                (!string.IsNullOrWhiteSpace(vin) && Normalise(item.Vin) == vin))
-            .ToList();
-
-        if (matches.Count != 1) return null;
-        await SaveMappingAsync("Vehicle", vehicle.Id, matches[0].Id, vehicle.Registration, ct);
-        return matches[0].Id;
+        var match = MatchVehicle(vehicle, vehicles);
+        if (match is null) return null;
+        await SaveMappingAsync("Vehicle", vehicle.Id, match.Id, vehicle.Registration, ct);
+        return match.Id;
     }
 
     private async Task<string?> ResolveDriverIdAsync(Driver driver, CancellationToken ct)
@@ -643,6 +869,26 @@ public sealed class SamsaraDispatchController(
         if (!string.IsNullOrWhiteSpace(mapped)) return mapped;
 
         var drivers = await samsara.GetDriversAsync(ct);
+        var match = MatchDriver(driver, drivers);
+        if (match is null) return null;
+        await SaveMappingAsync("Driver", driver.Id, match.Id, match.Username ?? match.Name ?? driver.DisplayName, ct);
+        return match.Id;
+    }
+
+    private static SamsaraVehicle? MatchVehicle(Vehicle vehicle, IReadOnlyList<SamsaraVehicle> vehicles)
+    {
+        var registration = Normalise(vehicle.Registration);
+        var vin = Normalise(vehicle.VIN);
+        var matches = vehicles.Where(item =>
+                (!string.IsNullOrWhiteSpace(registration) &&
+                    (Normalise(item.LicensePlate) == registration || Normalise(item.Name) == registration)) ||
+                (!string.IsNullOrWhiteSpace(vin) && Normalise(item.Vin) == vin))
+            .ToList();
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static SamsaraDriver? MatchDriver(Driver driver, IReadOnlyList<SamsaraDriver> drivers)
+    {
         var employee = Normalise(driver.EmployeeNumber);
         var name = Normalise(driver.DisplayName);
         var matches = drivers.Where(item =>
@@ -650,10 +896,7 @@ public sealed class SamsaraDispatchController(
                  item.ExternalIds.Values.Any(value => Normalise(value) == employee)) ||
                 (!string.IsNullOrWhiteSpace(name) && Normalise(item.Name) == name))
             .ToList();
-
-        if (matches.Count != 1) return null;
-        await SaveMappingAsync("Driver", driver.Id, matches[0].Id, driver.DisplayName, ct);
-        return matches[0].Id;
+        return matches.Count == 1 ? matches[0] : null;
     }
 
     private async Task<string?> ExistingMappingAsync(string entityType, Guid entityId, CancellationToken ct)
@@ -761,6 +1004,27 @@ public sealed class SamsaraDispatchController(
         }
 
         return string.Join("\n", lines);
+    }
+
+    private static string Csv(string? value)
+    {
+        var text = value ?? string.Empty;
+        if (text.Contains('"')) text = text.Replace("\"", "\"\"");
+        return text.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0 ? $"\"{text}\"" : text;
+    }
+
+    private static string FormatCsvTime(DateTimeOffset? value)
+    {
+        if (value is null) return string.Empty;
+        try
+        {
+            var uk = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            return TimeZoneInfo.ConvertTime(value.Value, uk).ToString("dd/MM/yyyy HH:mm");
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return value.Value.ToString("dd/MM/yyyy HH:mm");
+        }
     }
 
     private static string FormatWindow(DateTimeOffset? start, DateTimeOffset? end) =>

@@ -128,6 +128,8 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
                                item.PayloadJson.Contains(messageId))
                 .ToList();
             Assert.Single(active);
+            Assert.DoesNotContain(active, item => item.IdempotencyKey.Contains(":replay:", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(1, active.Count(item => item.Source != null && item.Source.StartsWith("Info mailbox replay", StringComparison.Ordinal)));
         }
     }
 

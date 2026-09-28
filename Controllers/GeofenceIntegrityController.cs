@@ -36,9 +36,9 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                 .Where(group => group.Count() > 1)
                 .ToDictionary(
                     group => group.Key,
-                    group => group.Select(item => item.Fence.Name)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                        group => group.Select(item => new DuplicateGeofence(item.Fence.Id, item.Fence.Name))
+                        .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(item => item.Id)
                         .ToArray());
             var duplicateReferenceGroups = sites
                 .Where(x => !string.IsNullOrWhiteSpace(x.ExternalCode))
@@ -107,9 +107,9 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                     var locationOnly = string.Equals(manual?.SiteNumber, "LOCATION_ONLY", StringComparison.OrdinalIgnoreCase);
                     var siteNumber = x.SiteCode ?? (locationOnly ? null : manual?.SiteNumber ?? x.Fence.SiteNumber);
                     var codedUnlinked = x.SiteId is null && !locationOnly && !string.IsNullOrWhiteSpace(siteNumber);
-                    var duplicateGeofences = x.SiteId is Guid linkedSiteId && duplicateSiteAssignments.TryGetValue(linkedSiteId, out var duplicateNames)
-                        ? duplicateNames
-                        : Array.Empty<string>();
+                    var duplicateGeofences = x.SiteId is Guid linkedSiteId && duplicateSiteAssignments.TryGetValue(linkedSiteId, out var duplicateRows)
+                        ? duplicateRows
+                        : Array.Empty<DuplicateGeofence>();
                     return new
                     {
                         id = x.Fence.Id,
@@ -130,7 +130,7 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                         geofenceAvailable = true,
                         siteLinked = x.SiteId != null,
                         duplicateSiteAssignment = duplicateGeofences.Length > 1,
-                        duplicateGeofences,
+                        duplicateGeofences = duplicateGeofences.Select(item => new { id = item.Id, name = item.Name }),
                         validationStatus = duplicateGeofences.Length > 1
                             ? "Duplicate Site geofence assignment"
                             : locationOnly ? "Location only" : x.SiteId != null ? "Valid" : codedUnlinked ? "Coded / needs Site promotion" : "Unlinked",
@@ -213,6 +213,8 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
 
     private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
     private static string NormalizeCode(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private sealed record DuplicateGeofence(Guid Id, string Name);
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {

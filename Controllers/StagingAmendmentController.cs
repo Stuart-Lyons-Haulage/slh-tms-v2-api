@@ -44,6 +44,7 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
 
         var previousStatus = item.Status;
         item.PayloadJson = amendedPayload.ToJsonString();
+        await NwfBookingReservationSync.UpsertAsync(db, item, JsonSerializer.SerializeToElement(amendedPayload), User.Identity?.Name, ct);
         item.ReviewNote = string.Join(" | ", new[]
         {
             item.ReviewNote,
