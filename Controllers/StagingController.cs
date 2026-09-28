@@ -259,9 +259,10 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
             return "Pallet quantity is missing or not greater than zero.";
         if (!IsTrue(payload, "plannerReady"))
             return "The parser has not marked this order planner-ready; review the source evidence first.";
-        if (!string.Equals(Text(payload, "intakeConfidence"), "High", StringComparison.OrdinalIgnoreCase))
+        var plannerReviewAcknowledged = IsTrue(payload, "plannerReviewAcknowledged");
+        if (!plannerReviewAcknowledged && !string.Equals(Text(payload, "intakeConfidence"), "High", StringComparison.OrdinalIgnoreCase))
             return "Intake confidence is not High; explicit source review is required.";
-        if (payload.TryGetProperty("intakeWarnings", out var warnings) &&
+        if (!plannerReviewAcknowledged && payload.TryGetProperty("intakeWarnings", out var warnings) &&
             warnings.ValueKind == JsonValueKind.Array &&
             warnings.GetArrayLength() > 0)
             return "Source/intake warnings remain; resolve them before approval.";
