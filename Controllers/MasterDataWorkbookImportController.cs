@@ -395,9 +395,11 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 || SheetIs(sheet.Key, "names"))
             .SelectMany(sheet => sheet.Value)
             .ToList();
+        var senders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in ExpandMarketRows(rows))
         {
             if (string.IsNullOrWhiteSpace(entry.Name)) continue;
+            if (!string.IsNullOrWhiteSpace(entry.Sender)) senders.Add(entry.Sender.Trim());
             var payload = new Dictionary<string, object?>
             {
                 ["market"] = entry.Market,
@@ -414,6 +416,24 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 await staging.PromoteDirect("marketcontact", doc.RootElement, ct);
             }
             result.Rows.Add(new WorkbookRowResult("Market Contacts", entry.RowNumber, $"{entry.Market} - {entry.Name}", commit ? "imported" : "ready", "Market contact ready for upsert, including separate market, sender, stall/stand and salesman values from the Names tab.", 92) { ActionTaken = commit ? "upserted market contact" : "would upsert market contact" });
+        }
+
+        // Senders are independent of the physical market. Keep a separate Sender
+        // record so the same sender can be selected for Covent, Spit or Western.
+        foreach (var sender in senders)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["market"] = "Sender",
+                ["name"] = sender,
+                ["active"] = true
+            };
+            if (commit)
+            {
+                using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+                await staging.PromoteDirect("marketcontact", doc.RootElement, ct);
+            }
+            result.Rows.Add(new WorkbookRowResult("Market Senders", 0, sender, commit ? "imported" : "ready", "Independent sender record; it is not tied to one market.", 95) { ActionTaken = commit ? "upserted independent sender" : "would upsert independent sender" });
         }
     }
 
@@ -619,7 +639,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
             var directName = row.Text("name", "seller", "seller name", "contact name");
             if (!string.IsNullOrWhiteSpace(directName))
             {
-                yield return new MarketWorkbookEntry(row.RowNumber, directMarket ?? "General", directName.Trim(), row.Text("stand", "stall", "stall number", "location") ?? InferStand(directName), row.Text("salesman"), row.Text("sender", "email sender"), row.Text("map", "map pdf", "readonlymappdfurl"));
+                yield return new MarketWorkbookEntry(row.RowNumber, directMarket ?? "General", directName.Trim(), row.Text("stand or location", "standorlocation", "stand", "stall", "stall number", "location") ?? InferStand(directName), row.Text("salesman"), row.Text("sender", "email sender"), row.Text("map", "map pdf", "readonlymappdfurl"));
                 continue;
             }
 
