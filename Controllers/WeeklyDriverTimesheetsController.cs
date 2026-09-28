@@ -563,9 +563,6 @@ public sealed class WeeklyDriverTimesheetsController(
 
     private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
 
-    private static bool IsMovement(DotTelemetryRecord item) =>
-        item.IsMoving == true || (item.SpeedKph ?? 0m) > 0m;
-
     private static DateOnly LondonToday() =>
         DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
 
