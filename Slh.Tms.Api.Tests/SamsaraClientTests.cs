@@ -11,6 +11,22 @@ namespace Slh.Tms.Api.Tests;
 public sealed class SamsaraClientTests
 {
     [Fact]
+    public async Task Connectivity_probe_uses_small_vehicle_and_driver_requests()
+    {
+        var paths = new List<string>();
+        var handler = new StubHandler(request =>
+        {
+            paths.Add(request.RequestUri?.PathAndQuery ?? string.Empty);
+            return Task.FromResult(JsonResponse("""{"data":[],"pagination":{"hasNextPage":false}}"""));
+        });
+
+        var client = Client(handler);
+        Assert.True(await client.CheckConnectivityAsync(CancellationToken.None));
+        Assert.Contains("/fleet/vehicles?limit=1", paths);
+        Assert.Contains("/fleet/drivers?limit=1", paths);
+    }
+
+    [Fact]
     public async Task Route_upsert_preserves_tms_sequence_and_schedule()
     {
         string? postedBody = null;
@@ -128,7 +144,7 @@ public sealed class SamsaraClientTests
         var options = new SamsaraOptions
         {
             Enabled = true,
-            BaseUrl = "https://api.samsara.com",
+            BaseUrl = "https://api.eu.samsara.com",
             ApiToken = "test-token",
             ExternalIdKey = "slhTmsRun",
             StopExternalIdKey = "slhTmsStop",
