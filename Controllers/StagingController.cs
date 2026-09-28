@@ -245,7 +245,10 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         var delivery = Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "destination") ?? Text(payload, "stallNumber");
         if (string.IsNullOrWhiteSpace(reference)) return "Order reference is missing.";
         if (string.IsNullOrWhiteSpace(customerCode)) return "Customer is missing from the order master data.";
-        if (!await db.Customers.AsNoTracking().AnyAsync(item => item.Active && item.Code == customerCode, ct)) return $"Customer {customerCode} is not present in active Customer Master.";
+        var customerCodes = string.Equals(customerCode, "COVENTGARDEN", StringComparison.OrdinalIgnoreCase)
+            ? new[] { "COVENTGARDEN", "COVMKT" }
+            : new[] { customerCode };
+        if (!await db.Customers.AsNoTracking().AnyAsync(item => item.Active && customerCodes.Contains(item.Code), ct)) return $"Customer {customerCode} is not present in active Customer Master.";
         if (!DateOnly.TryParse(Text(payload, "collectionDate"), out _)) return "Collection date is missing or invalid.";
         if (string.IsNullOrWhiteSpace(collection)) return "Collection point is missing.";
         if (string.IsNullOrWhiteSpace(delivery)) return "Delivery point is missing.";
