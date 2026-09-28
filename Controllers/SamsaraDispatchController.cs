@@ -1010,8 +1010,8 @@ public sealed class SamsaraDispatchController(
     private static string Csv(string? value)
     {
         var text = value ?? string.Empty;
-        if (text.Contains('"')) text = text.Replace(""", """");
-        return text.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0 ? $""{text}"" : text;
+        if (text.Contains('"')) text = text.Replace("\"", "\"\"");
+        return text.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0 ? $"\"{text}\"" : text;
     }
 
     private static string FormatCsvTime(DateTimeOffset? value)
