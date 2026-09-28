@@ -147,7 +147,9 @@ internal static class StagingQueueProjection
     [
         "poNumber", "customerPo", "customerRef", "poRef", "productPo", "cratePo", "transportPo",
         "customerCode", "collectionDate", "deliveryDate", "pallets", "sellerName", "stallNumber",
-        "requestedTime", "overnightRoute", "wave", "routeTiming", "jobType", "driverInstructions",
+        "requestedTime", "overnightRoute", "wave", "routeTiming", "planningWindow", "suggestedPlanningWindow",
+        "runsOvernight", "temperature", "temperatureC", "temp", "temperatureRequirement", "palletType", "orderType",
+        "jobType", "driverInstructions",
         "plannerReady", "intakeStatus", "intakeConfidence", "intakeWarnings", "intakeParser",
         "emailRouteMatched", "emailRouteId", "emailRouteSender", "emailRouteIdentityOnly", "emailRouteRequiresReview",
         "orderIntakeRouteRuleId", "orderIntakeRouteConfidenceScore", "orderIntakeRouteMatchedDimensions",
