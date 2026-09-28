@@ -47,8 +47,8 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.All(result.Orders, order => Assert.Equal("+3°C", order.Payload.GetProperty("temperatureRequirement").GetString()));
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("palletType").GetString() == "Euro");
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("palletType").GetString() == "STD");
-        Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Walton Farm (+3°C)");
-        Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Ham Farm (+3°C)");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Walton Farm");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Ham Farm");
     }
 
     [Fact]
