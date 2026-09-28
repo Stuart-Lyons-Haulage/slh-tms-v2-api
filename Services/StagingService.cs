@@ -416,7 +416,16 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             ? new SiteTimingWindow(null, null)
             : SiteTimingRuleMatcher.DeliveryWindow(masterRule, masterDeliveryDate);
         TransportOrder? existing;
-        try { existing = await db.TransportOrders.SingleOrDefaultAsync(order => order.Reference == reference, ct); }
+        try
+        {
+            // The generated row reference can change when an amended email changes
+            // the date, destination or source-row number. The stable movement link
+            // is authoritative once the first approved revision exists.
+            existing = await db.TransportOrders
+                .Where(order => order.SourceMovementId == movement.Id || order.Reference == reference)
+                .OrderByDescending(order => order.CreatedAtUtc)
+                .FirstOrDefaultAsync(ct);
+        }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)) { return; }
         if (existing is null)
         {
@@ -445,14 +454,21 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             existing.StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber") ?? existing.StallNumber, 200);
             existing.DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions") ?? existing.DriverInstructions, 1000);
             existing.MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink") ?? existing.MapLink, 1000);
+            if (existing.Status == OrderStatus.Planned)
+                existing.NeedsReplan = true;
         }
     }
 
     private async Task<(OrderMovement Movement, bool PlannerReady)> RecordOrderRevision(StagedImport item, JsonElement payload, string reference, string customerCode, CancellationToken ct)
     {
         var normalCustomer = ClipRequired(customerCode.Trim().ToUpperInvariant(), 40);
+        var suppliedMovementKey = Text(payload, "amendmentMatchKey");
         var normalReference = new string(reference.Trim().ToUpperInvariant().Where(char.IsLetterOrDigit).ToArray());
-        var stableKey = ClipRequired($"{normalCustomer}:{normalReference}", 240);
+        var stableKey = ClipRequired(
+            string.IsNullOrWhiteSpace(suppliedMovementKey)
+                ? $"{normalCustomer}:{normalReference}"
+                : $"{normalCustomer}:{suppliedMovementKey.Trim().ToUpperInvariant()}",
+            240);
         var movement = await db.OrderMovements.SingleOrDefaultAsync(x => x.CustomerCode == normalCustomer && x.StableMovementKey == stableKey, ct);
         if (movement is null)
         {

@@ -55,6 +55,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
                 orderedPallets = ordered,
                 plannedPallets = planned,
                 outstandingPallets = Math.Max(ordered - planned, 0),
+                needsReplan = order.NeedsReplan,
                 collection = detail?.Collection ?? order.SellerName ?? "Collection not mapped",
                 destination = detail?.Destination ?? order.StallNumber ?? order.MarketName ?? "Destination not mapped",
                 planningWindow = window,

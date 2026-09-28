@@ -94,6 +94,23 @@ public sealed class WeeklyDriverTimesheetsController(
             .Where(x => x.PlanningDate >= from && x.PlanningDate <= to)
             .ToList();
 
+        // An approved amendment can deliberately leave an existing planned load in place
+        // until the planner confirms the replan. Keep that operationally visible in the
+        // payroll evidence view rather than presenting the stale allocation as clean.
+        var amendedOrderIds = loads
+            .SelectMany(load => load.Stops ?? [])
+            .Where(stop => stop.OrderId is not null)
+            .Select(stop => stop.OrderId!.Value)
+            .Distinct()
+            .ToList();
+        var ordersNeedingReplan = amendedOrderIds.Count == 0
+            ? new HashSet<Guid>()
+            : (await db.TransportOrders.AsNoTracking()
+                .Where(order => amendedOrderIds.Contains(order.Id) && order.NeedsReplan)
+                .Select(order => order.Id)
+                .ToListAsync(ct))
+                .ToHashSet();
+
         var tachoByDate = new Dictionary<DateOnly, IReadOnlyList<TachoDriverDutyStatus>>();
         string? tachoError = null;
         for (var day = from; day <= to; day = day.AddDays(1))
@@ -251,6 +268,9 @@ public sealed class WeeklyDriverTimesheetsController(
                 var dayLoads = loads.Where(x => x.DriverId == driver.Id && x.PlanningDate == day)
                     .OrderBy(x => x.Reference)
                     .ToList();
+                var amendedAllocatedOrder = dayLoads
+                    .SelectMany(load => load.Stops ?? [])
+                    .Any(stop => stop.OrderId is Guid orderId && ordersNeedingReplan.Contains(orderId));
                 var duties = tachoByDate.TryGetValue(day, out var source)
                     ? source.Where(x => DriverMatches(driver, x)).OrderBy(x => x.DutyStartUtc).ToList()
                     : [];
@@ -355,6 +375,11 @@ public sealed class WeeklyDriverTimesheetsController(
                     notes.Add("A TMS route exists but no TachoMaster or vehicle-movement evidence was found.");
                     reviewReasons.Add("No RoadTech evidence");
                 }
+                if (amendedAllocatedOrder)
+                {
+                    notes.Add("An amended order is allocated to this run and is awaiting planner replan confirmation.");
+                    reviewReasons.Add("Order amendment awaiting replan");
+                }
 
                 var nextDuty = allDriverDuties.FirstOrDefault(item => tachoEnd is not null && item.DutyStartUtc > tachoEnd.Value);
                 var lastMovementEvent = movement.LastOrDefault();
@@ -405,6 +430,7 @@ public sealed class WeeklyDriverTimesheetsController(
                     vehicles = displayVehicles.OrderBy(x => x).ToArray(),
                     runs = dayLoads.Select(x => RunDisplayLabel.For(x)).Distinct().ToArray(),
                     routeAllocated = dayLoads.Count > 0,
+                    amendedOrderAwaitingReplan = amendedAllocatedOrder,
                     status,
                     notes,
                     reviewReasons = reviewReasons.Distinct().ToArray(),
@@ -531,6 +557,9 @@ public sealed class WeeklyDriverTimesheetsController(
         return a.Length >= 8 && b.Length >= 8 &&
                (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
     }
+
+    private static bool IsMovement(DotTelemetryRecord item) =>
+        item.IsMoving == true || (item.SpeedKph ?? 0m) > 0m;
 
     private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
 

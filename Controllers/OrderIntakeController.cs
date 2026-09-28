@@ -749,15 +749,18 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 var naturalKey = ReadText(root, "intakeNaturalKey");
                 var naturalMatch = !string.IsNullOrWhiteSpace(naturalKey) && naturalKeys.Contains(naturalKey);
                 var stableMatch = matchKeys.Count > 0 && ReadMatchKeys(root).Any(matchKeys.Contains);
-                if (!naturalMatch && !stableMatch)
+                var amendmentMatch = matchKeys.Count > 0 &&
+                                     ReadText(root, "amendmentMatchKey") is { Length: > 0 } candidateAmendmentKey &&
+                                     matchKeys.Contains(CanonicalMatchKey(candidateAmendmentKey));
+                if (!naturalMatch && !stableMatch && !amendmentMatch)
                     continue;
 
                 var previous = candidate.Status;
-                candidate.Status = StagingStatus.Rejected;
+                candidate.Status = StagingStatus.Archived;
                 candidate.ReviewedAtUtc = now;
-                candidate.ReviewedBy = stableMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
-                candidate.ReviewNote = stableMatch
-                    ? $"Superseded by a newer NWF/Info mailbox snapshot ({currentMessageId}). Original evidence retained."
+                candidate.ReviewedBy = stableMatch || amendmentMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
+                candidate.ReviewNote = stableMatch || amendmentMatch
+                    ? $"Superseded by a newer/amended Info mailbox message ({currentMessageId}). Original evidence retained."
                     : $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
                 db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
                 count++;

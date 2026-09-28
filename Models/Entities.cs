@@ -334,6 +334,7 @@ public sealed class TransportOrder
     [MaxLength(200)] public string? StallNumber { get; set; }
     [MaxLength(1000)] public string? DriverInstructions { get; set; }
     [MaxLength(1000)] public string? MapLink { get; set; }
+    public bool NeedsReplan { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.ReadyToPlan;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }

@@ -65,6 +65,21 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void DoubleH_week_commencing_context_uses_actual_weekday_movement_date()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-doubleh-body", null, "info@lyonshaulage.com", "orders@doubleh.co.uk", "Double H",
+            "Week 40 collection", DateTimeOffset.Parse("2026-09-24T14:42:00Z"),
+            "Please see collection request for Wednesday 30th next week (W/C 28.09)\n\nCollection from – Double H New Milton, 195 gore road, BH25 5NG.\nDeliver to – Flower Freight LTD, Pinetops, Theobalds Park Rd, Enfield EN2 9B",
+            null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("2026-09-30", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Double H New Milton, 195 gore road, BH25 5NG", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Contains("Flower Freight", order.Payload.GetProperty("stallNumber").GetString());
+    }
+
+    [Fact]
     public void SummerBerryCoopBody_ExtractsPalletsTimeTemperatureAndDate()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

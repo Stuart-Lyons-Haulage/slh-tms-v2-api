@@ -106,6 +106,8 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
         {
             var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
             order = Assert.Single(await db.TransportOrders.Where(x => x.SourceStagedImportId == originalStagedId).ToListAsync());
+            order.Status = OrderStatus.Planned;
+            await db.SaveChangesAsync();
         }
 
         var createRun = await PostJson(client, "/api/v1/loads", new
@@ -139,6 +141,7 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
             var updatedOrder = await db.TransportOrders.SingleAsync(x => x.Id == order.Id);
             Assert.Equal(7, updatedOrder.Pallets);
             Assert.Equal(revisedStagedId, updatedOrder.SourceStagedImportId);
+            Assert.True(updatedOrder.NeedsReplan);
         }
 
         var planning = await client.GetAsync($"/api/v1/planning-control/pallets?date={planningDate:yyyy-MM-dd}");
@@ -149,6 +152,37 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
         Assert.Equal(4, orderRow.GetProperty("plannedPallets").GetInt32());
         Assert.Equal(3, orderRow.GetProperty("outstandingPallets").GetInt32());
         Assert.Contains(orderRow.GetProperty("allocations").EnumerateArray(), allocation => allocation.GetProperty("loadId").GetGuid() == loadId && allocation.GetProperty("pallets").GetInt32() == 4);
+    }
+
+    [Fact]
+    public async Task Revised_email_replaces_an_unapproved_pending_version_without_deleting_its_evidence()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write,Tms.Approve");
+        var suffix = Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        var po = $"PEND{suffix}";
+        var date = new DateOnly(2026, 9, 10);
+        var originalMessage = $"e2e-pending-original-{suffix}";
+        var revisedMessage = $"e2e-pending-amended-{suffix}";
+
+        Assert.Equal(HttpStatusCode.Accepted, (await PostJson(client, "/api/v1/order-intake/email", MailboxOrder(originalMessage, po, 4, date, date.AddDays(1)))).StatusCode);
+        var originalId = await FindStagingId(originalMessage);
+        Assert.Equal(HttpStatusCode.Accepted, (await PostJson(client, "/api/v1/order-intake/email", MailboxOrder(revisedMessage, po, 8, date, date.AddDays(1)))).StatusCode);
+        var revisedId = await FindStagingId(revisedMessage);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            Assert.Equal(StagingStatus.Archived, (await db.StagedImports.SingleAsync(x => x.Id == originalId)).Status);
+            Assert.Equal(StagingStatus.PendingReview, (await db.StagedImports.SingleAsync(x => x.Id == revisedId)).Status);
+            Assert.Contains(await db.StagedImportEvents.Where(x => x.StagedImportId == originalId).ToListAsync(), x => x.EventType == "Superseded");
+        }
+
+        Assert.Equal(HttpStatusCode.OK, (await PostJson(client, $"/api/v1/staging/{revisedId}/approve", new { note = "Amended pending version approved" })).StatusCode);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            Assert.Single(await db.TransportOrders.Where(x => x.Reference.Contains(po)).ToListAsync());
+        }
     }
 
     private async Task<Guid> FindStagingId(string messageId)

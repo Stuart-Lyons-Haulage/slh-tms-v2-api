@@ -727,6 +727,8 @@ public sealed class SpecialistMailboxOrderParser
             ["sourceSheet"] = sheetName,
             ["sourceRow"] = sourceRow,
             ["intakeNaturalKey"] = NaturalKey(request, customer, collection, destination, deliveryDate, pallets),
+            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, customerPo, destination),
+            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, customerPo, destination),
             ["intakeParser"] = parser,
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
             ["intakeWarnings"] = warnings,
@@ -734,6 +736,18 @@ public sealed class SpecialistMailboxOrderParser
             ["intakeStatus"] = warnings.Count == 0 ? "Ready" : "Review"
         };
         return JsonSerializer.SerializeToElement(payload);
+    }
+
+    private static string? BuildAmendmentMatchKey(string customer, string? customerPo, string? destination)
+    {
+        if (string.IsNullOrWhiteSpace(customerPo)) return null;
+        return $"{NormaliseKey(customer)}|{NormaliseKey(customerPo)}|{NormaliseKey(destination)}";
+    }
+
+    private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? customerPo, string? destination)
+    {
+        var key = BuildAmendmentMatchKey(customer, customerPo, destination);
+        return string.IsNullOrWhiteSpace(key) ? [] : [key];
     }
 
     private static DateOnly? ExtractPlanningDate(MailboxEmailIntakeRequest request)

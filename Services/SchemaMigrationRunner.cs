@@ -223,7 +223,8 @@ public static class SchemaMigrationRunner
         "073_Rejected_Order_DoNotLearn_Guard.sql",
         "074_Local_Tms_Users.sql",
         "075_Canonical_Identity_Uniqueness.sql",
-        "076_Customer_Collection_Sites_Geofence_Links.sql"
+        "076_Customer_Collection_Sites_Geofence_Links.sql",
+        "077_Order_Amendment_Replan_Flag.sql"
     ];
 
     internal const string HistoryTableSql = """

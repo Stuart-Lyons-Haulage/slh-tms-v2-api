@@ -690,7 +690,10 @@ public sealed class EmailOrderIntakeService
             !Regex.IsMatch(body, @"(?im)^\s*deliver\s+to\s*[–—-]", RegexOptions.IgnoreCase))
             return [];
 
-        var date = ExtractDate(sourceText, receivedAt);
+        // The Double H template commonly says “Wednesday 30th next week (W/C 28.09)”.
+        // ExtractDate would otherwise select the week-commencing date (28/09) instead
+        // of the actual movement date (30/09).
+        var date = ExtractWeekdayOrdinalDate(body, receivedAt) ?? ExtractDate(sourceText, receivedAt);
         if (date is null) return [];
         var collection = Regex.Match(body, @"(?im)^\s*collection\s+from\s*[–—-]\s*(?<value>.+)$").Groups["value"].Value.Trim();
         var destination = Regex.Match(body, @"(?im)^\s*deliver\s+to\s*[–—-]\s*(?<value>.+)$").Groups["value"].Value.Trim();
@@ -1105,6 +1108,8 @@ public sealed class EmailOrderIntakeService
                     ["sourceSheet"] = reader.Name,
                     ["sourceRow"] = rowIndex + 1,
                     ["intakeNaturalKey"] = naturalKey,
+                    ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination),
+                    ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination),
                     ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
                     ["intakeWarnings"] = warnings
                 };
@@ -1387,6 +1392,8 @@ public sealed class EmailOrderIntakeService
             ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
             ["sourceWebLink"] = request.WebLink,
             ["intakeNaturalKey"] = naturalKey,
+            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination),
+            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination),
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : warnings.Count <= 2 ? "Medium" : "Low",
             ["intakeWarnings"] = warnings
         };
@@ -1719,11 +1726,25 @@ public sealed class EmailOrderIntakeService
             ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
             ["sourceWebLink"] = request.WebLink,
             ["intakeNaturalKey"] = naturalKey,
+            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination),
+            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination),
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
             ["intakeWarnings"] = warnings
         };
 
         return new ParsedEmailOrder(sourceKey, naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
+    }
+
+    private static string? BuildAmendmentMatchKey(string customer, string? rawPo, string? destination)
+    {
+        if (string.IsNullOrWhiteSpace(rawPo)) return null;
+        return $"{NormaliseKey(customer)}|{NormaliseKey(rawPo)}|{NormaliseKey(destination)}";
+    }
+
+    private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? rawPo, string? destination)
+    {
+        var key = BuildAmendmentMatchKey(customer, rawPo, destination);
+        return string.IsNullOrWhiteSpace(key) ? [] : [key];
     }
 
     private static bool IsBookingHeader(object?[] row)
@@ -1810,6 +1831,45 @@ public sealed class EmailOrderIntakeService
         var monthNameMatch = MonthNameDateRegex.Match(input ?? string.Empty);
         if (!monthNameMatch.Success) return null;
         return BuildDate(monthNameMatch.Groups["day"].Value, monthNameMatch.Groups["month"].Value, monthNameMatch.Groups["year"].Value, receivedAt);
+    }
+
+    private static DateOnly? ExtractWeekdayOrdinalDate(string input, DateTimeOffset receivedAt)
+    {
+        var match = Regex.Match(
+            input ?? string.Empty,
+            @"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+(?<day>0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\b",
+            RegexOptions.IgnoreCase);
+        if (!match.Success || !int.TryParse(match.Groups["day"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var day))
+            return null;
+
+        var weekCommencing = DateRegex.Match(input ?? string.Empty);
+        var month = LocalDate(receivedAt).Month;
+        var year = LocalDate(receivedAt).Year;
+        if (weekCommencing.Success)
+        {
+            month = int.Parse(weekCommencing.Groups["month"].Value, CultureInfo.InvariantCulture);
+            var yearText = weekCommencing.Groups["year"].Value;
+            if (!string.IsNullOrWhiteSpace(yearText))
+                year = yearText.Length == 2 ? 2000 + int.Parse(yearText, CultureInfo.InvariantCulture) : int.Parse(yearText, CultureInfo.InvariantCulture);
+        }
+
+        for (var offset = 0; offset <= 1; offset++)
+        {
+            var candidateMonth = month + offset;
+            var candidateYear = year;
+            if (candidateMonth > 12) { candidateMonth -= 12; candidateYear++; }
+            try
+            {
+                var candidate = new DateOnly(candidateYear, candidateMonth, day);
+                if (candidate >= LocalDate(receivedAt).AddDays(-1)) return candidate;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // Try the next month if the ordinal day is not valid in this month.
+            }
+        }
+
+        return null;
     }
 
     private static DateOnly? ExtractDateAfter(string input, string prefixPattern)
