@@ -58,14 +58,22 @@ public static class MasterDataDuplicateReviewService
 
         foreach (var candidate in candidates.Where(candidate => candidate.CanAutoMerge).Take(50))
         {
-            var result = await MergeAsync(
-                db,
-                candidate.EntityType,
-                new MasterDataDuplicateMergeRequest(candidate.Canonical.Id, candidate.Duplicates.Select(row => row.Id).ToList(), "Automatic high-confidence master-data duplicate merge"),
-                actor,
-                ct);
-            merged += result.Merged;
-            messages.AddRange(result.Messages);
+            try
+            {
+                var result = await MergeAsync(
+                    db,
+                    candidate.EntityType,
+                    new MasterDataDuplicateMergeRequest(candidate.Canonical.Id, candidate.Duplicates.Select(row => row.Id).ToList(), "Automatic high-confidence master-data duplicate merge"),
+                    actor,
+                    ct);
+                merged += result.Merged;
+                messages.AddRange(result.Messages);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                messages.Add($"Skipped {candidate.EntityType} duplicate candidate {candidate.Canonical.Name}: {ex.GetBaseException().Message}");
+            }
         }
 
         return new MasterDataDuplicateMergeResult(merged, candidates.Count, messages);
@@ -445,6 +453,19 @@ public static class MasterDataDuplicateReviewService
         if (duplicates.Count == 0) return new MasterDataDuplicateMergeResult(0, 1, ["No active driver duplicates were found to merge."]);
 
         var duplicateIds = duplicates.Select(row => row.Id).ToList();
+        var identities = new[] { canonical }.Concat(duplicates)
+            .Select(row => Normalise(row.TachoMasterDriverId))
+            .Where(value => value.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var conflictingOwners = await db.Drivers.AsNoTracking()
+            .Where(row => row.Active && row.Id != canonical.Id && !duplicateIds.Contains(row.Id) && row.TachoMasterDriverId != null)
+            .Select(row => new { row.Id, row.DisplayName, row.TachoMasterDriverId })
+            .ToListAsync(ct);
+        var conflict = conflictingOwners.FirstOrDefault(owner => identities.Contains(Normalise(owner.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase));
+        if (conflict is not null)
+            return new MasterDataDuplicateMergeResult(0, 1, [$"Merge held for review: TachoMaster member {conflict.TachoMasterDriverId} is already assigned to active driver {conflict.DisplayName}. Resolve the Driver Master identity conflict first."]);
+
         foreach (var duplicate in duplicates)
         {
             canonical.TachoMasterDriverId = Preserve(canonical.TachoMasterDriverId, duplicate.TachoMasterDriverId);
