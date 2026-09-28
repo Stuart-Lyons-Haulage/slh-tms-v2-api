@@ -24,6 +24,10 @@
     <Compile Remove="Slh.Tms.Api.Tests/**/*.cs" />
     <Compile Remove="Slh.Tms.Jobs/**/*.cs" />
     <Compile Remove="v2/**/*.cs" />
+    <!-- Keep generated output out of the source glob when a prior local build has nested bin/obj folders. -->
+    <Compile Remove="bin/**/*.cs;obj/**/*.cs" />
+    <Content Remove="**/bin/**;**/obj/**" />
+    <None Remove="**/bin/**;**/obj/**" />
     <EmbeddedResource Include="Database/*.sql" />
   </ItemGroup>
 </Project>

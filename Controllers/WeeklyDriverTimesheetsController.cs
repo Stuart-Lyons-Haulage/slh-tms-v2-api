@@ -177,14 +177,50 @@ public sealed class WeeklyDriverTimesheetsController(
             }
         }
 
+        IReadOnlyList<DepotPoint> depotPoints = [];
+        try
+        {
+            depotPoints = await db.MasterDepots.AsNoTracking()
+                .Where(x => x.IsActive && x.Latitude != null && x.Longitude != null)
+                .Select(x => new DepotPoint(x.Latitude!.Value, x.Longitude!.Value, x.GeofenceRadiusMetres ?? 500))
+                .ToListAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Depot geofences were unavailable for timesheet night-out inference; uncertain events remain possible night outs.");
+        }
+
         var driverRows = new List<object>();
         var unmatchedTachoDutyCount = 0;
+        var unmatchedTachoDuties = new List<object>();
 
         foreach (var day in tachoByDate.Keys)
         {
             foreach (var duty in tachoByDate[day])
-                if (!drivers.Any(driver => DriverMatches(driver, duty)))
+            {
+                var candidates = drivers.Where(driver => DriverMatches(driver, duty)).ToList();
+                if (candidates.Count == 0)
+                {
                     unmatchedTachoDutyCount++;
+                    unmatchedTachoDuties.Add(new
+                    {
+                        date = DateOnly.FromDateTime(duty.DutyStartUtc.ToUniversalTime().DateTime),
+                        driverName = duty.DriverName,
+                        memberCode = duty.MemberCode,
+                        cardNumber = duty.CardNumber,
+                        employeeNumber = duty.EmployeeNumber,
+                        vehicle = duty.VehicleCode,
+                        dutyStartUtc = duty.DutyStartUtc,
+                        dutyEndUtc = duty.DutyEndUtc,
+                        suggestedDriverMasterMatches = drivers
+                            .Where(driver => SimilarIdentity(driver, duty))
+                            .Select(driver => new { driverId = driver.Id, driverName = driver.DisplayName, employeeNumber = driver.EmployeeNumber })
+                            .Take(5)
+                            .ToArray(),
+                        reviewReason = "Driver identity unresolved; do not auto-link."
+                    });
+                }
+            }
         }
 
         foreach (var driver in drivers)
@@ -196,6 +232,10 @@ public sealed class WeeklyDriverTimesheetsController(
             var agencyName = employmentType == "Agency"
                 ? FirstMeaningful(driver.AgencyName, driver.DriverGroup, "Not in Sage HR")
                 : null;
+            var allDriverDuties = tachoByDate.Values.SelectMany(items => items)
+                .Where(item => DriverMatches(driver, item))
+                .OrderBy(item => item.DutyStartUtc)
+                .ToList();
             var days = new List<object>();
             var daysWorked = 0;
             var reviewDays = 0;
@@ -256,18 +296,33 @@ public sealed class WeeklyDriverTimesheetsController(
                 var plannedStart = plannedTimes.Count > 0 ? plannedTimes.First() : (DateTimeOffset?)null;
                 var plannedEnd = plannedTimes.Count > 0 ? plannedTimes.Last() : (DateTimeOffset?)null;
 
-                var trackerWindowStart = tachoStart ?? StartOfUkDay(day);
-                var trackerWindowEnd = tachoEnd ?? (tachoStart?.AddHours(20) ?? StartOfUkDay(day.AddDays(1)).AddHours(6));
-                if (trackerWindowEnd <= trackerWindowStart) trackerWindowEnd = trackerWindowStart.AddHours(20);
-
                 var trackingForDuty = (trackingByDate.TryGetValue(day, out var dayTracking) ? dayTracking : [])
                     .Concat(trackingByDate.TryGetValue(day.AddDays(1), out var nextDayTracking) ? nextDayTracking : []);
-                var movement = trackingForDuty
-                    .Where(x => x.EventTimeUtc >= trackerWindowStart && x.EventTimeUtc <= trackerWindowEnd)
-                    .Where(x => trackingKeys.Contains(Normalise(x.VehicleIdentifier)))
-                    .Where(IsMovement)
-                    .OrderBy(x => x.EventTimeUtc)
-                    .ToList();
+                var movement = new List<DotTelemetryRecord>();
+                if (duties.Count > 0)
+                {
+                    foreach (var duty in duties)
+                    {
+                        var dutyAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        if (!string.IsNullOrWhiteSpace(duty.VehicleCode))
+                        {
+                            dutyAliases.Add(Normalise(duty.VehicleCode));
+                            if (vehicleByAlias.TryGetValue(Normalise(duty.VehicleCode), out var dutyVehicle))
+                                foreach (var alias in vehicleAliases[dutyVehicle.Id]) dutyAliases.Add(Normalise(alias));
+                        }
+                        var selected = TimesheetEvidenceRules.SelectMovementWindow(trackingForDuty, dutyAliases, duty.DutyStartUtc, duty.DutyEndUtc);
+                        movement.AddRange(trackingForDuty.Where(item => selected.VehicleIdentifiers.Contains(item.VehicleIdentifier, StringComparer.OrdinalIgnoreCase)
+                            && item.EventTimeUtc >= selected.FirstUtc && item.EventTimeUtc <= selected.LastUtc));
+                    }
+                }
+                else
+                {
+                    movement.AddRange(trackingForDuty
+                        .Where(x => trackingKeys.Contains(Normalise(x.VehicleIdentifier)))
+                        .Where(IsMovement)
+                        .OrderBy(x => x.EventTimeUtc));
+                }
+                movement = movement.DistinctBy(item => item.ProviderEventId).OrderBy(item => item.EventTimeUtc).ToList();
 
                 var firstMovement = movement.Count > 0 ? movement.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var lastMovement = movement.Count > 0 ? movement.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
@@ -279,36 +334,47 @@ public sealed class WeeklyDriverTimesheetsController(
                     ? Minutes(lastMovement.Value - tachoEnd.Value) : (int?)null;
 
                 var notes = new List<string>();
+                var reviewReasons = new List<string>();
                 if (tachoStart is not null && firstMovement is not null && Math.Abs(startVarianceMinutes ?? 0) > 45)
+                {
                     notes.Add($"Tacho start and first vehicle movement differ by {Math.Abs(startVarianceMinutes!.Value)} minutes.");
+                    reviewReasons.Add("Movement mismatch");
+                }
                 if (tachoEnd is not null && lastMovement is not null && Math.Abs(finishVarianceMinutes ?? 0) > 60)
+                {
                     notes.Add($"Tacho finish and last vehicle movement differ by {Math.Abs(finishVarianceMinutes!.Value)} minutes.");
+                    reviewReasons.Add("Movement mismatch");
+                }
                 if (dayLoads.Count == 0 && duties.Count > 0)
+                {
                     notes.Add("No TMS route was allocated; timesheet is based on TachoMaster and vehicle movement evidence.");
+                    reviewReasons.Add("No allocated TMS run");
+                }
                 if (duties.Count == 0 && dayLoads.Count > 0 && movement.Count == 0 && day <= today)
+                {
                     notes.Add("A TMS route exists but no TachoMaster or vehicle-movement evidence was found.");
+                    reviewReasons.Add("No RoadTech evidence");
+                }
+
+                var nextDuty = allDriverDuties.FirstOrDefault(item => tachoEnd is not null && item.DutyStartUtc > tachoEnd.Value);
+                var lastMovementEvent = movement.LastOrDefault();
+                var sameVehicle = nextDuty is not null && string.Equals(Normalise(nextDuty.VehicleCode), Normalise(duties.LastOrDefault()?.VehicleCode), StringComparison.OrdinalIgnoreCase);
+                var nightOut = TimesheetEvidenceRules.AssessNightOut(tachoEnd, nextDuty?.DutyStartUtc, lastMovementEvent?.EventTimeUtc, lastMovementEvent?.Latitude, lastMovementEvent?.Longitude, depotPoints, sameVehicle);
+                if (nightOut.Status == "Possible Night Out") reviewReasons.Add(nightOut.Reason);
 
                 var hasTacho = duties.Count > 0;
                 var hasTracker = movement.Count > 0;
                 var status = tachoStart is not null && tachoEnd is null
-                    ? "Open duty"
-                    : notes.Any(x => x.Contains("differ by", StringComparison.OrdinalIgnoreCase))
-                        ? "Review"
-                        : hasTacho && hasTracker
-                            ? "Confirmed"
-                            : hasTacho
-                                ? "Tacho only"
-                                : hasTracker
-                                    ? "Tracker only"
-                                    : dayLoads.Count > 0
-                                        ? "Missing evidence"
-                                        : "No work";
+                    ? "Tacho only"
+                    : reviewReasons.Count > 0
+                        ? reviewReasons[0]
+                        : hasTacho && hasTracker ? "Confirmed" : hasTacho ? "Tacho only" : hasTracker ? "Tracker only" : dayLoads.Count > 0 ? "No RoadTech evidence" : "No work";
 
                 var worked = hasTacho || hasTracker || dayLoads.Count > 0;
                 if (!worked) continue;
 
                 daysWorked++;
-                if (status is "Review" or "Missing evidence" or "Open duty") reviewDays++;
+                if (reviewReasons.Count > 0 || status is "No RoadTech evidence" or "Tacho only") reviewDays++;
                 dutySpanTotal += dutySpanMinutes ?? 0;
                 activityTotal += activityMinutes ?? 0;
                 driveTotal += driveMinutes;
@@ -340,7 +406,14 @@ public sealed class WeeklyDriverTimesheetsController(
                     runs = dayLoads.Select(x => RunDisplayLabel.For(x)).Distinct().ToArray(),
                     routeAllocated = dayLoads.Count > 0,
                     status,
-                    notes
+                    notes,
+                    reviewReasons = reviewReasons.Distinct().ToArray(),
+                    nightOutStatus = nightOut.Status,
+                    nightOutSource = "Inferred",
+                    restDurationMinutes = nightOut.RestMinutes,
+                    restType = nightOut.Status.Contains("Regular", StringComparison.OrdinalIgnoreCase) ? "Regular daily rest" : nightOut.Status.Contains("Reduced", StringComparison.OrdinalIgnoreCase) ? "Reduced daily rest" : null,
+                    payUnits = employmentType == "Employed" ? $"1 day{(nightOut.Status.StartsWith("Confirmed Night Out", StringComparison.Ordinal) ? " + 1 night out" : string.Empty)}" : null,
+                    evidence = new { tachoDutyCount = duties.Count, roadTechMovementCount = movement.Count, firstVehicleIdentifiers = movement.Take(1).Select(x => x.VehicleIdentifier).ToArray(), lastVehicleIdentifiers = movement.TakeLast(1).Select(x => x.VehicleIdentifier).ToArray() }
                 });
             }
 
@@ -397,6 +470,7 @@ public sealed class WeeklyDriverTimesheetsController(
                 reviewDrivers = driverRows.Count(RowNeedsReview),
                 unmatchedTachoDuties = unmatchedTachoDutyCount
             },
+            unmatchedDuties = unmatchedTachoDuties,
             drivers = driverRows
         };
     }
@@ -409,6 +483,8 @@ public sealed class WeeklyDriverTimesheetsController(
 
     private static bool RowNeedsReview(object row)
     {
+        var reviewDays = row.GetType().GetProperty("reviewDays")?.GetValue(row);
+        if (reviewDays is int count && count > 0) return true;
         var property = row.GetType().GetProperty("status");
         return string.Equals(property?.GetValue(row)?.ToString(), "Review", StringComparison.OrdinalIgnoreCase);
     }
@@ -440,6 +516,14 @@ public sealed class WeeklyDriverTimesheetsController(
         return names.Contains(Normalise(status.DriverName));
     }
 
+    private static bool SimilarIdentity(Driver driver, TachoDriverDutyStatus status)
+    {
+        var driverName = Normalise(driver.TachoName ?? driver.DisplayName);
+        var dutyName = Normalise(status.DriverName);
+        return (driverName.Length > 3 && dutyName.Length > 3 && (driverName.Contains(dutyName, StringComparison.OrdinalIgnoreCase) || dutyName.Contains(driverName, StringComparison.OrdinalIgnoreCase)))
+            || (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(status.EmployeeNumber) && Normalise(driver.EmployeeNumber) == Normalise(status.EmployeeNumber));
+    }
+
     private static bool SameCard(string? left, string? right)
     {
         var a = Normalise(left ?? string.Empty);
@@ -447,9 +531,6 @@ public sealed class WeeklyDriverTimesheetsController(
         return a.Length >= 8 && b.Length >= 8 &&
                (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
     }
-
-    private static bool IsMovement(DotTelemetryRecord item) =>
-        item.IsMoving == true || (item.SpeedKph ?? 0m) > 0m;
 
     private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
 
