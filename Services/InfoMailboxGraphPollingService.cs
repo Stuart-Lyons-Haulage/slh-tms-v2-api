@@ -228,11 +228,49 @@ public sealed class InfoMailboxGraphPollingService(
         var messages = new List<GraphMailboxMessage>();
         var limit = Math.Clamp(options.MaxMessagesPerPoll, 1, 1000);
 
+        await AppendMessagePagesAsync(client, accessToken, next, messages, limit, ct);
+
+        // Some NWF reports have been visible in Outlook search but not returned by
+        // the normal Inbox page. Search the subject index as a bounded customer-
+        // specific safety net. This is deliberately limited to NWAY subject lines
+        // so unrelated mail is not pulled into the intake lane.
+        var supplementalSearch = Uri.EscapeDataString("subject:NWAY");
+        var supplemental =
+            $"users/{mailbox}/mailFolders/inbox/messages" +
+            "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,body,bodyPreview,from,toRecipients,ccRecipients,importance,webLink,hasAttachments" +
+            $"&$search=\"{supplementalSearch}\"&$top=50";
+
+        try
+        {
+            await AppendMessagePagesAsync(client, accessToken, supplemental, messages, limit, ct, since);
+        }
+        catch (HttpRequestException ex)
+        {
+            // A tenant may reject, throttle or time out this safety-net query. The
+            // normal Inbox poll remains valid; never turn a supplemental NWF search
+            // failure into a mailbox-wide intake outage.
+            logger.LogWarning(ex, "NWF supplemental Graph subject search was unavailable; Inbox polling remains active.");
+        }
+
+        return messages;
+    }
+
+    private static async Task AppendMessagePagesAsync(
+        HttpClient client,
+        string accessToken,
+        string? next,
+        List<GraphMailboxMessage> messages,
+        int limit,
+        CancellationToken ct,
+        DateTimeOffset? minimumReceivedUtc = null)
+    {
+        var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         while (!string.IsNullOrWhiteSpace(next) && messages.Count < limit)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, next);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             request.Headers.TryAddWithoutValidation("Prefer", "outlook.body-content-type=\"html\"");
+            request.Headers.TryAddWithoutValidation("ConsistencyLevel", "eventual");
             using var response = await client.SendAsync(request, ct);
             await EnsureGraphSuccessAsync(response, request.RequestUri, ct);
 
@@ -244,7 +282,10 @@ public sealed class InfoMailboxGraphPollingService(
                 {
                     if (messages.Count >= limit) break;
                     var parsed = ParseMessage(item);
-                    if (parsed is not null) messages.Add(parsed);
+                    if (parsed is not null &&
+                        (minimumReceivedUtc is null || parsed.ReceivedAtUtc >= minimumReceivedUtc.Value) &&
+                        knownIds.Add(parsed.Id))
+                        messages.Add(parsed);
                 }
             }
 
@@ -252,8 +293,6 @@ public sealed class InfoMailboxGraphPollingService(
                 ? nextLink.GetString()
                 : null;
         }
-
-        return messages;
     }
 
     private async Task<List<MailboxAttachmentRequest>> FetchAttachmentsAsync(

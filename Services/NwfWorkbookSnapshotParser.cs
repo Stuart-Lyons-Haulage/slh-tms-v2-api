@@ -13,6 +13,9 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public sealed class NwfWorkbookSnapshotParser
 {
+    private const string AuthoritativeInboundDump = "NWFINBOUNDDUMP";
+    private const string AuthoritativeCrateDump = "NWFCRATEDUMP";
+
     static NwfWorkbookSnapshotParser()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -47,21 +50,42 @@ public sealed class NwfWorkbookSnapshotParser
             var minDate = snapshotDate.AddDays(-2);
             var maxDate = snapshotDate.AddDays(60);
 
+            var sheets = new List<(string Name, List<object?[]> Rows)>();
             do
             {
                 var rows = ReadSheet(reader);
                 var sheetName = reader.Name ?? string.Empty;
+                sheets.Add((sheetName, rows));
+            }
+            while (reader.NextResult());
+
+            var hasAuthoritativeDump = sheets.Any(sheet =>
+                IsAuthoritativeInboundSheet(Normalise(sheet.Name)) ||
+                IsAuthoritativeCrateSheet(Normalise(sheet.Name)));
+
+            foreach (var sheet in sheets)
+            {
+                var sheetName = sheet.Name;
+                var rows = sheet.Rows;
                 var normalisedSheet = Normalise(sheetName);
 
-                if (normalisedSheet.Contains("INBOUND", StringComparison.OrdinalIgnoreCase))
+                if (IsAuthoritativeInboundSheet(normalisedSheet) ||
+                    (!hasAuthoritativeDump && normalisedSheet.Contains("INBOUND", StringComparison.OrdinalIgnoreCase)))
                 {
                     recognisedSheet = true;
                     ParseInboundSheet(request, attachment, sheetName, rows, minDate, maxDate, orders, warnings);
                 }
-                else if (normalisedSheet.Contains("CRATE", StringComparison.OrdinalIgnoreCase))
+                else if (IsAuthoritativeCrateSheet(normalisedSheet) ||
+                         (!hasAuthoritativeDump && normalisedSheet.Contains("CRATE", StringComparison.OrdinalIgnoreCase)))
                 {
                     recognisedSheet = true;
                     ParseCrateSheet(request, attachment, sheetName, rows, minDate, maxDate, orders, warnings);
+                }
+                else if (hasAuthoritativeDump &&
+                         (normalisedSheet.Contains("INBOUND", StringComparison.OrdinalIgnoreCase) ||
+                          normalisedSheet.Contains("CRATE", StringComparison.OrdinalIgnoreCase)))
+                {
+                    warnings.Add($"NWF summary sheet '{sheetName}' was ignored because the authoritative dump tab is present.");
                 }
                 else if (string.Equals(normalisedSheet, "NWF", StringComparison.OrdinalIgnoreCase) ||
                          normalisedSheet.Contains("NWF", StringComparison.OrdinalIgnoreCase))
@@ -70,10 +94,21 @@ public sealed class NwfWorkbookSnapshotParser
                     ParseNwfPlannerSheet(request, attachment, sheetName, rows, minDate, maxDate, orders, warnings);
                 }
             }
-            while (reader.NextResult());
 
             if (!recognisedSheet)
                 return null;
+
+            var duplicateCount = orders.Count - orders
+                .GroupBy(order => order.NaturalKey, StringComparer.OrdinalIgnoreCase)
+                .Count();
+            if (duplicateCount > 0)
+            {
+                orders = orders
+                    .GroupBy(order => order.NaturalKey, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First())
+                    .ToList();
+                warnings.Add($"NWF workbook duplicate movements were collapsed by natural key: {duplicateCount} duplicate row(s) ignored.");
+            }
 
             if (orders.Count == 0)
             {
@@ -93,6 +128,12 @@ public sealed class NwfWorkbookSnapshotParser
                 "NWF workbook parsing failed; retain the email for manual review.");
         }
     }
+
+    private static bool IsAuthoritativeInboundSheet(string normalisedSheet) =>
+        string.Equals(normalisedSheet, AuthoritativeInboundDump, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAuthoritativeCrateSheet(string normalisedSheet) =>
+        string.Equals(normalisedSheet, AuthoritativeCrateDump, StringComparison.OrdinalIgnoreCase);
 
     private static void ParseNwfPlannerSheet(
         MailboxEmailIntakeRequest request,
@@ -410,7 +451,9 @@ public sealed class NwfWorkbookSnapshotParser
         {
             var keys = row.Select(value => Normalise(CellText(value))).ToHashSet();
             return (keys.Contains("CRATELOADINGDATE") && keys.Contains("TRANSPORTPO")) ||
-                   (keys.Contains("NWFTRANSPORTPO") && keys.Contains("REQUIREDCOLLECTIONDATE"));
+                   (keys.Contains("NWFTRANSPORTPO") && keys.Contains("REQUIREDCOLLECTIONDATE")) ||
+                   (keys.Contains("TRANSPORTPO") && keys.Contains("COLLECTIONDATE") &&
+                    keys.Contains("NWFCRATEPONUMBER") && keys.Contains("DELIVERYSITE"));
         });
         if (headerIndex < 0) return;
 
@@ -479,13 +522,13 @@ public sealed class NwfWorkbookSnapshotParser
         DateOnly maxDate,
         List<ParsedEmailOrder> orders)
     {
-        var transportIndex = Find(columns, "NWFTRANSPORTPO");
-        var collectionDateIndex = Find(columns, "REQUIREDCOLLECTIONDATE");
-        var deliveryDateIndex = Find(columns, "REQUIREDDELIVERYDATE");
+        var transportIndex = Find(columns, "NWFTRANSPORTPO", "TRANSPORTPO");
+        var collectionDateIndex = Find(columns, "REQUIREDCOLLECTIONDATE", "COLLECTIONDATE");
+        var deliveryDateIndex = Find(columns, "REQUIREDDELIVERYDATE", "DELIVERYDATE");
         var collectionDepotIndex = Find(columns, "COLLECTIONDEPOT");
         var collectionRefIndex = Find(columns, "COLLECTIONREFERENCE");
-        var cratePoIndex = Find(columns, "NWFCRATEPOFORGROWER");
-        var deliveryIndex = Find(columns, "DELIVERYLOCATION");
+        var cratePoIndex = Find(columns, "NWFCRATEPOFORGROWER", "NWFCRATEPONUMBER");
+        var deliveryIndex = Find(columns, "DELIVERYLOCATION", "DELIVERYSITE");
         var palletsIndex = Find(columns, "PALLETS");
 
         for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)

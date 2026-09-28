@@ -61,7 +61,7 @@ public static class NwfBookingReservationSync
             {
                 CustomerCode = "NWF", BookingType = Clip(jobType, 80)!, StableBookingKey = stableKey,
                 CollectionDate = collectionDate, DeliveryDate = Date(payload, "deliveryDate"), CollectionDepot = Clip(Text(payload, "collectionLocation") ?? Text(payload, "collectionSite") ?? Text(payload, "sellerName"), 200),
-                DeliverySite = Clip(Text(payload, "deliveryLocation") ?? Text(payload, "deliveryAddress") ?? Text(payload, "nwfDepotDescription"), 200),
+                DeliverySite = Clip(Text(payload, "deliveryLocation") ?? Text(payload, "deliveryAddress") ?? Text(payload, "nwfDepotDescription") ?? Text(payload, "stallNumber"), 200),
                 CollectionReference = Clip(Text(payload, "collectionReference") ?? Text(payload, "loadReference") ?? Text(payload, "loadRef"), 120),
                 CratePurchaseOrder = Clip(Text(payload, "cratePo") ?? Text(payload, "nwfCratePoForGrower"), 120), TransportPurchaseOrder = Clip(Text(payload, "transportPo") ?? Text(payload, "nwfPoRef"), 120),
                 ReservedUnits = Math.Max(units, 0), UnitType = "PalletSpace", CompositionJson = payload.GetRawText(), PlannerNotes = Clip(incomingPlannerNotes, 1000),
@@ -91,7 +91,7 @@ public static class NwfBookingReservationSync
         var sourceChanged = !string.IsNullOrWhiteSpace(incomingSourceMessageId) &&
                             !string.Equals(latestSourceMessageId, incomingSourceMessageId, StringComparison.OrdinalIgnoreCase);
         var incomingDepot = Text(payload, "collectionLocation") ?? Text(payload, "collectionSite") ?? Text(payload, "sellerName");
-        var incomingDeliverySite = Text(payload, "deliveryLocation") ?? Text(payload, "deliveryAddress") ?? Text(payload, "nwfDepotDescription");
+        var incomingDeliverySite = Text(payload, "deliveryLocation") ?? Text(payload, "deliveryAddress") ?? Text(payload, "nwfDepotDescription") ?? Text(payload, "stallNumber");
         var incomingCratePo = Text(payload, "cratePo") ?? Text(payload, "nwfCratePoForGrower");
         var businessChanged = existing.ReservedUnits != newUnits ||
                       (incomingCollectionDate is DateOnly incomingDate && existing.CollectionDate != incomingDate) ||

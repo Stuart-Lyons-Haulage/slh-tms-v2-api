@@ -99,6 +99,45 @@ Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 
     }
 
     [Fact]
+    public void CorrectedNwayPalletReport_IsParsedFromTheStuartLyonsAttachment()
+    {
+        const string csv = """
+Haulier Name,Requested Ship Date,04. Collection Site,Customer Name,DepotID,Depot Description,Delivery Address,Sales Order ID,CustomerRef,Pallet Name,PalletQty,PO REF
+Stuart Lyons,29/09/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 2HP,SO000372051,6513209071,IPP Euro,1,PO00505363
+Stuart Lyons,29/09/2026,Merston,Aldi,ALD21,Aldi GOLDTHORPE Distribution Centre,SF6 9FA,SO000372071,6513219466,IPP Euro,11,PO00505363
+Stuart Lyons,29/09/2026,Drayton,Tesco,ONE01,One Stop Tamworth,B78 1ST,SO000372028,8000054933,IPP STD,0,PO00505363
+""";
+
+        var request = new MailboxEmailIntakeRequest(
+            "nway-corrected-2026-09-29",
+            null,
+            "info@lyonshaulage.com",
+            "ShiftLogisticalPlanner@nwfltd.co.uk",
+            "Shift Logistical Planner",
+            "NWAY Stuart Lyons Transport Pallet Order Report 29/09/2026 CORRECT ATTACHMENT",
+            DateTimeOffset.Parse("2026-09-28T16:44:21Z"),
+            "Please see below and attached.",
+            null,
+            null,
+            [new MailboxAttachmentRequest(
+                "NWAY PALLET ORDER REPORT SLH.csv",
+                "application/octet-stream",
+                null,
+                false,
+                ContentBytes: Convert.ToBase64String(Encoding.UTF8.GetBytes(csv)))]);
+
+        var result = parser.TryParse(request);
+
+        Assert.NotNull(result);
+        Assert.Null(result!.IgnoredReason);
+        Assert.Equal(2, result.Orders.Count);
+        Assert.Equal(12, result.Orders.Sum(order => order.Payload.GetProperty("pallets").GetInt32()));
+        Assert.All(result.Orders, order => Assert.Equal("NWF", order.Payload.GetProperty("customerCode").GetString()));
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Drayton");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Merston");
+    }
+
+    [Fact]
     public void NwfEmailBodyPipeTable_IsParsed_WhenAttachmentContentIsUnavailable()
     {
         const string body = """
