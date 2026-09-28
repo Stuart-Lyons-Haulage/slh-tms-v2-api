@@ -387,7 +387,14 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
     private async Task ProcessMarketContactsAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)
     {
-        var rows = workbook.Sheets.Where(sheet => sheet.Key.Contains("market", StringComparison.OrdinalIgnoreCase)).SelectMany(sheet => sheet.Value).ToList();
+        // The operational market lists are held on the workbook's Names tab. Older
+        // workbooks also used a sheet name containing "market", so retain that
+        // compatibility while explicitly accepting the canonical Names layout.
+        var rows = workbook.Sheets
+            .Where(sheet => sheet.Key.Contains("market", StringComparison.OrdinalIgnoreCase)
+                || SheetIs(sheet.Key, "names"))
+            .SelectMany(sheet => sheet.Value)
+            .ToList();
         foreach (var entry in ExpandMarketRows(rows))
         {
             if (string.IsNullOrWhiteSpace(entry.Name)) continue;
@@ -406,7 +413,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload));
                 await staging.PromoteDirect("marketcontact", doc.RootElement, ct);
             }
-            result.Rows.Add(new WorkbookRowResult("Market Contacts", entry.RowNumber, $"{entry.Market} - {entry.Name}", commit ? "imported" : "ready", "Market contact ready for upsert, including cross-tabbed Covent/Spit/Western/Sales/Sender layouts.", 88) { ActionTaken = commit ? "upserted market contact" : "would upsert market contact" });
+            result.Rows.Add(new WorkbookRowResult("Market Contacts", entry.RowNumber, $"{entry.Market} - {entry.Name}", commit ? "imported" : "ready", "Market contact ready for upsert, including separate market, sender, stall/stand and salesman values from the Names tab.", 92) { ActionTaken = commit ? "upserted market contact" : "would upsert market contact" });
         }
     }
 
@@ -592,7 +599,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         if (sheet is "collectionsites" && text.Contains("collectionsites")) return true;
         if (sheet is "customersfordeliveries" && text.Contains("deliveries")) return true;
         if (sheet.Contains("runtime")) return text.Contains("pallettype");
-        if (sheet.Contains("market") && (text.Contains("covent") || text.Contains("spit") || text.Contains("spital") || text.Contains("western") || text.Contains("salesmen") || text.Contains("salesman") || text.Contains("sender"))) return true;
+        if ((sheet.Contains("market") || sheet == "names") && (text.Contains("covent") || text.Contains("spit") || text.Contains("spital") || text.Contains("western") || text.Contains("salesmen") || text.Contains("salesman") || text.Contains("sender"))) return true;
         return text.Contains("siteid") || text.Contains("vehicleid") || text.Contains("registration") || text.Contains("driverid") || text.Contains("pallettype") || text.Contains("market") || text.Contains("customer") || text.Contains("provider") || text.Contains("cutoffcheck");
     }
 
@@ -604,7 +611,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         return !value.Contains('-', StringComparison.OrdinalIgnoreCase) && !value.Contains("AllTimes", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static IEnumerable<MarketWorkbookEntry> ExpandMarketRows(IEnumerable<WorkbookRow> rows)
+    internal static IEnumerable<MarketWorkbookEntry> ExpandMarketRows(IEnumerable<WorkbookRow> rows)
     {
         foreach (var row in rows)
         {
@@ -625,7 +632,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 var stand = InferStand(rawName);
                 var name = RemoveTrailingStand(rawName, stand);
                 var isSender = market.Equals("Sender", StringComparison.OrdinalIgnoreCase);
-                yield return new MarketWorkbookEntry(row.RowNumber, market, name, stand, isSender ? null : name, isSender ? name : null, null);
+                var isSalesmanList = market.Equals("Salesmen", StringComparison.OrdinalIgnoreCase);
+                yield return new MarketWorkbookEntry(row.RowNumber, market, name, stand, isSalesmanList ? name : null, isSender ? name : null, null);
             }
         }
     }
@@ -636,7 +644,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         if (canonical.Contains("covent")) return "Covent";
         if (canonical.Contains("spit") || canonical.Contains("spital")) return "Spitalfields";
         if (canonical.Contains("western")) return "Western";
-        if (canonical.Contains("salesmen") || canonical.Contains("salesman")) return "Sales";
+        if (canonical.Contains("salesmen") || canonical.Contains("salesman")) return "Salesmen";
         if (canonical.Contains("sender")) return "Sender";
         return null;
     }
@@ -667,7 +675,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
     private static string Canonical(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static bool SheetIs(string sheet, string expected) => Canonical(sheet) == Canonical(expected);
 
-    private sealed record MarketWorkbookEntry(int RowNumber, string Market, string Name, string? StandOrLocation, string? Salesman, string? Sender, string? ReadOnlyMapPdfUrl);
+    internal sealed record MarketWorkbookEntry(int RowNumber, string Market, string Name, string? StandOrLocation, string? Salesman, string? Sender, string? ReadOnlyMapPdfUrl);
 }
 
 public sealed record Workbook(Dictionary<string, List<WorkbookRow>> Sheets);
