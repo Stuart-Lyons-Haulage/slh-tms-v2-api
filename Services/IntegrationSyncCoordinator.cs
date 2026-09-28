@@ -46,12 +46,13 @@ public sealed class IntegrationSyncCoordinator(
             var matched = 0;
             var matchedMemberCodes = new HashSet<int>();
             var identityConflicts = 0;
-            var memberOwnerIds = (await db.Drivers.AsNoTracking()
-                .Where(driver => driver.TachoMasterDriverId != null)
-                .Select(driver => new { driver.Id, driver.TachoMasterDriverId })
-                .ToListAsync(ct))
-                .Where(item => !string.IsNullOrWhiteSpace(item.TachoMasterDriverId))
-                .GroupBy(item => Normalise(item.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)
+            // MasterDetailStore enrichment can supply the current identity from the
+            // audited Driver Master detail row even when the relational column is blank.
+            // Build ownership from the enriched tracked population, otherwise a later
+            // SaveChanges can reintroduce a duplicate member code that the SQL query missed.
+            var memberOwnerIds = drivers
+                .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+                .GroupBy(driver => Normalise(driver.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)
                 .Where(group => group.Key.Length > 0)
                 .ToDictionary(
                     group => group.Key,

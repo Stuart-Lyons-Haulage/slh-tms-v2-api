@@ -157,7 +157,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Driver>().HasIndex(x => x.TachoMasterDriverId)
             .IsUnique()
             .HasDatabaseName("IX_Drivers_TachoMasterDriverId")
-            .HasFilter("[TachoMasterDriverId] IS NOT NULL");
+            .HasFilter("[Active] = 1 AND [TachoMasterDriverId] IS NOT NULL");
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
         b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name, x.StandOrLocation });
