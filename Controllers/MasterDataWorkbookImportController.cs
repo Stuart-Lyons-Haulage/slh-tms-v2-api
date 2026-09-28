@@ -19,6 +19,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 {
     [HttpPost("preview")]
     [RequestSizeLimit(30_000_000)]
+    [RequestFormLimits(MultipartBodyLengthLimit = 30_000_000)]
     public async Task<IActionResult> Preview([FromForm] IFormFile file, CancellationToken ct)
     {
         return Ok(await ProcessAsync(file, commit: false, ct));
@@ -26,6 +27,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
     [HttpPost("commit")]
     [RequestSizeLimit(30_000_000)]
+    [RequestFormLimits(MultipartBodyLengthLimit = 30_000_000)]
     public async Task<IActionResult> Commit([FromForm] IFormFile file, CancellationToken ct)
     {
         return Ok(await ProcessAsync(file, commit: true, ct));
