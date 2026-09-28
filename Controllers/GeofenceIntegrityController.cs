@@ -30,6 +30,16 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
             catch { sites = []; db.ChangeTracker.Clear(); }
 
             var activeSiteIdsWithGeofence = fences.Where(x => x.SiteId is not null).Select(x => x.SiteId!.Value).ToHashSet();
+            var duplicateSiteAssignments = fences
+                .Where(x => x.SiteId is not null)
+                .GroupBy(x => x.SiteId!.Value)
+                .Where(group => group.Count() > 1)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Select(item => item.Fence.Name)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                        .ToArray());
             var duplicateReferenceGroups = sites
                 .Where(x => !string.IsNullOrWhiteSpace(x.ExternalCode))
                 .GroupBy(x => NormalizeCode(x.ExternalCode), StringComparer.OrdinalIgnoreCase)
@@ -79,6 +89,8 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                         activeSites = sites.Count,
                         sitesMissingReference = sites.Count(x => string.IsNullOrWhiteSpace(x.ExternalCode)),
                         duplicateReferenceGroups,
+                        duplicateSiteAssignmentGroups = duplicateSiteAssignments.Count,
+                        geofencesInDuplicateSiteAssignments = duplicateSiteAssignments.Values.Sum(names => names.Length),
                         sitesMissingGeofence = sites.Count(x => !activeSiteIdsWithGeofence.Contains(x.Id)),
                         safeCandidates = linkDiagnostics.Values.Count(item => item.SafeToAutoLink),
                         exactCode = linkDiagnostics.Values.Count(item => item.Reason == "ExactCode"),
@@ -95,6 +107,9 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                     var locationOnly = string.Equals(manual?.SiteNumber, "LOCATION_ONLY", StringComparison.OrdinalIgnoreCase);
                     var siteNumber = x.SiteCode ?? (locationOnly ? null : manual?.SiteNumber ?? x.Fence.SiteNumber);
                     var codedUnlinked = x.SiteId is null && !locationOnly && !string.IsNullOrWhiteSpace(siteNumber);
+                    var duplicateGeofences = x.SiteId is Guid linkedSiteId && duplicateSiteAssignments.TryGetValue(linkedSiteId, out var duplicateNames)
+                        ? duplicateNames
+                        : Array.Empty<string>();
                     return new
                     {
                         id = x.Fence.Id,
@@ -114,7 +129,11 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                         polygonValid = true,
                         geofenceAvailable = true,
                         siteLinked = x.SiteId != null,
-                        validationStatus = locationOnly ? "Location only" : x.SiteId != null ? "Valid" : codedUnlinked ? "Coded / needs Site promotion" : "Unlinked",
+                        duplicateSiteAssignment = duplicateGeofences.Length > 1,
+                        duplicateGeofences,
+                        validationStatus = duplicateGeofences.Length > 1
+                            ? "Duplicate Site geofence assignment"
+                            : locationOnly ? "Location only" : x.SiteId != null ? "Valid" : codedUnlinked ? "Coded / needs Site promotion" : "Unlinked",
                         linkReason = diagnostic.Reason,
                         diagnostic.SafeToAutoLink,
                         diagnostic.SuggestedSiteId,
