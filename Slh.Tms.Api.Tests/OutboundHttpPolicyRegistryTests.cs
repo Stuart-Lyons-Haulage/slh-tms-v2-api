@@ -14,7 +14,7 @@ public sealed class OutboundHttpPolicyRegistryTests
         var policy = registry.Get("Samsara");
         var attempts = 0;
 
-        var response = await policy.ExecuteAsync(_ =>
+        var response = await policy.ExecuteAsync(() =>
         {
             attempts++;
             var result = new HttpResponseMessage(HttpStatusCode.GatewayTimeout)
