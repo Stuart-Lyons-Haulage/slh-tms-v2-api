@@ -40,6 +40,7 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
         amendedPayload["poNumber"] = po;
         amendedPayload["customerCode"] = customer;
         amendedPayload["collectionDate"] = date;
+        StagedOrderPayloadAmendment.Apply(amendedPayload);
 
         var previousStatus = item.Status;
         item.PayloadJson = amendedPayload.ToJsonString();
