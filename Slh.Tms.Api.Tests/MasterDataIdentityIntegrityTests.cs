@@ -154,6 +154,41 @@ public sealed class MasterDataIdentityIntegrityTests
         Assert.Equal(site.Id, replacement.SiteId);
     }
 
+    [Fact]
+    public async Task Automatic_geofence_sync_leaves_second_match_unlinked_for_review()
+    {
+        var setup = await CreateDbAsync();
+        await using var connection = setup.Connection;
+        await using var db = setup.Db;
+
+        var site = new Site { ExternalCode = "NWF-SELSEY", CustomerCode = "NWF", Name = "NWF Selsey", Active = true };
+        db.Sites.Add(site);
+        db.SiteGeofences.AddRange(
+            new SiteGeofence
+            {
+                Name = "NWF Selsey",
+                NormalizedName = "NWF SELSEY",
+                PolygonJson = "[[0,0],[1,0],[0,1]]",
+                Active = true
+            },
+            new SiteGeofence
+            {
+                Name = "Selsey (Natures Way)",
+                NormalizedName = "SELSEY (NATURES WAY)",
+                PolygonJson = "[[2,2],[3,2],[2,3]]",
+                Active = true
+            });
+        await db.SaveChangesAsync();
+
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
+
+        var linked = await db.SiteGeofences.CountAsync(fence => fence.SiteId == site.Id);
+        var unlinked = await db.SiteGeofences.CountAsync(fence => fence.SiteId == null);
+        Assert.Equal(1, linked);
+        Assert.Equal(1, unlinked);
+        Assert.Contains(result.Warnings, warning => warning.Contains("already has an active geofence", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static async Task<(SqliteConnection Connection, TmsDbContext Db)> CreateDbAsync()
     {
         var connection = new SqliteConnection("Data Source=:memory:");
