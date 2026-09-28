@@ -1,4 +1,5 @@
 using Slh.Tms.Api.Services;
+using IntakeParser = Slh.Tms.Api.Controllers.SpecialistMailboxOrderParser;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
@@ -6,6 +7,29 @@ namespace Slh.Tms.Api.Tests;
 public sealed class SpecialistMailboxOrderParserTests
 {
     private readonly SpecialistMailboxOrderParser parser = new();
+
+    [Fact]
+    public void WaitrosePdfTable_ExtractsEveryDepotRowAndTemperature()
+    {
+        const string text = """
+            COLLECTION POINT CUSTOMER NAME DELIVERY POINT DELIVERY DATE CUSTOMER REF / ORDER No. CASES ORDERED NUMBER OF BASE PALLETS TEMP
+            LEYCHI Waitrose Ltd (A/C 005096) Waitrose Ltd (Aylesford) 29/09/2026 O79001/3564471 196 2 +2 C
+            LEYCHI Waitrose Ltd (A/C 005096) Waitrose Ltd (Leyland) 29/09/2026 B79335/3564310 80 1 +2 C
+            BARBOG Waitrose Ltd (A/C 005096) Waitrose Ltd (Bracknell) 29/09/2026 K78937/3556123 830 12 Ambient
+            BARBOG Waitrose Ltd (A/C 005096) Waitrose Ltd (Brinklow Chill) 29/09/2026 P72621/3564470 64 1 Chilled
+            """;
+
+        var rows = IntakeParser.ParseWaitrosePdfRows(text);
+
+        Assert.Equal(4, rows.Count);
+        Assert.Equal(16, rows.Sum(row => row.Pallets));
+        Assert.Equal("LEYCHI", rows[0].Collection);
+        Assert.Equal("Aylesford", rows[0].Destination);
+        Assert.Equal("O79001/3564471", rows[0].References);
+        Assert.Equal("+2 C", rows[0].Temperature);
+        Assert.Equal("Brinklow Chill", rows[3].Destination);
+        Assert.Equal("Chilled", rows[3].Temperature);
+    }
 
     [Fact]
     public void Vitacress_waitrose_collection_rows_preserve_dates_time_amendment_and_total()
