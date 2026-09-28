@@ -37,6 +37,10 @@ public sealed class IntegrationSyncCoordinator(
         {
             var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
             var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+            var persistedMemberOwners = drivers
+                .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+                .GroupBy(driver => Normalise(driver.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Select(driver => driver.Id).ToHashSet(), StringComparer.OrdinalIgnoreCase);
             await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
 
             var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());
@@ -112,6 +116,35 @@ public sealed class IntegrationSyncCoordinator(
             owners.Add(driver.Id);
             }
 
+            // Enrichment and provider matching both run against the same tracked population.
+            // If a stale detail row or a provider collision gives two active rows the same
+            // Member Code, repair the non-authoritative in-memory copy before SQL Server
+            // rejects the whole batch. The persisted Driver Master owner is retained.
+            var duplicateMemberGroups = drivers
+                .Where(driver => driver.Active && !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+                .GroupBy(driver => Normalise(driver.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)
+                .Where(group => group.Key.Length > 0 && group.Count() > 1)
+                .ToList();
+            if (duplicateMemberGroups.Count > 0)
+            {
+                var conflicts = string.Join(", ", duplicateMemberGroups.Select(group =>
+                    $"{group.Key} ({string.Join(" / ", group.Select(driver => driver.DisplayName).OrderBy(name => name, StringComparer.OrdinalIgnoreCase))})"));
+                foreach (var group in duplicateMemberGroups)
+                {
+                    var preservedOwners = persistedMemberOwners.TryGetValue(group.Key, out var owners)
+                        ? owners
+                        : group.Select(driver => driver.Id).Take(1).ToHashSet();
+                    foreach (var duplicate in group.Where(driver => !preservedOwners.Contains(driver.Id)))
+                    {
+                        logger.LogWarning(
+                            "Clearing conflicting in-memory TachoMaster member {MemberCode} from duplicate driver {DriverId} ({DriverName}); the persisted Driver Master owner is retained.",
+                            group.Key, duplicate.Id, duplicate.DisplayName);
+                        duplicate.TachoMasterDriverId = null;
+                    }
+                }
+                logger.LogWarning("TachoMaster identity conflicts were repaired before save: {Conflicts}", conflicts);
+            }
+
             await db.SaveChangesAsync(ct);
             var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
             var conflictNote = identityConflicts == 0
@@ -123,6 +156,11 @@ public sealed class IntegrationSyncCoordinator(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "TachoMaster driver directory sync failed.");
+            // SaveChanges leaves the conflicting Driver entries tracked. The canonical
+            // orchestrator uses this DbContext to write its failure receipt, so clear the
+            // failed batch before returning; otherwise the same duplicate is retried while
+            // saving the receipt and the queue job can remain stuck in Running.
+            db.ChangeTracker.Clear();
             var status = ex is HttpRequestException http && http.StatusCode is not null ? $" HTTP {(int)http.StatusCode}." : string.Empty;
             return new("TachoMaster", false, DateTimeOffset.UtcNow,
                 $"TachoMaster sync failed.{status} {ex.GetBaseException().Message} No TMS driver records were intentionally updated by the sync result.");

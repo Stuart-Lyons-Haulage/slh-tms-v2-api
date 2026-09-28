@@ -42,8 +42,21 @@ public sealed class TachoMasterDriverMasterRegressionTests
         Assert.Contains("memberOwnerIds", tachoSync, StringComparison.Ordinal);
         Assert.Contains("Skipping TachoMaster member", tachoSync, StringComparison.Ordinal);
         Assert.Contains("conflicting member assignment(s) were skipped safely", tachoSync, StringComparison.Ordinal);
+        Assert.Contains("duplicateMemberGroups", tachoSync, StringComparison.Ordinal);
+        Assert.Contains("db.ChangeTracker.Clear()", tachoSync, StringComparison.Ordinal);
         Assert.DoesNotContain("db.Drivers.Add", tachoSync, StringComparison.Ordinal);
         Assert.DoesNotContain("new Driver", tachoSync, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Queue_failure_path_clears_failed_driver_mutations_before_marking_job_failed()
+    {
+        var source = ReadRepoFile("Services/TachoDriverMasterSyncJobService.cs");
+        var start = source.IndexOf("internal async Task<bool> FailAsync", StringComparison.Ordinal);
+        var end = source.IndexOf("internal async Task<int> RecoverInterruptedAsync", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        var failurePath = source[start..end];
+        Assert.Contains("db.ChangeTracker.Clear()", failurePath, StringComparison.Ordinal);
     }
 
     private static string ReadRepoFile(string relativePath)
