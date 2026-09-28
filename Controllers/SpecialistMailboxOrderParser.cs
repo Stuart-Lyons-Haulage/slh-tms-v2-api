@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Slh.Tms.Api.Services;
+using UglyToad.PdfPig;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -28,6 +29,10 @@ public sealed class SpecialistMailboxOrderParser
         @"\b(?<po>PORD[A-Z0-9/-]+)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex WaitrosePdfRowRegex = new(
+        @"(?im)(?<collection>LEYCHI|BARBOG)\s+WAITROSE\s+LTD\s+\(A/C\s+005096\)\s+WAITROSE\s+LTD\s+\((?<destination>[^)\r\n]+)\)\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{2}|\d{4}))\s+(?<references>[A-Z0-9][A-Z0-9/& -]*?)\s+(?<cases>\d{1,6})\s+(?<pallets>\d{1,3})(?:\s+(?<temperature>[-+]?\d+(?:\.\d+)?\s*°?\s*C|ambient|chilled|frozen))?",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     static SpecialistMailboxOrderParser()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -35,6 +40,10 @@ public sealed class SpecialistMailboxOrderParser
 
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
+        var waitrosePdf = TryParseWaitroseBookingPdf(request);
+        if (waitrosePdf is not null)
+            return waitrosePdf;
+
         // Verified workbook profiles are deliberately evaluated before the older
         // body parsers. A known sender + subject family + workbook structure is the
         // safest automatic intake lane and keeps retailer-name noise out of Order Review.
@@ -59,6 +68,118 @@ public sealed class SpecialistMailboxOrderParser
             return vitacress;
 
         return inner.TryParse(request);
+    }
+
+    private static EmailIntakeParseResult? TryParseWaitroseBookingPdf(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            (!subject.Contains("WAITROSE", StringComparison.OrdinalIgnoreCase) &&
+             !(request.BodyText ?? string.Empty).Contains("WAITROSE", StringComparison.OrdinalIgnoreCase)))
+            return null;
+
+        var pdfAttachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true &&
+                           !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
+                           string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".pdf", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (pdfAttachments.Count == 0)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        foreach (var attachment in pdfAttachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var document = PdfDocument.Open(stream);
+                var pdfText = string.Join("\n", document.GetPages().Select(page => page.Text));
+                var rows = ParseWaitrosePdfRows(pdfText);
+                var planningDate = ExtractPlanningDate(request) ?? rows.Select(row => row.Date).FirstOrDefault();
+                if (rows.Count == 0)
+                    continue;
+
+                foreach (var row in rows)
+                {
+                    var date = row.Date ?? planningDate;
+                    if (date is null || row.Pallets <= 0)
+                        continue;
+
+                    var customerPo = row.References;
+                    var reference = BuildReference(customerPo, row.Destination);
+                    var naturalKey = NaturalKey(request, "WAITROSE", row.Collection, row.Destination, date.Value, row.Pallets);
+                    var rowWarnings = new List<string>();
+                    if (string.IsNullOrWhiteSpace(row.Temperature))
+                        rowWarnings.Add("Waitrose PDF temperature value was blank; confirm the temperature requirement before approval.");
+
+                    var payload = BuildPayload(
+                        request,
+                        reference,
+                        customerPo,
+                        "WAITROSE",
+                        date.Value,
+                        date.Value,
+                        row.Pallets,
+                        row.Collection,
+                        row.Destination,
+                        null,
+                        null,
+                        attachment.Name,
+                        "Waitrose PDF table",
+                        row.RowNumber,
+                        "Barfoots Waitrose PDF booking",
+                        rowWarnings,
+                        "WAITROSE");
+
+                    var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                    root["temperatureRequirement"] = row.Temperature;
+                    root["orderType"] = "Delivery";
+                    root["intakeProfile"] = "BARFOOTS_WAITROSE_PDF_TABLE";
+                    root["sourcePdfRow"] = row.RowNumber;
+                    payload = JsonSerializer.SerializeToElement(root);
+
+                    orders.Add(new ParsedEmailOrder(
+                        $"barfoots-waitrose-pdf-{row.RowNumber}-{NormaliseKey(row.Destination)}",
+                        naturalKey,
+                        payload,
+                        rowWarnings));
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Waitrose PDF table parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
+    }
+
+    internal static IReadOnlyList<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? Temperature, int RowNumber)> ParseWaitrosePdfRows(string text)
+    {
+        var rows = new List<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? Temperature, int RowNumber)>();
+        var rowNumber = 0;
+        foreach (Match match in WaitrosePdfRowRegex.Matches(text.Replace('\u00A0', ' ')))
+        {
+            rowNumber++;
+            var date = DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yy", "dd/MM/yy", "d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
+                ? parsedDate
+                : (DateOnly?)null;
+            if (!int.TryParse(match.Groups["cases"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cases) ||
+                !int.TryParse(match.Groups["pallets"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pallets))
+                continue;
+            rows.Add((
+                match.Groups["collection"].Value.Trim().ToUpperInvariant(),
+                match.Groups["destination"].Value.Trim(),
+                date,
+                match.Groups["references"].Value.Trim(),
+                cases,
+                pallets,
+                string.IsNullOrWhiteSpace(match.Groups["temperature"].Value) ? null : match.Groups["temperature"].Value.Trim(),
+                rowNumber));
+        }
+        return rows;
     }
 
     private static EmailIntakeParseResult? TryParseSummerBerryMorrisonsAldi(MailboxEmailIntakeRequest request)
