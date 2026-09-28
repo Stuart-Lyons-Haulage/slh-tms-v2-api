@@ -363,8 +363,40 @@ public static class MasterDataDuplicateReviewService
             await MasterDetailStore.SaveAsync(db, "site", duplicate.ExternalCode, JsonSerializer.Serialize(duplicate), "Duplicate merge archived source site", actor, ct);
         }
 
-        var geofences = await db.SiteGeofences.Where(row => row.SiteId.HasValue && duplicateIds.Contains(row.SiteId.Value)).ToListAsync(ct);
-        foreach (var geofence in geofences) geofence.SiteId = canonical.Id;
+        var canonicalActiveGeofences = await db.SiteGeofences
+            .Where(row => row.Active && row.SiteId == canonical.Id)
+            .OrderByDescending(row => row.UpdatedAtUtc)
+            .ToListAsync(ct);
+        var geofences = await db.SiteGeofences
+            .Where(row => row.SiteId.HasValue && duplicateIds.Contains(row.SiteId.Value))
+            .OrderByDescending(row => row.UpdatedAtUtc)
+            .ToListAsync(ct);
+
+        var activeDuplicateGeofences = geofences.Where(row => row.Active).ToList();
+        var retainedGeofence = canonicalActiveGeofences.FirstOrDefault();
+        var geofencesReassigned = 0;
+        var geofencesUnlinkedForReview = 0;
+
+        if (retainedGeofence is null)
+        {
+            retainedGeofence = activeDuplicateGeofences.FirstOrDefault();
+            if (retainedGeofence is not null)
+            {
+                retainedGeofence.SiteId = canonical.Id;
+                retainedGeofence.SiteNumber = canonical.ExternalCode;
+                retainedGeofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                geofencesReassigned++;
+            }
+        }
+
+        foreach (var geofence in activeDuplicateGeofences.Where(row => retainedGeofence is null || row.Id != retainedGeofence.Id))
+        {
+            geofence.SiteId = null;
+            geofence.SiteNumber = null;
+            geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            geofencesUnlinkedForReview++;
+            messages.Add($"Geofence '{geofence.Name}' was left unlinked for review because canonical Site {canonical.ExternalCode} already has an active geofence.");
+        }
 
         var runStops = await db.RunStops.Where(row => duplicateIds.Contains(row.SiteId)).ToListAsync(ct);
         foreach (var runStop in runStops) runStop.SiteId = canonical.Id;
@@ -379,11 +411,11 @@ public static class MasterDataDuplicateReviewService
             EntityId = canonical.Id,
             Action = "DuplicateMerge",
             ChangedBy = actor,
-            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(row => row.ExternalCode), request.Note, geofencesReassigned = geofences.Count, runStopsReassigned = runStops.Count, mappingsReassigned = mappingCount, messages })
+            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(row => row.ExternalCode), request.Note, geofencesReassigned, geofencesUnlinkedForReview, runStopsReassigned = runStops.Count, mappingsReassigned = mappingCount, messages })
         });
         await db.SaveChangesAsync(ct);
 
-        messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {geofences.Count} geofence(s), {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
+        messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {geofencesReassigned} geofence(s), left {geofencesUnlinkedForReview} additional geofence(s) unlinked for review, reassigned {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, messages);
     }
 
@@ -458,6 +490,12 @@ public static class MasterDataDuplicateReviewService
             .Where(value => value.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+        if (identities.Count > 1)
+            return new MasterDataDuplicateMergeResult(0, 1, [$"Merge held for review: the selected driver rows contain more than one TachoMaster member identity ({string.Join(", ", identities)}). Different Member Codes must never be merged automatically."]);
+
+        var targetTachoMasterDriverId = new[] { canonical }.Concat(duplicates)
+            .Select(row => row.TachoMasterDriverId?.Trim())
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
         var conflictingOwners = await db.Drivers.AsNoTracking()
             .Where(row => row.Active && row.Id != canonical.Id && !duplicateIds.Contains(row.Id) && row.TachoMasterDriverId != null)
             .Select(row => new { row.Id, row.DisplayName, row.TachoMasterDriverId })
@@ -468,7 +506,6 @@ public static class MasterDataDuplicateReviewService
 
         foreach (var duplicate in duplicates)
         {
-            canonical.TachoMasterDriverId = Preserve(canonical.TachoMasterDriverId, duplicate.TachoMasterDriverId);
             canonical.MobileNumber = Preserve(canonical.MobileNumber, duplicate.MobileNumber);
             canonical.DriverType = Preserve(canonical.DriverType, duplicate.DriverType);
             canonical.DriverGroup = Preserve(canonical.DriverGroup, duplicate.DriverGroup);
@@ -492,15 +529,45 @@ public static class MasterDataDuplicateReviewService
         foreach (var log in statusLogs) log.DriverId = canonical.Id;
 
         var mappings = await ReassignIntegrationMappingsAsync(db, "Driver", duplicateIds, canonical.Id, actor, ct);
-        db.MasterDataAudits.Add(new MasterDataAudit
+
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction? transaction = null;
+        if (db.Database.IsRelational())
+            transaction = await db.Database.BeginTransactionAsync(ct);
+
+        try
         {
-            EntityType = "Driver",
-            EntityId = canonical.Id,
-            Action = "DuplicateMerge",
-            ChangedBy = actor,
-            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.EmployeeNumber, merged = duplicates.Select(row => row.EmployeeNumber), request.Note, loadsReassigned = loads.Count, planRunsReassigned = planRuns.Count, candidatesReassigned = candidates.Count, runResourcesReassigned = runResources.Count, statusLogsReassigned = statusLogs.Count, mappingsReassigned = mappings })
-        });
-        await db.SaveChangesAsync(ct);
+            // The active TachoMaster identity index is filtered on Active = 1. Persist the
+            // duplicate retirement first so SQL Server cannot try to assign the Member Code
+            // to the canonical row while the old active owner still holds the same key.
+            await db.SaveChangesAsync(ct);
+
+            if (!string.IsNullOrWhiteSpace(targetTachoMasterDriverId))
+                canonical.TachoMasterDriverId = targetTachoMasterDriverId;
+
+            db.MasterDataAudits.Add(new MasterDataAudit
+            {
+                EntityType = "Driver",
+                EntityId = canonical.Id,
+                Action = "DuplicateMerge",
+                ChangedBy = actor,
+                ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.EmployeeNumber, tachoMasterDriverId = canonical.TachoMasterDriverId, merged = duplicates.Select(row => row.EmployeeNumber), request.Note, loadsReassigned = loads.Count, planRunsReassigned = planRuns.Count, candidatesReassigned = candidates.Count, runResourcesReassigned = runResources.Count, statusLogsReassigned = statusLogs.Count, mappingsReassigned = mappings })
+            });
+            await db.SaveChangesAsync(ct);
+
+            if (transaction is not null)
+                await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            if (transaction is not null)
+                await transaction.RollbackAsync(ct);
+            throw;
+        }
+        finally
+        {
+            if (transaction is not null)
+                await transaction.DisposeAsync();
+        }
 
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, [$"Merged {duplicates.Count} driver duplicate(s) into {canonical.DisplayName}; reassigned {loads.Count + planRuns.Count + candidates.Count + runResources.Count + statusLogs.Count + mappings} linked record(s)."]);
     }
