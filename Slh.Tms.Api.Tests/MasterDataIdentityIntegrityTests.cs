@@ -155,6 +155,51 @@ public sealed class MasterDataIdentityIntegrityTests
     }
 
     [Fact]
+    public async Task Site_duplicate_merge_does_not_stack_geofences_on_canonical_site()
+    {
+        var setup = await CreateDbAsync();
+        await using var connection = setup.Connection;
+        await using var db = setup.Db;
+
+        var canonical = new Site { ExternalCode = "SITE910", Name = "Duplicate Site", Active = true };
+        var duplicate = new Site { ExternalCode = "SITE911", Name = "Duplicate Site", Active = true };
+        var canonicalFence = new SiteGeofence
+        {
+            Name = "Canonical Fence",
+            NormalizedName = "CANONICAL FENCE",
+            SiteId = canonical.Id,
+            SiteNumber = canonical.ExternalCode,
+            PolygonJson = "[[0,0],[1,0],[0,1]]",
+            Active = true
+        };
+        var duplicateFence = new SiteGeofence
+        {
+            Name = "Duplicate Fence",
+            NormalizedName = "DUPLICATE FENCE",
+            SiteId = duplicate.Id,
+            SiteNumber = duplicate.ExternalCode,
+            PolygonJson = "[[2,2],[3,2],[2,3]]",
+            Active = true
+        };
+        db.AddRange(canonical, duplicate, canonicalFence, duplicateFence);
+        await db.SaveChangesAsync();
+
+        var result = await MasterDataDuplicateReviewService.MergeAsync(
+            db,
+            "sites",
+            new MasterDataDuplicateMergeRequest(canonical.Id, [duplicate.Id], "site geofence uniqueness regression"),
+            "test",
+            CancellationToken.None);
+
+        Assert.Equal(1, result.Merged);
+        Assert.False(duplicate.Active);
+        Assert.Equal(canonical.Id, canonicalFence.SiteId);
+        Assert.Null(duplicateFence.SiteId);
+        Assert.Equal(1, await db.SiteGeofences.CountAsync(fence => fence.Active && fence.SiteId == canonical.Id));
+        Assert.Contains(result.Messages, message => message.Contains("left 1 additional geofence", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task Automatic_geofence_sync_leaves_second_match_unlinked_for_review()
     {
         var setup = await CreateDbAsync();
