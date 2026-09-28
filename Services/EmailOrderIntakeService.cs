@@ -328,7 +328,11 @@ public sealed class EmailOrderIntakeService
             && Regex.IsMatch($"{request.Subject}\n{body}", @"\bTSBC\s*[- ]?\s*CO[- ]?OP\b", RegexOptions.IgnoreCase);
         if (isSummerBerryTsbcCoop)
         {
-            explicitCollection = senderCollectionSite;
+            // The sender identifies the customer, not necessarily the physical farm.
+            // Preserve a farm named in the body/workbook so Site Master can resolve
+            // Groves, Manor, Leythorne/Donaldsons or Kives independently.
+            if (string.IsNullOrWhiteSpace(explicitCollection) || IsGenericSummerBerryCollection(explicitCollection))
+                explicitCollection = senderCollectionSite;
             payload["stallNumber"] = "TSBC CO-OP";
         }
         if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
@@ -405,6 +409,9 @@ public sealed class EmailOrderIntakeService
         payload["intakeNaturalKey"] = naturalKey;
         return new ParsedEmailOrder(order.SourceKey, naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
+
+    private static bool IsGenericSummerBerryCollection(string value) =>
+        Regex.IsMatch(value, @"^(?:Summer\s*Berry|TSBC|Colworth|Summer\s*Berry\s*Colworth)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static IEnumerable<ParsedEmailOrder> ParseStructuredBodyOrders(
         MailboxEmailIntakeRequest request,

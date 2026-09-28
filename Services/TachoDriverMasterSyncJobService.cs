@@ -213,6 +213,10 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
 
     internal async Task<bool> FailAsync(Guid jobId, string workerInstanceId, Exception exception, CancellationToken ct)
     {
+        // The sync/orchestrator shares this scope and may have failed with tracked Driver
+        // mutations. Detach those mutations before writing the durable queue failure state;
+        // otherwise FailAsync can replay the same unique-index violation and strand the job.
+        db.ChangeTracker.Clear();
         var row = await db.StagedImports
             .SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
         if (row is null || row.Status != StagingStatus.Approved) return false;

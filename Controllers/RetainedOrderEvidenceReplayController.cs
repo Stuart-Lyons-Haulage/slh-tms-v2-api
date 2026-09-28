@@ -42,6 +42,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         };
 
         var summary = new ReplaySummary();
+        var promotedOrderKeys = await LoadPromotedOrderKeys(ct);
         summary.LegacyMappingExceptionsArchived = await ArchiveLegacyMappingExceptions(
             receivedFromUtc,
             minimumPlanningDate,
@@ -92,7 +93,14 @@ public sealed class RetainedOrderEvidenceReplayController(
             summary.MessagesMatched++;
             summary.EligibleOrders += eligibleOrders.Count;
 
-            var filtered = parsed with { Orders = eligibleOrders };
+            var replayableOrders = eligibleOrders
+                .Where(order => !IsPromotedOrder(order.Payload, promotedOrderKeys))
+                .ToList();
+            summary.AlreadyPromoted += eligibleOrders.Count - replayableOrders.Count;
+
+            // Use all eligible keys when refreshing pending candidates, including
+            // already-promoted orders, so stale review copies are archived without
+            // creating a new candidate for the approved order.
             var keys = eligibleOrders
                 .Select(order => OrderIntakeController.BuildOrderIdempotencyKey(mailboxRequest.MessageId, order.SourceKey))
                 .Distinct(StringComparer.Ordinal)
@@ -154,7 +162,11 @@ public sealed class RetainedOrderEvidenceReplayController(
                 }
             }
 
-            await canonical.StageParsedForReplay(mailboxRequest, filtered, ct);
+            if (replayableOrders.Count > 0)
+            {
+                var filtered = parsed with { Orders = replayableOrders };
+                await canonical.StageParsedForReplay(mailboxRequest, filtered, ct);
+            }
 
             // Replay must never revive the exact stale rows it just superseded. Re-read
             // the captured original IDs after staging and enforce the archive contract.
@@ -204,8 +216,8 @@ public sealed class RetainedOrderEvidenceReplayController(
                 evidence.Id,
                 mailboxRequest.MessageId,
                 mailboxRequest.Subject,
-                "replayed",
-                eligibleOrders.Count,
+                replayableOrders.Count == 0 ? "already-promoted" : "replayed",
+                replayableOrders.Count,
                 archivedForRefresh,
                 null));
         }
@@ -220,6 +232,7 @@ public sealed class RetainedOrderEvidenceReplayController(
             summary.EvidenceScanned,
             summary.MessagesMatched,
             summary.EligibleOrders,
+            summary.AlreadyPromoted,
             summary.PendingArchivedForRefresh,
             summary.ManuallyAmendedPreserved,
             summary.PendingAfterReplay,
@@ -272,6 +285,45 @@ public sealed class RetainedOrderEvidenceReplayController(
         if (archived > 0) await db.SaveChangesAsync(ct);
         return archived;
     }
+
+    private async Task<HashSet<string>> LoadPromotedOrderKeys(CancellationToken ct)
+    {
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.Promoted)
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .Take(10000)
+            .Select(item => item.PayloadJson)
+            .ToListAsync(ct);
+
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var payloadJson in rows)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(payloadJson);
+                var customer = Text(document.RootElement, "customerCode");
+                var reference = Text(document.RootElement, "poNumber");
+                if (!string.IsNullOrWhiteSpace(customer) && !string.IsNullOrWhiteSpace(reference))
+                    keys.Add(OrderKey(customer, reference));
+            }
+            catch (JsonException) { }
+        }
+        return keys;
+    }
+
+    private static bool IsPromotedOrder(JsonElement payload, IReadOnlySet<string> promotedOrderKeys)
+    {
+        var customer = Text(payload, "customerCode");
+        var reference = Text(payload, "poNumber");
+        return !string.IsNullOrWhiteSpace(customer) && !string.IsNullOrWhiteSpace(reference) &&
+               promotedOrderKeys.Contains(OrderKey(customer, reference));
+    }
+
+    private static string OrderKey(string customer, string reference) =>
+        $"{NormaliseKey(customer)}:{NormaliseKey(reference)}";
+
+    private static string NormaliseKey(string value) =>
+        new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static bool PayloadIsOnOrAfter(string payloadJson, DateOnly minimumPlanningDate)
     {
@@ -418,6 +470,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         public int EvidenceScanned { get; set; }
         public int MessagesMatched { get; set; }
         public int EligibleOrders { get; set; }
+        public int AlreadyPromoted { get; set; }
         public int PendingArchivedForRefresh { get; set; }
         public int ManuallyAmendedPreserved { get; set; }
         public int PendingAfterReplay { get; set; }

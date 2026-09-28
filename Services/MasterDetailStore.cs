@@ -97,6 +97,13 @@ public static class MasterDetailStore
                 group => group.Key,
                 group => group.OrderByDescending(driver => driver.Active).ThenBy(driver => driver.Id).First(),
                 StringComparer.OrdinalIgnoreCase);
+        // Driver Master detail is an audited snapshot, not a second source of truth
+        // for identities. Never let an older duplicate-name snapshot transfer a
+        // member code from its existing relational owner to another active row.
+        var memberOwners = drivers
+            .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+            .GroupBy(driver => NormaliseKey(driver.TachoMasterDriverId!), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Select(driver => driver.Id).ToHashSet(), StringComparer.OrdinalIgnoreCase);
         var rows = await db.StagedImports.AsNoTracking().Where(item => item.EntityType == DriverType && item.Status == StagingStatus.Promoted)
             .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc).Take(5000).ToListAsync(ct);
         var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -119,7 +126,23 @@ public static class MasterDetailStore
                 driver.Notes = Text(payload, "notes");
                 var tachoMasterDriverId = Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId");
                 if (!string.IsNullOrWhiteSpace(tachoMasterDriverId))
-                    driver.TachoMasterDriverId = tachoMasterDriverId;
+                {
+                    var memberKey = NormaliseKey(tachoMasterDriverId);
+                    var ownedByAnotherDriver = memberOwners.TryGetValue(memberKey, out var owners)
+                        && owners.Any(ownerId => ownerId != driver.Id);
+                    var wouldReplaceExistingIdentity = !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)
+                        && !string.Equals(NormaliseKey(driver.TachoMasterDriverId), memberKey, StringComparison.OrdinalIgnoreCase);
+                    if (!ownedByAnotherDriver && !wouldReplaceExistingIdentity)
+                    {
+                        driver.TachoMasterDriverId = tachoMasterDriverId;
+                        if (!memberOwners.TryGetValue(memberKey, out owners))
+                        {
+                            owners = [];
+                            memberOwners[memberKey] = owners;
+                        }
+                        owners.Add(driver.Id);
+                    }
+                }
 
                 var tachoCardNumber = Text(payload, "tachoCardNumber") ?? Text(payload, "cardNumber");
                 if (!string.IsNullOrWhiteSpace(tachoCardNumber))
@@ -157,9 +180,14 @@ public static class MasterDetailStore
                 using var document = JsonDocument.Parse(row.PayloadJson);
                 var payload = document.RootElement;
                 var code = Text(payload, "externalCode") ?? Text(payload, "siteCode");
-                if (string.IsNullOrWhiteSpace(code)) continue;
+                var payloadId = Guid.TryParse(Text(payload, "id"), out var parsedId) ? parsedId : (Guid?)null;
                 var normalised = NormaliseKey(code);
-                if (!applied.Add(normalised) || !byCode.TryGetValue(normalised, out var matchingSites)) continue;
+                var identityKey = payloadId?.ToString("N") ?? normalised;
+                if (identityKey.Length == 0 || !applied.Add(identityKey)) continue;
+                var matchingSites = payloadId is Guid id
+                    ? sites.Where(site => site.Id == id).ToList()
+                    : (byCode.TryGetValue(normalised, out var codedSites) ? codedSites : []);
+                if (matchingSites.Count == 0) continue;
                 foreach (var site in matchingSites)
                 {
                     site.Aliases = Text(payload, "aliases");
