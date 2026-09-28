@@ -138,6 +138,33 @@ public sealed class SiteGeofenceMasterSyncTests
         Assert.False(status.NeedsReview);
     }
 
+    [Fact]
+    public void Status_reports_every_active_site_and_counts_duplicate_active_geofences_by_record()
+    {
+        var good = new Site { ExternalCode = "SITE001", Name = "Good Site", Active = true };
+        var duplicate = new Site { ExternalCode = "SITE002", Name = "Duplicate Site", Active = true };
+        var missing = new Site { ExternalCode = "SITE003", Name = "Missing Site", Active = true };
+        var archived = new Site { ExternalCode = "SITE004", Name = "Archived Site", Active = false };
+        var fences = new[]
+        {
+            Fence("Good Fence", good.Id),
+            Fence("Duplicate Fence A", duplicate.Id),
+            Fence("Duplicate Fence B", duplicate.Id),
+            Fence("Archived Fence", archived.Id, active: false)
+        };
+
+        var result = SiteGeofenceMasterSync.BuildStatus(new[] { good, duplicate, missing, archived }.Where(site => site.Active).ToList(), fences);
+
+        Assert.Equal(3, result.Count);
+        var duplicateStatus = Assert.Single(result.Where(row => row.SiteId == duplicate.Id));
+        Assert.Equal(2, duplicateStatus.ActiveGeofenceCount);
+        Assert.True(duplicateStatus.HasMultipleActiveGeofences);
+        Assert.True(duplicateStatus.NeedsReview);
+        Assert.Equal(2, duplicateStatus.ActiveGeofenceDetails.Count);
+        Assert.True(Assert.Single(result.Where(row => row.SiteId == good.Id)).GeofenceLinked);
+        Assert.True(Assert.Single(result.Where(row => row.SiteId == missing.Id)).NeedsReview);
+    }
+
     [Theory]
     [InlineData("Selsey (Natures Way)", "NWF Selsey")]
     [InlineData("Runcton (Natures Way)", "NWF Runcton")]
@@ -220,4 +247,14 @@ public sealed class SiteGeofenceMasterSyncTests
             .Options;
         return new TmsDbContext(options);
     }
+
+    private static SiteGeofence Fence(string name, Guid siteId, bool active = true) => new()
+    {
+        Name = name,
+        NormalizedName = name.ToUpperInvariant(),
+        SiteId = siteId,
+        SiteNumber = "SITE001",
+        PolygonJson = "[]",
+        Active = active
+    };
 }

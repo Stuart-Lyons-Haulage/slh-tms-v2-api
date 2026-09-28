@@ -21,7 +21,12 @@ public sealed record SiteGeofenceStatus(
     string SiteName,
     IReadOnlyList<string> LinkedGeofences,
     bool GeofenceLinked,
-    bool NeedsReview);
+    bool NeedsReview,
+    int ActiveGeofenceCount = 0,
+    bool HasMultipleActiveGeofences = false,
+    IReadOnlyList<SiteGeofenceLink> ActiveGeofenceDetails = null!);
+
+public sealed record SiteGeofenceLink(Guid Id, string Name);
 
 public static partial class SiteGeofenceMasterSync
 {
@@ -452,7 +457,7 @@ public static partial class SiteGeofenceMasterSync
 
     private static string TemporarySiteCode(Guid siteId) => $"TMP{siteId:N}"[..35];
 
-    private static IReadOnlyList<SiteGeofenceStatus> BuildStatus(IReadOnlyList<Site> sites, IEnumerable<SiteGeofence> fences)
+    internal static IReadOnlyList<SiteGeofenceStatus> BuildStatus(IReadOnlyList<Site> sites, IEnumerable<SiteGeofence> fences)
     {
         var fenceList = fences.ToList();
         return sites
@@ -462,11 +467,20 @@ public static partial class SiteGeofenceMasterSync
             {
                 var linked = fenceList
                     .Where(fence => fence.SiteId == site.Id)
-                    .Select(fence => fence.Name)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(x => x)
+                    .OrderBy(fence => fence.Name)
+                    .ThenBy(fence => fence.Id)
                     .ToList();
-                return new SiteGeofenceStatus(site.Id, site.ExternalCode, site.Name, linked, linked.Count > 0, linked.Count == 0);
+                var details = linked.Select(fence => new SiteGeofenceLink(fence.Id, fence.Name)).ToList();
+                return new SiteGeofenceStatus(
+                    site.Id,
+                    site.ExternalCode,
+                    site.Name,
+                    linked.Select(fence => fence.Name).ToList(),
+                    linked.Count > 0,
+                    linked.Count != 1,
+                    linked.Count,
+                    linked.Count > 1,
+                    details);
             })
             .ToList();
     }
