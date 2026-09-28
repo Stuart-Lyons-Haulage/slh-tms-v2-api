@@ -312,6 +312,7 @@ public sealed class WeeklyDriverTimesheetsController(
                 : null;
             var allDriverDuties = tachoByDate.Values.SelectMany(items => items)
                 .Where(item => DriverMatches(driver, item))
+                .Where(item => IsKnownVehicle(item.VehicleCode, vehicleByAlias))
                 .OrderBy(item => item.DutyStartUtc)
                 .ToList();
             var days = new List<object>();
@@ -333,7 +334,7 @@ public sealed class WeeklyDriverTimesheetsController(
                     .SelectMany(load => load.Stops ?? [])
                     .Any(stop => stop.OrderId is Guid orderId && ordersNeedingReplan.Contains(orderId));
                 var duties = tachoByDate.TryGetValue(day, out var source)
-                    ? source.Where(x => DriverMatches(driver, x)).OrderBy(x => x.DutyStartUtc).ToList()
+                    ? source.Where(x => DriverMatches(driver, x)).Where(x => IsKnownVehicle(x.VehicleCode, vehicleByAlias)).OrderBy(x => x.DutyStartUtc).ToList()
                     : [];
 
                 var tachoStart = duties.Count > 0 ? duties.Min(x => x.DutyStartUtc) : (DateTimeOffset?)null;
@@ -516,6 +517,15 @@ public sealed class WeeklyDriverTimesheetsController(
                     restType = nightOut.Status.Contains("Regular", StringComparison.OrdinalIgnoreCase) ? "Regular daily rest" : nightOut.Status.Contains("Reduced", StringComparison.OrdinalIgnoreCase) ? "Reduced daily rest" : null,
                     payUnits = employmentType == "Employed" ? $"1 day{(nightOut.Status.StartsWith("Confirmed Night Out", StringComparison.Ordinal) ? " + 1 night out" : string.Empty)}" : null,
                     evidence = new { tachoDutyCount = duties.Count, roadTechMovementCount = movement.Count, firstVehicleIdentifiers = movement.Take(1).Select(x => x.VehicleIdentifier).ToArray(), lastVehicleIdentifiers = movement.TakeLast(1).Select(x => x.VehicleIdentifier).ToArray() }
+                    ,nightOutEvidence = new
+                    {
+                        assessment = nightOut.Reason,
+                        restCommencedUtc = lastMovementEvent?.EventTimeUtc,
+                        restCommencedLatitude = lastMovementEvent?.Latitude,
+                        restCommencedLongitude = lastMovementEvent?.Longitude,
+                        nextDutyStartUtc = nextDuty?.DutyStartUtc,
+                        sameVehicle
+                    }
                 });
             }
 
@@ -617,6 +627,9 @@ public sealed class WeeklyDriverTimesheetsController(
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return names.Contains(Normalise(status.DriverName));
     }
+
+    private static bool IsKnownVehicle(string? vehicleCode, IReadOnlyDictionary<string, Vehicle> vehicleByAlias) =>
+        !string.IsNullOrWhiteSpace(vehicleCode) && vehicleByAlias.ContainsKey(Normalise(vehicleCode));
 
     private static bool SimilarIdentity(Driver driver, TachoDriverDutyStatus status)
     {

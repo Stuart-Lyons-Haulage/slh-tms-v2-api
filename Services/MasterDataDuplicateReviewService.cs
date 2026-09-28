@@ -780,17 +780,29 @@ public static class MasterDataDuplicateReviewService
     private static async Task<int> ReassignIntegrationMappingsAsync(TmsDbContext db, string entityType, IReadOnlyCollection<Guid> duplicateIds, Guid canonicalId, string actor, CancellationToken ct)
     {
         var mappings = await db.IntegrationMappings
-            .Where(row => row.TmsEntityType == entityType && duplicateIds.Contains(row.TmsEntityId))
+            .Where(row => row.Active && row.TmsEntityType == entityType && (duplicateIds.Contains(row.TmsEntityId) || row.TmsEntityId == canonicalId))
             .ToListAsync(ct);
 
-        foreach (var mapping in mappings)
+        var moved = 0;
+        foreach (var group in mappings.GroupBy(row => $"{row.Provider}\u001f{row.ExternalKey}\u001f{row.TmsEntityType}", StringComparer.OrdinalIgnoreCase))
         {
-            mapping.TmsEntityId = canonicalId;
-            mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            mapping.UpdatedBy = actor;
+            var keeper = group
+                .OrderByDescending(mapping => mapping.TmsEntityId == canonicalId)
+                .ThenByDescending(mapping => mapping.UpdatedAtUtc)
+                .First();
+            if (keeper.TmsEntityId != canonicalId)
+            {
+                keeper.TmsEntityId = canonicalId;
+                keeper.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                keeper.UpdatedBy = actor;
+                moved++;
+            }
+
+            foreach (var duplicate in group.Where(mapping => mapping.Id != keeper.Id).ToList())
+                db.IntegrationMappings.Remove(duplicate);
         }
 
-        return mappings.Count;
+        return moved;
     }
 
     private static MasterDataDuplicateRecord SiteRecord(Site row) => new(row.Id, row.ExternalCode, row.Name, row.CollectionAddress, ExtractPostcode(row.CollectionAddress), row.Active, new Dictionary<string, object?> { ["customerCode"] = row.CustomerCode, ["driverTextName"] = row.DriverTextName, ["collectionInstructions"] = row.CollectionInstructions, ["mapLink"] = row.MapLink, ["latitude"] = row.Latitude, ["longitude"] = row.Longitude, ["aliases"] = row.Aliases, ["region"] = row.OperationalRegion });

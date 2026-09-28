@@ -52,6 +52,12 @@ public static class TimesheetEvidenceRules
         if (restMinutes < 9 * 60)
             return new("No Night Out", restMinutes, "The rest interval was shorter than 9 hours.");
 
+        // A gap beyond one operational day is normally weekly/full rest (for example
+        // Friday to Monday), not an overnight allowance. Do not infer a night out from
+        // a long weekend absence even when the final RoadTech point is away from depot.
+        if (restMinutes > 24 * 60)
+            return new("No Night Out", restMinutes, "The rest interval exceeded 24 hours and is treated as full/weekly rest, not a night out.");
+
         if (lastMovementUtc is null || lastLatitude is null || lastLongitude is null)
             return new("Possible Night Out", restMinutes, "The duty gap is long enough, but the final away-from-depot location is incomplete.");
 
