@@ -65,6 +65,7 @@ public static partial class SiteGeofenceMasterSync
 
         var fences = await db.SiteGeofences.Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
         var warnings = new List<string>();
+        RepairDuplicateLinks(sites, fences, warnings);
         var sitesCoded = 0;
         try
         {
@@ -179,6 +180,51 @@ public static partial class SiteGeofenceMasterSync
             status.Count(x => x.NeedsReview),
             status,
             warnings);
+    }
+
+    /// <summary>
+    /// Repairs legacy imports that attached several provider fences to one Site.
+    /// Keep only a unique best name match; ambiguous extras remain active but
+    /// unlinked so their geometry/history is preserved for operator review.
+    /// </summary>
+    public static async Task<int> RepairDuplicateActiveLinksAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); } catch (Exception ex) when (ex is not OperationCanceledException) { }
+        var fences = await db.SiteGeofences.Where(x => x.Active && x.SiteId.HasValue).ToListAsync(ct);
+        var warnings = new List<string>();
+        var repaired = RepairDuplicateLinks(sites, fences, warnings);
+        if (repaired > 0) await db.SaveChangesAsync(ct);
+        return repaired;
+    }
+
+    private static int RepairDuplicateLinks(IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> fences, List<string> warnings)
+    {
+        var sitesById = sites.ToDictionary(site => site.Id);
+        var changed = 0;
+        foreach (var group in fences.Where(fence => fence.SiteId.HasValue).GroupBy(fence => fence.SiteId!.Value))
+        {
+            if (group.Count() <= 1 || !sitesById.TryGetValue(group.Key, out var site)) continue;
+            var ranked = group.Select(fence => new { Fence = fence, Score = FuzzyScore(fence.Name, site), Exact = SiteNames(site).Any(name => NormalizeForExactMatch(name) == NormalizeForExactMatch(fence.Name)) })
+                .OrderByDescending(item => item.Exact)
+                .ThenByDescending(item => item.Score)
+                .ThenByDescending(item => item.Fence.UpdatedAtUtc)
+                .ToList();
+            var keeper = ranked[0];
+            var ambiguous = ranked.Count > 1 && ranked[1].Exact == keeper.Exact && ranked[1].Score == keeper.Score;
+            if (ambiguous && !keeper.Exact) keeper = null!;
+            foreach (var item in ranked.Where(item => keeper is null || item.Fence.Id != keeper.Fence.Id))
+            {
+                item.Fence.SiteId = null;
+                item.Fence.SiteNumber = null;
+                item.Fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                changed++;
+            }
+            warnings.Add(keeper is null
+                ? $"Site {site.ExternalCode} ({site.Name}) had {group.Count()} ambiguous active geofences; they were left unlinked for review."
+                : $"Site {site.ExternalCode} ({site.Name}) had {group.Count()} active geofences; kept '{keeper.Fence.Name}' and unlinked {group.Count() - 1} legacy assignments.");
+        }
+        return changed;
     }
 
     public static async Task<IReadOnlyList<SiteGeofenceStatus>> GetStatusAsync(TmsDbContext db, CancellationToken ct)

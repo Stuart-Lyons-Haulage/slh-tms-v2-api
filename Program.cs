@@ -402,6 +402,9 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
             logger.LogWarning(
                 "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
                 trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
+        var repairedGeofenceLinks = await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, CancellationToken.None);
+        if (repairedGeofenceLinks > 0)
+            logger.LogWarning("Repaired {GeofenceLinkCount} legacy active Site/geofence assignments; ambiguous geofences remain active but unlinked for review.", repairedGeofenceLinks);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
         await register.LinkRegistered(25, CancellationToken.None);
     }

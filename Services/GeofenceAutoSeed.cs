@@ -25,6 +25,7 @@ public static class GeofenceAutoSeed
         // existing polygon/visit history intact.
         await GeofenceProviderPlaceholderRepair.EnsureAsync(db, ct);
         await GeofenceSiteAliasRepair.EnsureAsync(db, ct);
+        await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, ct);
 
         var active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
         if (await IsCompleteAsync(db, active, ct)) return new GeofenceAutoSeedResult(false, active, 0, 0);
