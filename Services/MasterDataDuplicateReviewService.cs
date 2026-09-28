@@ -458,6 +458,12 @@ public static class MasterDataDuplicateReviewService
             .Where(value => value.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+        if (identities.Count > 1)
+            return new MasterDataDuplicateMergeResult(0, 1, [$"Merge held for review: the selected driver rows contain more than one TachoMaster member identity ({string.Join(", ", identities)}). Different Member Codes must never be merged automatically."]);
+
+        var targetTachoMasterDriverId = new[] { canonical }.Concat(duplicates)
+            .Select(row => row.TachoMasterDriverId?.Trim())
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
         var conflictingOwners = await db.Drivers.AsNoTracking()
             .Where(row => row.Active && row.Id != canonical.Id && !duplicateIds.Contains(row.Id) && row.TachoMasterDriverId != null)
             .Select(row => new { row.Id, row.DisplayName, row.TachoMasterDriverId })
@@ -468,7 +474,6 @@ public static class MasterDataDuplicateReviewService
 
         foreach (var duplicate in duplicates)
         {
-            canonical.TachoMasterDriverId = Preserve(canonical.TachoMasterDriverId, duplicate.TachoMasterDriverId);
             canonical.MobileNumber = Preserve(canonical.MobileNumber, duplicate.MobileNumber);
             canonical.DriverType = Preserve(canonical.DriverType, duplicate.DriverType);
             canonical.DriverGroup = Preserve(canonical.DriverGroup, duplicate.DriverGroup);
@@ -492,15 +497,45 @@ public static class MasterDataDuplicateReviewService
         foreach (var log in statusLogs) log.DriverId = canonical.Id;
 
         var mappings = await ReassignIntegrationMappingsAsync(db, "Driver", duplicateIds, canonical.Id, actor, ct);
-        db.MasterDataAudits.Add(new MasterDataAudit
+
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction? transaction = null;
+        if (db.Database.IsRelational())
+            transaction = await db.Database.BeginTransactionAsync(ct);
+
+        try
         {
-            EntityType = "Driver",
-            EntityId = canonical.Id,
-            Action = "DuplicateMerge",
-            ChangedBy = actor,
-            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.EmployeeNumber, merged = duplicates.Select(row => row.EmployeeNumber), request.Note, loadsReassigned = loads.Count, planRunsReassigned = planRuns.Count, candidatesReassigned = candidates.Count, runResourcesReassigned = runResources.Count, statusLogsReassigned = statusLogs.Count, mappingsReassigned = mappings })
-        });
-        await db.SaveChangesAsync(ct);
+            // The active TachoMaster identity index is filtered on Active = 1. Persist the
+            // duplicate retirement first so SQL Server cannot try to assign the Member Code
+            // to the canonical row while the old active owner still holds the same key.
+            await db.SaveChangesAsync(ct);
+
+            if (!string.IsNullOrWhiteSpace(targetTachoMasterDriverId))
+                canonical.TachoMasterDriverId = targetTachoMasterDriverId;
+
+            db.MasterDataAudits.Add(new MasterDataAudit
+            {
+                EntityType = "Driver",
+                EntityId = canonical.Id,
+                Action = "DuplicateMerge",
+                ChangedBy = actor,
+                ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.EmployeeNumber, tachoMasterDriverId = canonical.TachoMasterDriverId, merged = duplicates.Select(row => row.EmployeeNumber), request.Note, loadsReassigned = loads.Count, planRunsReassigned = planRuns.Count, candidatesReassigned = candidates.Count, runResourcesReassigned = runResources.Count, statusLogsReassigned = statusLogs.Count, mappingsReassigned = mappings })
+            });
+            await db.SaveChangesAsync(ct);
+
+            if (transaction is not null)
+                await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            if (transaction is not null)
+                await transaction.RollbackAsync(ct);
+            throw;
+        }
+        finally
+        {
+            if (transaction is not null)
+                await transaction.DisposeAsync();
+        }
 
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, [$"Merged {duplicates.Count} driver duplicate(s) into {canonical.DisplayName}; reassigned {loads.Count + planRuns.Count + candidates.Count + runResources.Count + statusLogs.Count + mappings} linked record(s)."]);
     }
