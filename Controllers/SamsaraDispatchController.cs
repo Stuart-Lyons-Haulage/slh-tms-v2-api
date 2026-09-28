@@ -718,11 +718,10 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingSchedule
                 });
 
-            var driverMappingTask = driver is null ? Task.FromResult<string?>(null) : ResolveDriverIdAsync(driver, ct);
-            var vehicleMappingTask = ResolveVehicleIdAsync(vehicle, ct);
-            await Task.WhenAll(driverMappingTask, vehicleMappingTask);
-            var samsaraDriverId = await driverMappingTask;
-            var samsaraVehicleId = await vehicleMappingTask;
+            // Mapping pre-sync normally means these are local lookups only. Keep them
+            // sequential because EF Core does not permit concurrent operations on one DbContext.
+            var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
+            var samsaraVehicleId = await ResolveVehicleIdAsync(vehicle, ct);
             if (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId))
                 return BadRequest(new
                 {
