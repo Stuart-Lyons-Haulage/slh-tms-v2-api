@@ -227,6 +227,119 @@ public sealed class OrderSourceLine
     [MaxLength(120)] public string? LoadReference { get; set; }
     public required string PayloadJson { get; set; }
 }
+
+public enum BookingReservationStatus
+{
+    PreOrder,
+    AwaitingDetails,
+    Confirmed,
+    PartiallyAssigned,
+    Assigned,
+    Amended,
+    Cancelled,
+    Superseded,
+    Expired
+}
+
+public sealed class BookingReservation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string CustomerCode { get; set; }
+    [MaxLength(80)] public required string BookingType { get; set; }
+    [MaxLength(240)] public required string StableBookingKey { get; set; }
+    public DateOnly CollectionDate { get; set; }
+    public DateOnly? DeliveryDate { get; set; }
+    [MaxLength(200)] public string? CollectionDepot { get; set; }
+    [MaxLength(200)] public string? DeliverySite { get; set; }
+    [MaxLength(120)] public string? CollectionReference { get; set; }
+    [MaxLength(120)] public string? CratePurchaseOrder { get; set; }
+    [MaxLength(120)] public string? TransportPurchaseOrder { get; set; }
+    public decimal ReservedUnits { get; set; }
+    [MaxLength(40)] public string UnitType { get; set; } = "PalletSpace";
+    public required string CompositionJson { get; set; }
+    [MaxLength(1000)] public string? PlannerNotes { get; set; }
+    public BookingReservationStatus Status { get; set; } = BookingReservationStatus.PreOrder;
+    public int CurrentRevisionNumber { get; set; } = 1;
+    public Guid? SourceStagedImportId { get; set; }
+    public Guid? SourceMovementId { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class BookingReservationRevision
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid BookingReservationId { get; set; }
+    public int RevisionNumber { get; set; }
+    public BookingReservationStatus Status { get; set; }
+    [MaxLength(120)] public string? SourceRowKey { get; set; }
+    [MaxLength(500)] public string? SourceMessageId { get; set; }
+    [MaxLength(500)] public string? SourceAttachmentIdentity { get; set; }
+    public required string PayloadJson { get; set; }
+    [MaxLength(1000)] public string? ChangeNote { get; set; }
+    [MaxLength(200)] public string? Actor { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class BookingReservationAllocation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid BookingReservationId { get; set; }
+    public Guid? TransportOrderId { get; set; }
+    [MaxLength(200)] public string? Destination { get; set; }
+    public decimal Units { get; set; }
+    public bool IsActive { get; set; } = true;
+    [MaxLength(40)] public string UnitType { get; set; } = "PalletSpace";
+    [MaxLength(200)] public string? Note { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    [MaxLength(200)] public string? CreatedBy { get; set; }
+}
+
+public sealed class OperationalHistoryEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(80)] public required string EntityType { get; set; }
+    public Guid EntityId { get; set; }
+    [MaxLength(80)] public required string EventType { get; set; }
+    [MaxLength(200)] public string? Actor { get; set; }
+    public required string PayloadJson { get; set; }
+    public DateTimeOffset OccurredAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public enum InvoiceRecordStatus { Draft, Ready, Submitted, PartiallyPaid, Paid, Disputed, Cancelled }
+
+public sealed class InvoiceRecord
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(120)] public string? InvoiceNumber { get; set; }
+    [MaxLength(40)] public required string CustomerCode { get; set; }
+    public Guid? LoadId { get; set; }
+    public Guid? TransportOrderId { get; set; }
+    public Guid? BookingReservationId { get; set; }
+    public DateOnly? InvoiceDate { get; set; }
+    public decimal? NetAmount { get; set; }
+    public decimal? VatAmount { get; set; }
+    public decimal? GrossAmount { get; set; }
+    public InvoiceRecordStatus Status { get; set; } = InvoiceRecordStatus.Draft;
+    [MaxLength(1000)] public string? Notes { get; set; }
+    public required string PayloadJson { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class InvoiceRecordLine
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid InvoiceRecordId { get; set; }
+    public Guid? LoadId { get; set; }
+    public Guid? TransportOrderId { get; set; }
+    public Guid? BookingReservationId { get; set; }
+    [MaxLength(120)] public string? Description { get; set; }
+    public decimal? Quantity { get; set; }
+    public decimal? UnitAmount { get; set; }
+    public decimal? NetAmount { get; set; }
+    [MaxLength(1000)] public string? OperationalReferenceSnapshot { get; set; }
+}
 public sealed class PlanProposal
 {
     public Guid Id { get; set; } = Guid.NewGuid();

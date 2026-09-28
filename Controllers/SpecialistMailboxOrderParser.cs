@@ -55,6 +55,10 @@ public sealed class SpecialistMailboxOrderParser
         if (greenhouse is not null)
             return greenhouse;
 
+        var langmead = TryParseLangmeadAldiWorkbook(request);
+        if (langmead is not null)
+            return langmead;
+
         var barfootsAldi = TryParseBarfootsAldiWorkbook(request);
         if (barfootsAldi is not null)
             return barfootsAldi;
@@ -323,6 +327,141 @@ public sealed class SpecialistMailboxOrderParser
         return null;
     }
 
+    private static EmailIntakeParseResult? TryParseLangmeadAldiWorkbook(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var planningDate = ExtractPlanningDate(request);
+        if (planningDate is null)
+            return null;
+
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true &&
+                           !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
+                           IsExcel(item.Name))
+            .ToList();
+        if (attachments.Count == 0)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                var sheetNumber = 0;
+                var foundOrdersSheet = false;
+                do
+                {
+                    sheetNumber++;
+                    var sheetName = reader.Name;
+                    var rows = ReadRows(reader);
+                    if (!string.Equals(sheetName, "Orders", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    foundOrdersSheet = true;
+                    var headerIndex = rows.FindIndex(row =>
+                        RowContains(row, "Collection Site") &&
+                        RowContains(row, "Date") &&
+                        RowContains(row, "Depot Description") &&
+                        RowContains(row, "Pallets") &&
+                        RowContains(row, "Temperature") &&
+                        RowContains(row, "Pallet Type"));
+                    if (headerIndex < 0)
+                    {
+                        warnings.Add($"Langmead workbook sheet '{sheetName}' did not contain the expected Orders headers.");
+                        continue;
+                    }
+
+                    var headers = HeaderMap(rows[headerIndex]);
+                    var collectionIndex = FindColumn(headers, "collectionsite");
+                    var dateIndex = FindColumn(headers, "date");
+                    var depotIndex = FindColumn(headers, "depotdescription");
+                    var palletsIndex = FindColumn(headers, "pallets");
+                    var temperatureIndex = FindColumn(headers, "temperature");
+                    var palletTypeIndex = FindColumn(headers, "pallettype");
+                    if (collectionIndex < 0 || dateIndex < 0 || depotIndex < 0 || palletsIndex < 0)
+                        continue;
+
+                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+                    {
+                        var row = rows[rowIndex];
+                        var date = CellDate(row, dateIndex);
+                        var collection = CellText(row, collectionIndex);
+                        var destination = CellText(row, depotIndex);
+                        var pallets = CellInt(row, palletsIndex);
+                        if (date is null || date.Value != planningDate.Value ||
+                            string.IsNullOrWhiteSpace(collection) ||
+                            string.IsNullOrWhiteSpace(destination) || pallets is not > 0)
+                            continue;
+
+                        var temperature = CellText(row, temperatureIndex);
+                        var palletType = CellText(row, palletTypeIndex);
+                        var rowWarnings = new List<string>();
+                        if (string.IsNullOrWhiteSpace(temperature))
+                            rowWarnings.Add("Langmead Orders row has no temperature requirement; confirm before approval.");
+                        if (string.IsNullOrWhiteSpace(palletType))
+                            rowWarnings.Add("Langmead Orders row has no pallet type; confirm before approval.");
+
+                        var reference = BuildReference(StableEmailReference(request.MessageId), destination);
+                        var naturalKey = WorkbookNaturalKey(request, "LANGMEADS", collection, destination, date.Value, null);
+                        var payload = BuildPayload(
+                            request,
+                            reference,
+                            null,
+                            "LANGMEADS",
+                            date.Value,
+                            date.Value,
+                            pallets.Value,
+                            collection,
+                            destination,
+                            null,
+                            null,
+                            attachment.Name,
+                            sheetName,
+                            rowIndex + 1,
+                            "Langmead Herbs Aldi Orders workbook",
+                            rowWarnings,
+                            "ALDI");
+
+                        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                        root["collectionSite"] = collection;
+                        root["collectionPoint"] = collection;
+                        root["temperatureRequirement"] = temperature;
+                        root["palletType"] = palletType;
+                        root["intakeProfile"] = "LANGMEADS_ALDI_ORDERS_WORKBOOK";
+                        root["intakeNaturalKey"] = naturalKey;
+                        root["sourceWorkbookSheet"] = sheetName;
+                        root["sourceWorkbookRow"] = rowIndex + 1;
+                        payload = JsonSerializer.SerializeToElement(root);
+
+                        orders.Add(new ParsedEmailOrder(
+                            $"langmead-aldi-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}",
+                            naturalKey,
+                            payload,
+                            rowWarnings));
+                    }
+                }
+                while (reader.NextResult());
+
+                if (!foundOrdersSheet)
+                    warnings.Add($"Langmead workbook '{attachment.Name}' did not contain an Orders sheet; no stale/template sheet was used.");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Langmead Orders workbook guard: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
+    }
+
     private static EmailIntakeParseResult? TryParseGreenhouseAldiWorkbook(MailboxEmailIntakeRequest request)
     {
         var sender = request.SenderAddress ?? string.Empty;
@@ -485,7 +624,7 @@ public sealed class SpecialistMailboxOrderParser
                     {
                         var row = rows[rowIndex];
                         var destination = CellText(row, depotIndex);
-                        var collection = CellText(row, collectionIndex);
+                        var collection = BarfootsCollectionSite(CellText(row, collectionIndex));
                         var pallets = CellInt(row, palletsIndex);
                         var date = CellDate(row, 0) ?? planningDate;
                         if (date is null || pallets is null or <= 0 ||
@@ -545,6 +684,20 @@ public sealed class SpecialistMailboxOrderParser
         }
 
         return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    private static string? BarfootsCollectionSite(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        var cleaned = value.Trim();
+        // The workbook's North/South marker is a physical Barfoots collection
+        // point. Keep it in the site identity rather than leaving it as a generic
+        // customer label or collapsing both rows onto one Barfoots site.
+        if (Regex.IsMatch(cleaned, @"\bSefter\s+North\b|\bNorth\b", RegexOptions.IgnoreCase))
+            return "Barfoots North";
+        if (Regex.IsMatch(cleaned, @"\bSefter\s+South\b|\bSouth\b", RegexOptions.IgnoreCase))
+            return "Barfoots South";
+        return cleaned;
     }
 
     private static EmailIntakeParseResult? TryParseWealmoorWaitroseWorkbook(MailboxEmailIntakeRequest request)
@@ -829,6 +982,8 @@ public sealed class SpecialistMailboxOrderParser
             ["unitType"] = "Pallets",
             ["palletType"] = "Pallets",
             ["sellerName"] = collection,
+            ["collectionSite"] = collection,
+            ["collectionPoint"] = collection,
             ["marketName"] = retailer ?? customer,
             ["retailerCode"] = retailer,
             ["stallNumber"] = destination,

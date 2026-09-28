@@ -115,8 +115,18 @@ public sealed class RetainedOrderEvidenceReplayController(
                     .ToListAsync(ct);
 
                 var existingPending = pendingCandidates
-                    .Where(item => keys.Contains(item.IdempotencyKey) ||
-                                   item.PayloadJson.Contains(mailboxRequest.MessageId, StringComparison.Ordinal))
+                    .Where(item =>
+                    {
+                        // A replay row with the current deterministic key is already
+                        // the desired projection. Leave it active so the replay call
+                        // remains idempotent. Older parser keys/replay projections are
+                        // still archived below when they do not match this parse.
+                        var isCurrentReplayProjection = item.Source?.StartsWith("Info mailbox replay", StringComparison.OrdinalIgnoreCase) == true &&
+                                                        keys.Contains(item.IdempotencyKey);
+                        return !isCurrentReplayProjection &&
+                               (keys.Contains(item.IdempotencyKey) ||
+                                item.PayloadJson.Contains(mailboxRequest.MessageId, StringComparison.Ordinal));
+                    })
                     .ToList();
 
                 foreach (var pending in existingPending)

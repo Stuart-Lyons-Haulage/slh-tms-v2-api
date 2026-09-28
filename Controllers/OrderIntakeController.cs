@@ -122,6 +122,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}"));
             db.StagedImports.Add(item);
             db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
+            await NwfBookingReservationSync.UpsertAsync(db, item, stagedPayload, User.Identity?.Name, ct);
             createdByKey[preparedOrder.IdempotencyKey] = item;
             staged++;
 
@@ -213,14 +214,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var existing = 0;
         var records = new List<object>();
 
-        // A deliberate retained-evidence replay must create a new staging version even
-        // when the original message has already been staged. Normal mailbox intake keeps
-        // the original idempotency key; replay gets a per-run token so the corrected
-        // payload can supersede the old pending version instead of returning "existing".
-        var replayToken = Guid.NewGuid().ToString("N");
         var prepared = parsed.Orders.Select(order =>
         {
-            var key = BuildOrderIdempotencyKey($"{request.MessageId}:replay:{replayToken}", order.SourceKey);
+            // Replays are projections of the same retained mailbox evidence, not new
+            // messages. Keep the source key stable so a second click updates/returns
+            // the current projection instead of creating another staged order.
+            var key = BuildOrderIdempotencyKey(request.MessageId, order.SourceKey);
             return (Order: order, IdempotencyKey: key);
         }).ToList();
 
@@ -263,6 +262,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 $"Info mailbox replay / {(request.SenderAddress ?? "unknown sender").Trim()}"));
             db.StagedImports.Add(item);
             db.StagedImportEvents.Add(StagingAudit.Create(item, "Replayed"));
+            await NwfBookingReservationSync.UpsertAsync(db, item, stagedPayload, User.Identity?.Name, ct);
             createdByKey[preparedOrder.IdempotencyKey] = item;
             staged++;
 

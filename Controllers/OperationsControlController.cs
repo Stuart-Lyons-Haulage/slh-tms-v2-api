@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -320,6 +321,11 @@ public sealed class OperationsControlController(
             CapturedBy = User.Identity?.Name,
         };
         db.DriverStatusLogs.Add(log);
+        db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+        {
+            EntityType = "Load", EntityId = loadId, EventType = "DriverStatusCaptured", Actor = User.Identity?.Name,
+            PayloadJson = JsonSerializer.Serialize(new { request.Status, request.DriverId, request.Notes }), OccurredAtUtc = DateTimeOffset.UtcNow
+        });
 
         // Update load status to InProgress if status indicates movement
         if (request.Status is "ArrivedCollection" or "Loaded" or "ArrivedDelivery")
@@ -333,6 +339,8 @@ public sealed class OperationsControlController(
             var load = await db.Loads.FindAsync([loadId], ct);
             if (load is not null && load.Status != LoadStatus.Completed)
                 load.Status = LoadStatus.Completed;
+            if (load is not null)
+                await InvoiceRecordService.EnsureDraftForCompletedLoadAsync(db, load, User.Identity?.Name, ct);
         }
 
         await db.SaveChangesAsync(ct);

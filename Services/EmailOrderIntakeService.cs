@@ -355,7 +355,12 @@ public sealed class EmailOrderIntakeService
         }
         else sources["deliverySite"] = "template-or-subject";
 
-        var collectionDate = ParseDateText(collectionLabel, receivedAt)
+        var doubleHWeekdayDate = order.SourceKey.StartsWith("doubleh-body-", StringComparison.OrdinalIgnoreCase) &&
+                                 !IsDoubleHCollectionReviewTemplate(request)
+            ? ExtractWeekdayOrdinalDate(body, receivedAt)
+            : null;
+        var collectionDate = doubleHWeekdayDate
+                             ?? ParseDateText(collectionLabel, receivedAt)
                              ?? ExtractDateAfter(body, @"collection(?:\s+date)?[^.\r\n]*?")
                              ?? ExtractDateAfter(body, @"collect[^.\r\n]*?");
         if (collectionDate is not null) payload["collectionDate"] = collectionDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -423,14 +428,17 @@ public sealed class EmailOrderIntakeService
         var aldiShippers = ParseAldiShippersBody(request, body, sourceText, receivedAt);
         if (aldiShippers.Count > 0) return aldiShippers;
 
-        var labelled = ParseLabelledBodyOrder(request, rawPo, body, sourceText, receivedAt);
-        if (labelled is not null) return [labelled];
-
+        // Double H has two distinct templates. Run both specialised recognisers before
+        // the generic labelled-body parser so "Wednesday 30th next week (W/C 28.09)"
+        // resolves to the actual movement date rather than the week-commencing context.
         var doubleHWaitrose = ParseDoubleHWaitroseColumnTable(request, rawPo, body, sourceText, receivedAt);
         if (doubleHWaitrose.Count > 0) return doubleHWaitrose;
 
         var doubleHRequest = ParseDoubleHCollectionRequest(request, body, sourceText, receivedAt);
         if (doubleHRequest.Count > 0) return doubleHRequest;
+
+        var labelled = ParseLabelledBodyOrder(request, rawPo, body, sourceText, receivedAt);
+        if (labelled is not null) return [labelled];
 
         var depotSplit = ParseAndoverAvonmouthSplit(request, rawPo, body, receivedAt);
         if (depotSplit.Count > 0) return depotSplit;
@@ -677,6 +685,10 @@ public sealed class EmailOrderIntakeService
             address)];
     }
 
+    private static bool IsDoubleHCollectionReviewTemplate(MailboxEmailIntakeRequest request) =>
+        request.Subject.Contains("Collection Requests", StringComparison.OrdinalIgnoreCase) ||
+        request.SenderAddress.StartsWith("Ramas@", StringComparison.OrdinalIgnoreCase);
+
     private static List<ParsedEmailOrder> ParseDoubleHCollectionRequest(
         MailboxEmailIntakeRequest request,
         string body,
@@ -690,10 +702,14 @@ public sealed class EmailOrderIntakeService
             !Regex.IsMatch(body, @"(?im)^\s*deliver\s+to\s*[–—-]", RegexOptions.IgnoreCase))
             return [];
 
-        // The Double H template commonly says “Wednesday 30th next week (W/C 28.09)”.
-        // ExtractDate would otherwise select the week-commencing date (28/09) instead
-        // of the actual movement date (30/09).
-        var date = ExtractWeekdayOrdinalDate(body, receivedAt) ?? ExtractDate(sourceText, receivedAt);
+        // There are two live Double H body conventions. The normal movement request
+        // contains an explicit weekday movement date, while the Ramas “Collection
+        // Requests” review template uses the W/C date as its operational placeholder
+        // until quantity is confirmed. Preserve that distinction for matching/audit.
+        var reviewTemplate = IsDoubleHCollectionReviewTemplate(request);
+        var date = reviewTemplate
+            ? ExtractDate(sourceText, receivedAt)
+            : ExtractWeekdayOrdinalDate(body, receivedAt) ?? ExtractDate(sourceText, receivedAt);
         if (date is null) return [];
         var collection = Regex.Match(body, @"(?im)^\s*collection\s+from\s*[–—-]\s*(?<value>.+)$").Groups["value"].Value.Trim();
         var destination = Regex.Match(body, @"(?im)^\s*deliver\s+to\s*[–—-]\s*(?<value>.+)$").Groups["value"].Value.Trim();
@@ -707,7 +723,7 @@ public sealed class EmailOrderIntakeService
             date.Value,
             date.Value,
             null,
-            CleanSourceLine(collection),
+            reviewTemplate ? CleanSourceLine(collection) : CleanSourceLine(collection).TrimEnd('.', ';'),
             CleanSourceLine(destination),
             "Double H collection request",
             ["Pallet quantity was not supplied in the Double H request; confirm before approval."],
@@ -1169,7 +1185,7 @@ public sealed class EmailOrderIntakeService
             var first = CellText(row, 0);
             if (first?.StartsWith("COLLECTION ", StringComparison.OrdinalIgnoreCase) == true)
             {
-                collection = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(CleanSourceLine(first["COLLECTION ".Length..]).ToLowerInvariant());
+                collection = BarfootsCollectionSite(first["COLLECTION ".Length..]);
                 market = null;
                 deliveryDate = null;
                 continue;
@@ -1216,6 +1232,8 @@ public sealed class EmailOrderIntakeService
                 ["deliveryDate"] = deliveryDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
                 ["pallets"] = pallets.Value,
                 ["sellerName"] = collection,
+                ["collectionSite"] = collection,
+                ["collectionPoint"] = collection,
                 ["marketName"] = market,
                 ["stallNumber"] = customer,
                 ["deliveryAddress"] = CleanSourceLine(address),
@@ -1241,6 +1259,16 @@ public sealed class EmailOrderIntakeService
             results.Add(new ParsedEmailOrder($"barfoots-wholesale-{NormaliseKey(collection)}-{rowIndex + 1}", naturalKey, JsonSerializer.SerializeToElement(payload), warnings));
         }
         return results;
+    }
+
+    private static string BarfootsCollectionSite(string value)
+    {
+        var cleaned = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(CleanSourceLine(value).ToLowerInvariant());
+        if (Regex.IsMatch(cleaned, @"\bSefter\s+North\b|\bNorth\b", RegexOptions.IgnoreCase))
+            return "Barfoots North";
+        if (Regex.IsMatch(cleaned, @"\bSefter\s+South\b|\bSouth\b", RegexOptions.IgnoreCase))
+            return "Barfoots South";
+        return cleaned;
     }
 
     private static List<ParsedEmailOrder> ParseAndoverAvonmouthSplit(

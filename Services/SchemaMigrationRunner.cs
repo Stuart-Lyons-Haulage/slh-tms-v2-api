@@ -225,7 +225,11 @@ public static class SchemaMigrationRunner
         "075_Canonical_Identity_Uniqueness.sql",
         "076_Customer_Collection_Sites_Geofence_Links.sql",
         "077_Order_Amendment_Replan_Flag.sql",
-        "078_Active_Driver_Tacho_Identity_Index.sql"
+        "078_Active_Driver_Tacho_Identity_Index.sql",
+        "079_Booking_Invoice_History.sql",
+        "080_Invoice_Line_Booking_Reservation.sql",
+        "081_Booking_Allocation_Unmatch.sql",
+        "082_Barfoots_Physical_North_South_Sites.sql"
     ];
 
     internal const string HistoryTableSql = """

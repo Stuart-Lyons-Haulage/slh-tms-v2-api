@@ -1,12 +1,53 @@
 using System.Text.Json;
+using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Services;
 using Xunit;
+using ProductionIntakeParser = Slh.Tms.Api.Controllers.SpecialistMailboxOrderParser;
 
 namespace Slh.Tms.Api.Tests;
 
 public sealed class EmailOrderIntakeServiceTests
 {
     private readonly EmailOrderIntakeService service = new();
+
+    [Fact]
+    public void EwaLangmeadAldiXlsm_IsParsedIntoLangmeadReviewOrders()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "29.09.2026.xlsm");
+        var attachment = new MailboxAttachmentRequest(
+            "29.09.2026.xlsm",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+            null,
+            false,
+            null,
+            new FileInfo(path).Length,
+            Convert.ToBase64String(File.ReadAllBytes(path)));
+        var result = new ProductionIntakeParser().TryParse(new MailboxEmailIntakeRequest(
+            "AAMkADVkNTg0NjkyLTY1ZjEtNDdmNC1hMjZhLTNiYjY4M2E5MzZkOQBGAAAAAACNs7d_drRlTb6t67kLREs-BwDNHW8oILVsS4HGT8ieiwGBAAAAAHXdAADNHW8oILVsS4HGT8ieiwGBAAA1dOGuAAA=",
+            null,
+            "info@lyonshaulage.com",
+            "ewakuszczak@langmeadherbs.co.uk",
+            "Ewa Kuszczak",
+            "Aldi Order 29/09/2026",
+            DateTimeOffset.Parse("2026-09-28T14:10:38Z"),
+            "Please find attached the Walton Farm booking forms for Aldi transport 29/09/2026 depot day.",
+            null,
+            null,
+            [attachment]))!;
+        Assert.Equal(5, result.Orders.Count);
+        Assert.All(result.Orders, order => Assert.Equal("LANGMEADS", order.Payload.GetProperty("customerCode").GetString()));
+        Assert.All(result.Orders, order => Assert.Equal("2026-09-29", order.Payload.GetProperty("collectionDate").GetString()));
+        Assert.All(result.Orders, order => Assert.Equal("2026-09-29", order.Payload.GetProperty("deliveryDate").GetString()));
+        Assert.All(result.Orders, order => Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32()));
+        Assert.All(result.Orders, order => Assert.Contains("Farm", order.Payload.GetProperty("sellerName").GetString()));
+        Assert.All(result.Orders, order => Assert.StartsWith("Aldi", order.Payload.GetProperty("stallNumber").GetString(), StringComparison.OrdinalIgnoreCase));
+        Assert.All(result.Orders, order => Assert.Equal("29.09.2026.xlsm", order.Payload.GetProperty("sourceAttachmentName").GetString()));
+        Assert.All(result.Orders, order => Assert.Equal("Orders", order.Payload.GetProperty("sourceWorkbookSheet").GetString()));
+        Assert.All(result.Orders, order => Assert.Equal("Euro", order.Payload.GetProperty("palletType").GetString()));
+        Assert.All(result.Orders, order => Assert.Equal("+3°C", order.Payload.GetProperty("temperatureRequirement").GetString()));
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Walton Farm (+3°C)");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("collectionSite").GetString() == "Ham Farm (+3°C)");
+    }
 
     [Fact]
     public void InternalLyonsPlannerEmail_IsIgnored()

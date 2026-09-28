@@ -71,6 +71,8 @@ public static class PlanningRegisterStore
 
         if (load.Status == LoadStatus.Completed && existingLoad?.Status != LoadStatus.Completed)
             await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(db, load.Id, ct);
+        if (load.Status == LoadStatus.Completed)
+            await InvoiceRecordService.EnsureDraftForCompletedLoadAsync(db, load, user, ct);
 
         if (row is null)
         {

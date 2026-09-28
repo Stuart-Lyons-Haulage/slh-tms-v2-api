@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -539,6 +540,14 @@ public sealed class SamsaraDispatchController(
                         ct);
                 }
             }
+
+            db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
+            {
+                EntityType = "Load", EntityId = load.Id, EventType = "SamsaraDispatchExported", Actor = User.Identity?.Name,
+                PayloadJson = JsonSerializer.Serialize(new { result.RouteId, result.ExternalId, result.Created, result.Updated, stopCount = samsaraStops.Count, load.Reference }),
+                OccurredAtUtc = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync(ct);
 
             return Ok(new
             {

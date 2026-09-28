@@ -28,10 +28,12 @@ public sealed class VerifiedWorkbookIntakeParserTests
             Assert.False(string.IsNullOrWhiteSpace(order.Payload.GetProperty("intakeNaturalKey").GetString()));
         });
         Assert.Contains(result.Orders, order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Sefter North" &&
+            order.Payload.GetProperty("sellerName").GetString() == "Barfoots North" &&
+            order.Payload.GetProperty("collectionSite").GetString() == "Barfoots North" &&
             order.Payload.GetProperty("temperatureRequirement").GetString() == "+10℃");
         Assert.Contains(result.Orders, order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Sefter South" &&
+            order.Payload.GetProperty("sellerName").GetString() == "Barfoots South" &&
+            order.Payload.GetProperty("collectionPoint").GetString() == "Barfoots South" &&
             order.Payload.GetProperty("temperatureRequirement").GetString() == "+3℃");
     }
 
@@ -45,9 +47,9 @@ public sealed class VerifiedWorkbookIntakeParserTests
         Assert.NotNull(amended);
 
         var firstNorth = Assert.Single(first!.Orders.Where(order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Sefter North"));
+            order.Payload.GetProperty("sellerName").GetString() == "Barfoots North"));
         var amendedNorth = Assert.Single(amended!.Orders.Where(order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Sefter North"));
+            order.Payload.GetProperty("sellerName").GetString() == "Barfoots North"));
 
         Assert.Equal(firstNorth.NaturalKey, amendedNorth.NaturalKey);
         Assert.Equal(
