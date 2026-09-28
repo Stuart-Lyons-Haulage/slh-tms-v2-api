@@ -26,6 +26,17 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return new SamsaraConnectionSummary(true, vehicles.Count, drivers.Count);
     }
 
+    public async Task<bool> CheckConnectivityAsync(CancellationToken ct)
+    {
+        EnsureConfigured();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+
+        await ProbeAsync("fleet/vehicles?limit=1", "vehicle access", timeout.Token);
+        await ProbeAsync("fleet/drivers?limit=1", "driver access", timeout.Token);
+        return true;
+    }
+
     public Task<IReadOnlyList<SamsaraVehicle>> GetVehiclesAsync(CancellationToken ct) =>
         ReadPagedAsync("fleet/vehicles", ParseVehicle, ct);
 
@@ -163,6 +174,14 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         }
 
         return new SamsaraRouteAuditFeed(entries, cursor, hasNext);
+    }
+
+    private async Task ProbeAsync(string resource, string operation, CancellationToken ct)
+    {
+        using var request = CreateRequest(HttpMethod.Get, resource);
+        using var response = await httpClient.SendAsync(request, ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+        EnsureSuccess(response, body, operation);
     }
 
     private async Task<IReadOnlyList<T>> ReadPagedAsync<T>(

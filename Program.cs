@@ -229,6 +229,10 @@ if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCas
 builder.Services.AddSingleton(fleetioOptions);
 var samsaraOptions = new SamsaraOptions();
 builder.Configuration.GetSection("Integrations:Samsara").Bind(samsaraOptions);
+// SLH's Samsara organisation is hosted in the EU region. Older local Docker
+// settings used the global/US endpoint, which returns misleading 404s for EU orgs.
+if (string.Equals(samsaraOptions.BaseUrl.TrimEnd('/'), "https://api.samsara.com", StringComparison.OrdinalIgnoreCase))
+    samsaraOptions.BaseUrl = "https://api.eu.samsara.com";
 builder.Services.AddSingleton(samsaraOptions);
 builder.Services.AddScoped<SamsaraRouteProgressService>();
 builder.Services.AddScoped<AzureSmsDispatchService>();
