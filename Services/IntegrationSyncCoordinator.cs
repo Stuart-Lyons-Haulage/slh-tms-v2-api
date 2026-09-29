@@ -369,6 +369,12 @@ public sealed class IntegrationSyncCoordinator(
                 trailer.EuroCapacity ??= matchingTms.Select(item => item.EuroCapacity).FirstOrDefault(value => value is not null);
                 trailer.TrailerNumber = ClipRequired(preferred, 40);
                 trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
+                trailer.FleetioId = Clip(asset.Id, 80);
+                trailer.FleetioName = Clip(asset.Name, 160);
+                trailer.FleetioStatus = Clip(asset.Status, 80);
+                trailer.FleetioVor = asset.Vor;
+                trailer.FleetioServiceStatus = Clip(asset.ServiceStatus, 160);
+                trailer.FleetioLastSyncedUtc = now;
                 trailer.Active = true;
                 matchedTrailerIds.Add(trailer.Id);
                 UpsertMapping(mappings, asset.Id, preferred, "Trailer", trailer.Id, actor);

@@ -66,6 +66,11 @@ public sealed class PreDispatchSafetyService
             checks.Add(Check("TrailerActive", trailer?.Active == true, "Critical", trailer?.Active == true
                 ? "Allocated trailer is active."
                 : "Allocated trailer is missing or inactive."));
+            if (trailer is not null)
+                checks.Add(Check("TrailerFleetioAvailable", !IsTrailerUnavailable(trailer), "Critical",
+                    IsTrailerUnavailable(trailer)
+                        ? $"Fleetio marks trailer {trailer.TrailerNumber} as unavailable ({trailer.FleetioStatus ?? trailer.FleetioServiceStatus ?? "VOR/out of service"})."
+                        : "Fleetio trailer status is available."));
         }
         else
         {
@@ -118,6 +123,17 @@ public sealed class PreDispatchSafetyService
             evidenceAt,
             checks);
     }
+
+    private static bool IsTrailerUnavailable(Trailer trailer) =>
+        !trailer.Active || trailer.FleetioVor == true ||
+        IsUnavailableStatus(trailer.FleetioStatus) || IsUnavailableStatus(trailer.FleetioServiceStatus);
+
+    private static bool IsUnavailableStatus(string? status) =>
+        status?.Contains("VOR", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("out of service", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("off road", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("inactive", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("maintenance", StringComparison.OrdinalIgnoreCase) == true;
 
     private async Task AddResourceConflictChecks(Load load, List<PreDispatchCheck> checks, CancellationToken ct)
     {

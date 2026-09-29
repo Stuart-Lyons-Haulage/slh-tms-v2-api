@@ -45,6 +45,8 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
 
         if (request.VehicleId is Guid selectedVehicleId && IsVehicleUnavailable(await db.Vehicles.AsNoTracking().SingleAsync(x => x.Id == selectedVehicleId, ct)))
             return Conflict(new { code = "vehicle_unavailable", message = "The selected vehicle is VOR, out of service or otherwise unavailable." });
+        if (request.TrailerId is Guid selectedTrailerId && IsTrailerUnavailable(await db.Trailers.AsNoTracking().SingleAsync(x => x.Id == selectedTrailerId, ct)))
+            return Conflict(new { code = "trailer_unavailable", message = "The selected trailer is VOR, out of service or otherwise unavailable according to Fleetio." });
 
         var existingState = (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id);
         DateTimeOffset? plannedStart = request.PlannedStartUtc ??
@@ -106,6 +108,17 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         (vehicle.FleetioStatus?.Contains("off road", StringComparison.OrdinalIgnoreCase) == true) ||
         (vehicle.FleetioStatus?.Contains("inactive", StringComparison.OrdinalIgnoreCase) == true) ||
         (vehicle.FleetioStatus?.Contains("maintenance", StringComparison.OrdinalIgnoreCase) == true);
+
+    private static bool IsTrailerUnavailable(Trailer trailer) =>
+        !trailer.Active || trailer.FleetioVor == true ||
+        IsUnavailableStatus(trailer.FleetioStatus) || IsUnavailableStatus(trailer.FleetioServiceStatus);
+
+    private static bool IsUnavailableStatus(string? status) =>
+        status?.Contains("VOR", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("out of service", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("off road", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("inactive", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("maintenance", StringComparison.OrdinalIgnoreCase) == true;
 
     [HttpPut("{id:guid}/operational"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateOperational(Guid id, RunOperationalRequest request, CancellationToken ct)

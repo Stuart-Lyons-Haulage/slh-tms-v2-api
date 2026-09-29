@@ -111,6 +111,12 @@ public sealed class Trailer
     [MaxLength(80)] public string? Type { get; set; }
     public int? StandardCapacity { get; set; }
     public int? EuroCapacity { get; set; }
+    [MaxLength(80)] public string? FleetioId { get; set; }
+    [MaxLength(160)] public string? FleetioName { get; set; }
+    [MaxLength(80)] public string? FleetioStatus { get; set; }
+    public bool? FleetioVor { get; set; }
+    [MaxLength(160)] public string? FleetioServiceStatus { get; set; }
+    public DateTimeOffset? FleetioLastSyncedUtc { get; set; }
     [NotMapped, MaxLength(500)] public string? Notes { get; set; }
     public bool Active { get; set; } = true;
 }
