@@ -32,6 +32,18 @@ public sealed class EmailOrderIntakeService
         @"\b(?<qty>\d{1,3})\s+(?:pallets?|trolleys?)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex BackhaulFromRegex = new(
+        @"\bfrom\s+(?<site>[A-Za-z][A-Za-z0-9 .&'/-]{2,80}?)(?:\s+depot\b|\s+load\b)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex BackhaulDestinationRegex = new(
+        @"\bdeliver\s+to\s+(?<site>[A-Za-z][A-Za-z0-9 .&'/-]{2,100}?)(?:[.!?\r\n]|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex HandlingUnitQuantityRegex = new(
+        @"\b(?<qty>\d[\d.,]*)\s*(?<unit>pallets?|trays?|crates?|trolleys?)\b|\bTotal\s+Qty\s*[:=-]?\s*(?<total>\d[\d.,]*)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex MonthNameDateRegex = new(
         @"\b(?<day>0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+(?<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(?<year>20\d{2}|\d{2}))?\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -416,7 +428,7 @@ public sealed class EmailOrderIntakeService
     }
 
     private static bool IsGenericSummerBerryCollection(string value) =>
-        Regex.IsMatch(value, @"^(?:Summer\s*Berry|TSBC|Colworth|Summer\s*Berry\s*Colworth)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        Regex.IsMatch(value, @"^(?:Summer\s*Berry|TSBC(?:\s*[,/-].*)?|Colworth|Summer\s*Berry\s*Colworth)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static IEnumerable<ParsedEmailOrder> ParseStructuredBodyOrders(
         MailboxEmailIntakeRequest request,
@@ -476,6 +488,12 @@ public sealed class EmailOrderIntakeService
         var explicitCustomer = ExtractLabelValue(body, "customer");
         var explicitCollection = ExtractBodyCollectionPoint(body)
                                  ?? ExtractLabelValue(body, "collection", "collect", "pickup");
+        var senderCollectionSite = InferCollectionSiteFromSender(request.SenderAddress);
+        var isSummerBerryTsbcCoop = string.Equals(senderCollectionSite, "Summer Berry", StringComparison.OrdinalIgnoreCase)
+                                    && Regex.IsMatch($"{request.Subject}\n{body}", @"\bTSBC\s*[- ]?\s*CO[- ]?OP\b", RegexOptions.IgnoreCase);
+        if (isSummerBerryTsbcCoop &&
+            (string.IsNullOrWhiteSpace(explicitCollection) || IsGenericSummerBerryCollection(explicitCollection)))
+            explicitCollection = senderCollectionSite;
         if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
             explicitCollection = null;
         var explicitDeliveryDate = ExtractLabelValue(body, "deliverydate", "depotdate", "deliver", "delivery");
@@ -1365,17 +1383,25 @@ public sealed class EmailOrderIntakeService
         var signal = DetectKnownSignal(sourceText, masterSiteNames);
         var customer = signal?.CustomerCode ?? InferCustomerCode(request.Subject, request.SenderAddress, sourceText);
         var jobType = InferJobType(request.Subject, body);
-        var collection = InferCollectionSite(request.Subject, body, jobType);
-        var destination = InferDestination(request.Subject, body, jobType) ?? signal?.SiteName;
+        var handlingUnitType = InferHandlingUnitType(sourceText);
+        var isBackhaul = IsBackhaulText(sourceText) || jobType.Contains("Backhaul", StringComparison.OrdinalIgnoreCase);
+        var collection = InferCollectionSite(request.Subject, body, jobType)
+            ?? (isBackhaul ? MatchClean(BackhaulFromRegex, sourceText, "site") : null);
+        var destination = InferDestination(request.Subject, body, jobType)
+            ?? MatchClean(BackhaulDestinationRegex, sourceText, "site")
+            ?? signal?.SiteName;
         if (string.IsNullOrWhiteSpace(destination) && Regex.IsMatch(sourceText, @"\b(?:Barfoots|Sefter|Leythorne)\b", RegexOptions.IgnoreCase))
             destination = "Barfoots";
         var pallets = ExtractInt(TotalPalletsRegex, body, "qty")
             ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
             ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
+        var handlingUnitQuantity = ExtractHandlingUnitQuantity(sourceText, handlingUnitType);
+        if (pallets is null && string.Equals(handlingUnitType, "Pallets", StringComparison.OrdinalIgnoreCase))
+            pallets = handlingUnitQuantity;
         var requestedTime = NormaliseTime(ExtractMatch(CollectionTimeRegex, body, "time"))
             ?? NormaliseTime(ExtractMatch(ReadyForCollectionTimeRegex, body, "time"));
         var recognisedCustomerOrSite = signal is not null || !string.Equals(customer, "EMAIL", StringComparison.OrdinalIgnoreCase);
-        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, recognisedCustomerOrSite))
+        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, recognisedCustomerOrSite, handlingUnitType, isBackhaul))
         {
             globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
             return null;
@@ -1389,8 +1415,12 @@ public sealed class EmailOrderIntakeService
             warnings.Add("Collection site was not explicit in the email.");
         if (string.IsNullOrWhiteSpace(destination))
             warnings.Add("Delivery/return destination was not explicit in the email.");
-        if (pallets is null && !jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
-            warnings.Add("Pallet quantity was not explicit in the email.");
+        if (pallets is null)
+            warnings.Add(handlingUnitType is not null
+                ? $"Handling unit identified as {handlingUnitType}; quantity was not stated as a pallet quantity. Confirm the unit quantity before approval."
+                : "Pallet quantity was not explicit in the email.");
+        if (isBackhaul && pallets is null)
+            warnings.Add("Backhaul retained without a pallet count because no pallet quantity was stated in the email/body.");
 
         var baseReference = rawPo ?? StableEmailReference(request.MessageId);
         var orderReference = BuildRowReference(baseReference, customer, destination ?? collection ?? jobType, sourceDate.Value, 1);
@@ -1418,7 +1448,12 @@ public sealed class EmailOrderIntakeService
             ["driverInstructions"] = instructions,
             ["customerPo"] = rawPo,
             ["requestedTime"] = requestedTime,
-            ["jobType"] = jobType,
+            ["jobType"] = isBackhaul && !jobType.Contains("backhaul", StringComparison.OrdinalIgnoreCase)
+                ? $"Backhaul - {jobType}"
+                : jobType,
+            ["unitType"] = handlingUnitType,
+            ["handlingUnitType"] = handlingUnitType,
+            ["handlingUnitQuantity"] = handlingUnitQuantity,
             ["sourceMessageId"] = request.MessageId,
             ["sourceInternetMessageId"] = request.InternetMessageId,
             ["sourceSender"] = request.SenderAddress,
@@ -1436,15 +1471,18 @@ public sealed class EmailOrderIntakeService
         return new ParsedEmailOrder("body-1", naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
 
-    private static bool HasEnoughBodyOrderEvidence(string? rawPo, string? collection, string? destination, int? pallets, string? requestedTime, string jobType, bool recognisedCustomerOrSite)
+    private static bool HasEnoughBodyOrderEvidence(string? rawPo, string? collection, string? destination, int? pallets, string? requestedTime, string jobType, bool recognisedCustomerOrSite, string? handlingUnitType = null, bool isBackhaul = false)
     {
         var hasReference = !string.IsNullOrWhiteSpace(rawPo);
         var hasCollection = !string.IsNullOrWhiteSpace(collection);
         var hasDestination = !string.IsNullOrWhiteSpace(destination);
         var hasQuantity = pallets is > 0;
         var hasTime = !string.IsNullOrWhiteSpace(requestedTime);
-        if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
+        if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase) && !isBackhaul)
             return hasReference && (hasCollection || hasDestination);
+
+        if (isBackhaul || !string.IsNullOrWhiteSpace(handlingUnitType) && !string.Equals(handlingUnitType, "Pallets", StringComparison.OrdinalIgnoreCase))
+            return (hasCollection || hasDestination) && (hasReference || hasTime || recognisedCustomerOrSite);
 
         // A customer/supplier name plus a date is only evidence that the email
         // may need review; it is not enough to create a transport order. Body
@@ -2143,6 +2181,10 @@ public sealed class EmailOrderIntakeService
     {
         var value = $"{subject} {body}";
         if (value.Contains("tray collection", StringComparison.OrdinalIgnoreCase)) return "Tray collection";
+        if (Regex.IsMatch(value, @"\b(?:euro\s+pool\s+)?trays?\b", RegexOptions.IgnoreCase) &&
+            (value.Contains("backhaul", StringComparison.OrdinalIgnoreCase) || value.Contains("deliver", StringComparison.OrdinalIgnoreCase)))
+            return "Backhaul - Trays";
+        if (value.Contains("backhaul", StringComparison.OrdinalIgnoreCase) || value.Contains("backload", StringComparison.OrdinalIgnoreCase)) return "Backhaul";
         if (value.Contains("collection", StringComparison.OrdinalIgnoreCase) && !value.Contains("delivery", StringComparison.OrdinalIgnoreCase)) return "Collection";
         return "Delivery";
     }
@@ -2180,6 +2222,41 @@ public sealed class EmailOrderIntakeService
         var delivery = Regex.Match(clean, @"^(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\s*)?(?<dest>.+?)\s+delivery$", RegexOptions.IgnoreCase);
         return delivery.Success ? delivery.Groups["dest"].Value.Trim() : null;
     }
+
+    private static string? InferHandlingUnitType(string sourceText)
+    {
+        if (Regex.IsMatch(sourceText, @"\beuro\s+pool\s+trays?\b", RegexOptions.IgnoreCase)) return "Euro Pool Trays";
+        if (Regex.IsMatch(sourceText, @"\btrays?\b", RegexOptions.IgnoreCase)) return "Trays";
+        if (Regex.IsMatch(sourceText, @"\bcrates?\b", RegexOptions.IgnoreCase)) return "Crates";
+        if (Regex.IsMatch(sourceText, @"\btrolleys?\b", RegexOptions.IgnoreCase)) return "Trolleys";
+        if (Regex.IsMatch(sourceText, @"\bpallets?\b", RegexOptions.IgnoreCase)) return "Pallets";
+        return null;
+    }
+
+    private static int? ExtractHandlingUnitQuantity(string sourceText, string? handlingUnitType)
+    {
+        if (string.IsNullOrWhiteSpace(handlingUnitType)) return null;
+        foreach (Match match in HandlingUnitQuantityRegex.Matches(sourceText))
+        {
+            var raw = match.Groups["qty"].Success ? match.Groups["qty"].Value : match.Groups["total"].Value;
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var unit = match.Groups["unit"].Value;
+            if (match.Groups["qty"].Success && !string.IsNullOrWhiteSpace(unit) &&
+                !handlingUnitType.Contains(unit.TrimEnd('s'), StringComparison.OrdinalIgnoreCase) &&
+                !(handlingUnitType.Contains("Trays", StringComparison.OrdinalIgnoreCase) && unit.StartsWith("tray", StringComparison.OrdinalIgnoreCase)))
+                continue;
+            var digits = raw.Replace(",", string.Empty, StringComparison.Ordinal).Replace(".", string.Empty, StringComparison.Ordinal);
+            if (int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var quantity) && quantity > 0)
+                return quantity;
+        }
+        return null;
+    }
+
+    private static bool IsBackhaulText(string sourceText) =>
+        Regex.IsMatch(sourceText, @"\bbackhaul\b|\bbackload\b", RegexOptions.IgnoreCase);
+
+    private static string? MatchClean(Regex regex, string sourceText, string group) =>
+        regex.Match(sourceText) is { Success: true } match ? CleanSourceLine(match.Groups[group].Value) : null;
 
     private static string? NormaliseTime(string? value)
     {

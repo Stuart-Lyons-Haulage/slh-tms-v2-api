@@ -14,11 +14,37 @@ public sealed class PalletCapacityCalculatorTests
     }
 
     [Fact]
+    public void StandardOverCapacity_IsRed()
+    {
+        var result = PalletCapacityCalculator.Calculate(27, 0);
+        Assert.Equal(103.8m, result.UtilisationPercent);
+        Assert.Equal("Red", result.Status);
+    }
+
+    [Fact]
     public void EuroFullLoad_IsOneHundredPercent()
     {
         var result = PalletCapacityCalculator.Calculate(0, 33);
         Assert.Equal(100m, result.UtilisationPercent);
         Assert.Equal("Green", result.Status);
+    }
+
+    [Fact]
+    public void EuroOverCapacity_IsRed()
+    {
+        var result = PalletCapacityCalculator.Calculate(0, 34);
+        Assert.Equal(103m, result.UtilisationPercent);
+        Assert.Equal("Red", result.Status);
+    }
+
+    [Fact]
+    public void MixedLoad_OneStandardRemoved_AllowsAnotherEuro()
+    {
+        var withinCapacity = PalletCapacityCalculator.Calculate(25, 1);
+        var overCapacity = PalletCapacityCalculator.Calculate(26, 1);
+
+        Assert.Equal("Green", withinCapacity.Status);
+        Assert.Equal("Red", overCapacity.Status);
     }
 
     [Fact]

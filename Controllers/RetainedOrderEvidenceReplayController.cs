@@ -72,7 +72,31 @@ public sealed class RetainedOrderEvidenceReplayController(
                 continue;
             }
 
-            var parsed = await canonical.ParseForReplay(mailboxRequest, ct);
+            EmailIntakeParseResult parsed;
+            try
+            {
+                parsed = await canonical.ParseForReplay(mailboxRequest, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // One malformed message must not abort a bounded replay of the
+                // mailbox. Keep the evidence visible for correction and continue
+                // with the remaining messages in the batch.
+                summary.InvalidEvidence++;
+                summary.Messages.Add(new ReplayMessageResult(
+                    evidence.Id,
+                    mailboxRequest.MessageId,
+                    mailboxRequest.Subject,
+                    "parse-error",
+                    0,
+                    0,
+                    ex.GetBaseException().Message));
+                intakeLogger.LogWarning(
+                    ex,
+                    "Retained evidence replay skipped message {MessageId} after parser failure",
+                    mailboxRequest.MessageId);
+                continue;
+            }
             if (parsed.Orders.Count == 0)
             {
                 summary.UnmatchedEvidence++;
@@ -118,21 +142,18 @@ public sealed class RetainedOrderEvidenceReplayController(
                 var pendingCandidates = await db.StagedImports
                     .Where(item => item.EntityType == "order" &&
                                    item.Status == StagingStatus.PendingReview &&
-                                   item.ReceivedAtUtc >= receivedFromUtc &&
-                                   (item.Source == null || !item.Source.StartsWith("Info mailbox replay")))
+                                   item.ReceivedAtUtc >= receivedFromUtc)
                     .ToListAsync(ct);
 
                 var existingPending = pendingCandidates
                     .Where(item =>
                     {
-                        // A replay row with the current deterministic key is already
-                        // the desired projection. Leave it active so the replay call
-                        // remains idempotent. Older parser keys/replay projections are
-                        // still archived below when they do not match this parse.
-                        var isCurrentReplayProjection = item.Source?.StartsWith("Info mailbox replay", StringComparison.OrdinalIgnoreCase) == true &&
-                                                        keys.Contains(item.IdempotencyKey);
-                        return !isCurrentReplayProjection &&
-                               (keys.Contains(item.IdempotencyKey) ||
+                        // Refresh every unamended pending projection for this retained
+                        // message, including one with the current deterministic key.
+                        // The source evidence is authoritative: a parser correction or
+                        // amended attachment must replace the old payload rather than
+                        // being mistaken for an idempotent no-op.
+                        return (keys.Contains(item.IdempotencyKey) ||
                                 item.PayloadJson.Contains(mailboxRequest.MessageId, StringComparison.Ordinal));
                     })
                     .ToList();

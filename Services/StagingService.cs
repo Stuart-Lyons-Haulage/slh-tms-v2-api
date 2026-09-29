@@ -519,7 +519,10 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             var lineDeliveryDate = DateOnlyOrNull(line, "deliveryDate") ?? DateOnlyOrNull(payload, "deliveryDate");
             var pallets = IntOrNull(line, "pallets") ?? IntOrNull(line, "palletQuantity") ?? (sourceLines.Count == 1 ? IntOrNull(payload, "pallets") : null);
             var backhaul = IsBackhaul(line) || IsBackhaul(payload);
-            plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite) && lineCollectionDate is not null && lineDeliveryDate is not null && (backhaul || pallets is > 0);
+            // A backhaul is a route classification, not proof that the load quantity is known.
+            // Keep pallet-less tray/crate/trolley backhauls in review until a quantity is stated
+            // or entered by the planner; never turn an unquantified backhaul into a ready order.
+            plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite) && lineCollectionDate is not null && lineDeliveryDate is not null && pallets is > 0;
             db.OrderSourceLines.Add(new OrderSourceLine
             {
                 RevisionId = revision.Id,
@@ -539,7 +542,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         }
 
         var declaredLifecycle = Text(payload, "lifecycleStatus") ?? Text(payload, "reviewStatus");
-        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && (IsBackhaul(payload) || IntOrNull(payload, "pallets") is > 0)) plannerReady = true;
+        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && IntOrNull(payload, "pallets") is > 0) plannerReady = true;
         if (declaredLifecycle?.Contains("awaiting", StringComparison.OrdinalIgnoreCase) == true) plannerReady = false;
         movement.CurrentRevisionId = revision.Id;
         movement.LifecycleStatus = plannerReady ? OrderMovementStatus.PlannerReady : OrderMovementStatus.AwaitingDetails;

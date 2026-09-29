@@ -235,7 +235,8 @@ public static class SchemaMigrationRunner
         "079_Booking_Invoice_History.sql",
         "080_Invoice_Line_Booking_Reservation.sql",
         "081_Booking_Allocation_Unmatch.sql",
-        "082_Barfoots_Physical_North_South_Sites.sql"
+        "082_Barfoots_Physical_North_South_Sites.sql",
+        "083_Site_Samsara_Identity.sql"
     ];
 
     internal const string HistoryTableSql = """

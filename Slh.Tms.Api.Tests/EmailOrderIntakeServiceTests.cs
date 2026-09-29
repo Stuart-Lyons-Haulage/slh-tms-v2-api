@@ -699,4 +699,25 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Equal("2026-09-09", order.Payload.GetProperty("collectionDate").GetString());
         Assert.Equal("2026-09-10", order.Payload.GetProperty("deliveryDate").GetString());
     }
+
+    [Fact]
+    public void EuroPoolTrayBackhaul_PreservesNonPalletQuantityAndNeedsReview()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-europool-trays", null, "info@lyonshaulage.com", "Kamila.Biohn@barfoots.co.uk", "Kamila Biohn",
+            "EUROPOOL TRAYS COLLECTION ON 01.10 FROM BEDFORD TO LEYTHORNE, 228607008",
+            DateTimeOffset.Parse("2026-09-29T11:59:24Z"),
+            "Please collect on 01.10 from BEDFORD depot load of euro pool trays and deliver to Leythorne.\n" +
+            "Please remember to collect trays. Total Qty 16.632.",
+            null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("2026-10-01", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("BEDFORD", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leythorne", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.True(order.Payload.GetProperty("pallets").ValueKind is System.Text.Json.JsonValueKind.Null);
+        Assert.Equal("Euro Pool Trays", order.Payload.GetProperty("handlingUnitType").GetString());
+        Assert.Equal(16632, order.Payload.GetProperty("handlingUnitQuantity").GetInt32());
+        Assert.Contains(order.Warnings, warning => warning.Contains("pallet count", StringComparison.OrdinalIgnoreCase));
+    }
 }

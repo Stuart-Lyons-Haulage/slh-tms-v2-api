@@ -28,6 +28,7 @@ public sealed class CustomerEmailRoute
     public bool RequiresReview { get; set; } = true;
     public bool Active { get; set; } = true;
 }
+
 public sealed class CustomerContact
 {
     public Guid Id { get; set; } = Guid.NewGuid();

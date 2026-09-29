@@ -63,8 +63,13 @@ public sealed class NwfDailyTrackerParser
                 var warnings = new List<string>();
                 if (string.IsNullOrWhiteSpace(transportPo))
                     warnings.Add("Transport PO is blank on the NWF tracker row.");
+                if (!IsMeaningfulLoadRef(loadRef))
+                    warnings.Add("SLH Load Ref has not yet been assigned.");
                 if (comments.Contains("crate", StringComparison.OrdinalIgnoreCase))
                     warnings.Add("Crate-return instruction is present. Confirm whether the row represents produce, crate return, or both before acceptance.");
+                var plannerReady = !string.IsNullOrWhiteSpace(transportPo) &&
+                                   IsMeaningfulLoadRef(loadRef) &&
+                                   !string.IsNullOrWhiteSpace(loadingPlace);
 
                 var sourceRef = !string.IsNullOrWhiteSpace(loadRef)
                     ? loadRef
@@ -103,7 +108,12 @@ public sealed class NwfDailyTrackerParser
                     ["sellerName"] = loadingPlace,
                     ["marketName"] = "NWF",
                     ["stallNumber"] = destination.Name,
-                    ["jobType"] = "NWF inbound",
+                    ["jobType"] = plannerReady ? "NWF inbound" : "NWF pre-order",
+                    ["transportPo"] = transportPo,
+                    ["loadRef"] = loadRef,
+                    ["productPo"] = productPo,
+                    ["plannerReady"] = plannerReady,
+                    ["intakeStatus"] = plannerReady ? "ReadyForReview" : "PreOrder",
                     ["driverInstructions"] = instructions.Length <= 1000 ? instructions : instructions[..1000],
                     ["sourceMessageId"] = request.MessageId,
                     ["sourceInternetMessageId"] = request.InternetMessageId,
@@ -114,7 +124,7 @@ public sealed class NwfDailyTrackerParser
                     ["sourceWebLink"] = request.WebLink,
                     ["sourceAttachmentName"] = (request.Attachments ?? []).FirstOrDefault(item => item.IsInline != true)?.Name,
                     ["intakeNaturalKey"] = naturalKey,
-                    ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
+                    ["intakeConfidence"] = plannerReady && warnings.Count == 0 ? "High" : plannerReady ? "Medium" : "PreOrder",
                     ["intakeWarnings"] = warnings,
                     ["intakeParser"] = "NWF Daily Tracker"
                 };
@@ -145,6 +155,9 @@ public sealed class NwfDailyTrackerParser
 
     private static string Clean(string? value) => Regex.Replace((value ?? string.Empty).Trim(), @"\s+", " ");
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static bool IsMeaningfulLoadRef(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && !string.Equals(Normalise(value), "SLH", StringComparison.OrdinalIgnoreCase);
 
     private static string BuildReference(string sourceRef, string destination)
     {

@@ -83,7 +83,7 @@ public sealed class MasterDataIdentityIntegrityTests
     }
 
     [Fact]
-    public async Task Second_active_geofence_cannot_be_linked_to_the_same_site()
+    public async Task Multiple_active_geofences_can_be_linked_to_the_same_site()
     {
         var setup = await CreateDbAsync();
         await using var connection = setup.Connection;
@@ -112,9 +112,12 @@ public sealed class MasterDataIdentityIntegrityTests
             Active = true
         });
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => db.SaveChangesAsync());
+        await db.SaveChangesAsync();
 
-        Assert.Contains("only have one active geofence", exception.Message, StringComparison.OrdinalIgnoreCase);
+        var linked = await db.SiteGeofences
+            .Where(fence => fence.SiteId == site.Id && fence.Active)
+            .CountAsync();
+        Assert.Equal(2, linked);
     }
 
     [Fact]

@@ -44,6 +44,10 @@ public sealed class SpecialistMailboxOrderParser
         if (waitrosePdf is not null)
             return waitrosePdf;
 
+        var southbound = TryParseSouthboundLoadPlan(request);
+        if (southbound is not null)
+            return southbound;
+
         // Verified workbook profiles are deliberately evaluated before the older
         // body parsers. A known sender + subject family + workbook structure is the
         // safest automatic intake lane and keeps retailer-name noise out of Order Review.
@@ -72,6 +76,120 @@ public sealed class SpecialistMailboxOrderParser
             return vitacress;
 
         return inner.TryParse(request);
+    }
+
+    private static EmailIntakeParseResult? TryParseSouthboundLoadPlan(MailboxEmailIntakeRequest request)
+    {
+        var subject = request.Subject ?? string.Empty;
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true &&
+                           !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
+                           IsExcel(item.Name))
+            .Where(item => (item.Name ?? string.Empty).Contains("Southbound", StringComparison.OrdinalIgnoreCase) ||
+                           (item.Name ?? string.Empty).Contains("Lyons Collections", StringComparison.OrdinalIgnoreCase) ||
+                           subject.Contains("Southbound", StringComparison.OrdinalIgnoreCase) ||
+                           subject.Contains("Lyons Collections", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (attachments.Count == 0)
+            return null;
+
+        var planningDate = ExtractPlanningDate(request);
+        if (planningDate is null)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                var sheetNumber = 0;
+                do
+                {
+                    sheetNumber++;
+                    var rows = ReadRows(reader);
+                    var headerIndex = rows.FindIndex(row =>
+                        RowContains(row, "Load Number") &&
+                        RowContains(row, "Collection Site") &&
+                        RowContains(row, "Delivery Destination") &&
+                        RowContains(row, "Pallets Ordered"));
+                    if (headerIndex < 0)
+                        continue;
+
+                    var columns = HeaderMap(rows[headerIndex]);
+                    var loadIndex = FindColumn(columns, "loadnumber");
+                    var collectionIndex = FindColumn(columns, "collectionsite");
+                    var destinationIndex = FindColumn(columns, "deliverydestination");
+                    var palletsIndex = FindColumn(columns, "palletsordered");
+                    var fromTimeIndex = FindColumn(columns, "plannedcollecttimefrom");
+                    var toTimeIndex = FindColumn(columns, "plannedcollecttimeto");
+                    if (loadIndex < 0 || collectionIndex < 0 || destinationIndex < 0 || palletsIndex < 0)
+                        continue;
+
+                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+                    {
+                        var row = rows[rowIndex];
+                        var loadNumber = CellText(row, loadIndex);
+                        var sourceCollection = CellText(row, collectionIndex);
+                        var destination = CellText(row, destinationIndex);
+                        var pallets = CellInt(row, palletsIndex);
+                        if (string.IsNullOrWhiteSpace(loadNumber) ||
+                            string.IsNullOrWhiteSpace(sourceCollection) ||
+                            string.IsNullOrWhiteSpace(destination) ||
+                            pallets is null or <= 0)
+                            continue;
+
+                        var identity = SummerBerryIdentity(destination) ?? (CustomerCode: "SUMMERBERRY", RetailerCode: (string?)null);
+                        var collection = Regex.Replace(sourceCollection, @"^SB[- ]", string.Empty, RegexOptions.IgnoreCase).Trim();
+                        var rowWarnings = new List<string>();
+                        var reference = BuildReference($"SB-{loadNumber}", destination);
+                        var naturalKey = WorkbookNaturalKey(request, identity.Item1, collection, destination, planningDate.Value, loadNumber);
+                        var payload = BuildPayload(
+                            request,
+                            reference,
+                            null,
+                            identity.Item1,
+                            planningDate.Value,
+                            planningDate.Value,
+                            pallets.Value,
+                            collection,
+                            destination,
+                            CellTime(row, fromTimeIndex),
+                            CellTime(row, toTimeIndex),
+                            attachment.Name,
+                            reader.Name,
+                            rowIndex + 1,
+                            "Southbound load plan workbook",
+                            rowWarnings,
+                            identity.Item2);
+
+                        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                        root["jobType"] = "Southbound backhaul";
+                        root["isBackhaul"] = true;
+                        root["sourceCollectionLabel"] = sourceCollection;
+                        root["loadNumber"] = loadNumber;
+                        root["intakeProfile"] = "SUMMER_BERRY_SOUTHBOUND_LOAD_PLAN";
+                        root["intakeNaturalKey"] = naturalKey;
+                        payload = JsonSerializer.SerializeToElement(root);
+
+                        orders.Add(new ParsedEmailOrder(
+                            $"southbound-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(loadNumber)}",
+                            naturalKey,
+                            payload,
+                            rowWarnings));
+                    }
+                }
+                while (reader.NextResult());
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Southbound load-plan parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
     }
 
     private static EmailIntakeParseResult? TryParseWaitroseBookingPdf(MailboxEmailIntakeRequest request)
@@ -115,6 +233,7 @@ public sealed class SpecialistMailboxOrderParser
                     var reference = BuildReference(customerPo, row.Destination);
                     var naturalKey = NaturalKey(request, "WAITROSE", row.Collection, row.Destination, date.Value, row.Pallets);
                     var rowWarnings = new List<string>();
+                    var collectionSite = WaitroseCollectionSite(row.Collection);
                     if (string.IsNullOrWhiteSpace(row.Temperature))
                         rowWarnings.Add("Waitrose PDF temperature value was blank; confirm the temperature requirement before approval.");
 
@@ -126,7 +245,7 @@ public sealed class SpecialistMailboxOrderParser
                         date.Value,
                         date.Value,
                         row.Pallets,
-                        row.Collection,
+                        collectionSite,
                         row.Destination,
                         null,
                         null,
@@ -142,6 +261,8 @@ public sealed class SpecialistMailboxOrderParser
                     root["orderType"] = "Delivery";
                     root["intakeProfile"] = "BARFOOTS_WAITROSE_PDF_TABLE";
                     root["sourcePdfRow"] = row.RowNumber;
+                    root["sourceCollectionCode"] = row.Collection;
+                    root["collectionSiteCode"] = row.Collection;
                     payload = JsonSerializer.SerializeToElement(root);
 
                     orders.Add(new ParsedEmailOrder(
@@ -159,6 +280,13 @@ public sealed class SpecialistMailboxOrderParser
 
         return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
     }
+
+    private static string WaitroseCollectionSite(string sourceCode) =>
+        sourceCode.Equals("LEYCHI", StringComparison.OrdinalIgnoreCase)
+            ? "Barfoots Leythorne"
+            : sourceCode.Equals("BARBOG", StringComparison.OrdinalIgnoreCase)
+                ? "Barfoots Sefter"
+                : sourceCode;
 
     internal static IReadOnlyList<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? Temperature, int RowNumber)> ParseWaitrosePdfRows(string text)
     {
@@ -222,7 +350,10 @@ public sealed class SpecialistMailboxOrderParser
                     var rows = ReadRows(reader);
                     var headerIndex = rows.FindIndex(IsSummerBerryBookingHeader);
                     if (headerIndex < 0)
+                    {
+                        globalWarnings.Add($"Attachment '{attachment.Name}' sheet '{reader.Name}' did not contain the expected Summer Berry booking headers.");
                         continue;
+                    }
 
                     var headers = HeaderMap(rows[headerIndex]);
                     var collectionIndex = FindColumn(headers, "collectionsite", "collection", "collectfrom");
@@ -262,7 +393,12 @@ public sealed class SpecialistMailboxOrderParser
                         if (identity is null)
                             continue;
 
-                        var collection = CellText(row, collectionIndex) ?? "SB-Groves Farm";
+                        var collection = Regex.Replace(
+                                CellText(row, collectionIndex) ?? "SB-Groves Farm",
+                                @"^SB[- ]",
+                                string.Empty,
+                                RegexOptions.IgnoreCase)
+                            .Trim();
                         var destination = depot.Trim();
                         var requestedTime = CellTime(row, requestTimeIndex);
                         var availableTime = CellTime(row, availableTimeIndex);
@@ -312,6 +448,8 @@ public sealed class SpecialistMailboxOrderParser
             }
         }
 
+        if (orders.Count == 0 && globalWarnings.Count > 0)
+            return new EmailIntakeParseResult([], globalWarnings, "Summer Berry workbook could not be interpreted; retain for planner review.");
         if (orders.Count == 0)
             return null;
 
@@ -1057,7 +1195,7 @@ public sealed class SpecialistMailboxOrderParser
     private static bool IsSummerBerryBookingHeader(object?[] row)
     {
         var keys = row.Select(CellText).Where(value => !string.IsNullOrWhiteSpace(value)).Select(NormaliseKey).ToHashSet();
-        return keys.Contains("pallets") && keys.Contains("collectionsite") && keys.Contains("depotdescription");
+        return keys.Contains("PALLETS") && keys.Contains("COLLECTIONSITE") && keys.Contains("DEPOTDESCRIPTION");
     }
 
     private static Dictionary<string, int> HeaderMap(object?[] row)

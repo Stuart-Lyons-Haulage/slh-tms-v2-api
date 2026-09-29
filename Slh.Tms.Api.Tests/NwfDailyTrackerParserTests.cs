@@ -51,4 +51,24 @@ public sealed class NwfDailyTrackerParserTests
         var second = parser.TryParse(new MailboxEmailIntakeRequest("two", null, null, "ShiftLogisticalPlanner@nwfltd.co.uk", null, "NWF SLH DAILY TRACKER AMENDED AGAIN", DateTimeOffset.UtcNow, body, null, null, null));
         Assert.Equal(first!.Orders.Select(order => order.NaturalKey), second!.Orders.Select(order => order.NaturalKey));
     }
+
+    [Fact]
+    public void Inbound_tracker_row_with_transport_po_and_load_ref_is_ready_for_review()
+    {
+        var body = "29/09/2026| PO00478989| SLH2903A| PO00478627| Stourgardens| 4| 2| | | 6| 6| | |";
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "nwf-confirmed", null, null, "ShiftLogisticalPlanner@nwfltd.co.uk", null,
+            "NWF SLH DAILY TRACKER", DateTimeOffset.UtcNow, body, null, null, null));
+
+        var orders = result!.Orders.ToList();
+        Assert.Equal(2, orders.Count);
+        Assert.All(orders, order =>
+        {
+            Assert.Equal("NWF inbound", order.Payload.GetProperty("jobType").GetString());
+            Assert.True(order.Payload.GetProperty("plannerReady").GetBoolean());
+            Assert.Equal("ReadyForReview", order.Payload.GetProperty("intakeStatus").GetString());
+            Assert.Equal("PO00478989", order.Payload.GetProperty("transportPo").GetString());
+            Assert.Equal("SLH2903A", order.Payload.GetProperty("loadRef").GetString());
+        });
+    }
 }

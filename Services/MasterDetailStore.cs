@@ -27,6 +27,35 @@ public static class MasterDetailStore
         var rowSource = source ?? "SLH master detail";
         var reviewNote = "Full workbook detail retained in the audited register for legacy production columns.";
 
+        if (db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            // SQLite treats the row-version property as a required column rather
+            // than a SQL Server-generated value. Keep the lightweight test provider
+            // on the same persistence path without relying on SQL Server OUTPUT.
+            var rowVersion = new byte[8];
+            if (existingPayload is null)
+            {
+                await db.Database.ExecuteSqlInterpolatedAsync($@"
+                    INSERT INTO StagedImports
+                        (Id, EntityType, IdempotencyKey, PayloadJson, Status, Source, ReceivedAtUtc, ReviewedAtUtc, ReviewedBy, ReviewNote, RowVersion)
+                    VALUES
+                        ({Guid.NewGuid()}, {type}, {idempotencyKey}, {mergedPayload}, {status}, {rowSource}, {now}, {now}, {user}, {reviewNote}, {rowVersion})", ct);
+            }
+            else
+            {
+                await db.Database.ExecuteSqlInterpolatedAsync($@"
+                    UPDATE StagedImports
+                       SET PayloadJson = {mergedPayload},
+                           Status = {status},
+                           Source = COALESCE({source}, Source),
+                           ReviewedAtUtc = {now},
+                           ReviewedBy = {user},
+                           ReviewNote = {reviewNote}
+                     WHERE IdempotencyKey = {idempotencyKey}", ct);
+            }
+            return;
+        }
+
         if (!db.Database.IsRelational())
         {
             var existing = await db.StagedImports.SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
@@ -43,7 +72,8 @@ public static class MasterDetailStore
                     ReceivedAtUtc = now,
                     ReviewedAtUtc = now,
                     ReviewedBy = user,
-                    ReviewNote = reviewNote
+                    ReviewNote = reviewNote,
+                    RowVersion = new byte[8]
                 });
             }
             else
@@ -170,8 +200,15 @@ public static class MasterDetailStore
             .Where(site => !string.IsNullOrWhiteSpace(site.ExternalCode))
             .GroupBy(site => NormaliseKey(site.ExternalCode), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
-        var rows = await db.StagedImports.AsNoTracking().Where(item => item.EntityType == SiteType && item.Status == StagingStatus.Promoted)
-            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc).Take(5000).ToListAsync(ct);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == SiteType && item.Status == StagingStatus.Promoted)
+            .Take(5000)
+            .ToListAsync(ct);
+        // Keep provider compatibility with the SQLite test store: DateTimeOffset
+        // ordering is performed after the bounded result set is materialised.
+        rows = rows
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .ToList();
         var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
         {

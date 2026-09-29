@@ -64,6 +64,35 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
     }
 
     [Fact]
+    public async Task Site_scan_surfaces_same_geofence_boundary_without_auto_merging_different_sites()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Sites.AddRange(
+                new Site { Id = firstId, ExternalCode = $"GEO-A-{suffix}", Name = $"First boundary site {suffix}", Active = true },
+                new Site { Id = secondId, ExternalCode = $"GEO-B-{suffix}", Name = $"Second boundary site {suffix}", Active = true });
+            db.SiteGeofences.AddRange(
+                new SiteGeofence { Name = $"Boundary A {suffix}", NormalizedName = $"boundary-a-{suffix}", SiteId = firstId, PolygonJson = "{\"same\":true}", Active = true },
+                new SiteGeofence { Name = $"Boundary B {suffix}", NormalizedName = $"boundary-b-{suffix}", SiteId = secondId, PolygonJson = "{\"same\":true}", Active = true });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser(LyonsUser);
+        var response = await client.GetAsync("/api/v1/operational-master-data/duplicates?entityType=sites");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var candidates = await response.Content.ReadFromJsonAsync<List<MasterDataDuplicateCandidate>>();
+        var candidate = Assert.Single(candidates!.Where(x =>
+            x.Canonical.Id == firstId || x.Canonical.Id == secondId));
+        Assert.False(candidate.CanAutoMerge);
+        Assert.Contains("geofence boundary", candidate.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Driver_scan_keeps_employee_number_only_duplicates_for_review()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
@@ -84,6 +113,32 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
         var candidate = Assert.Single(candidates!.Where(x => x.Canonical.Code == $"EMP{suffix}"));
         Assert.False(candidate.CanAutoMerge);
         Assert.Equal(88, candidate.Confidence);
+    }
+
+    [Fact]
+    public async Task Driver_scan_matches_first_last_name_formats_but_blocks_different_member_codes()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Drivers.AddRange(
+                new Driver { EmployeeNumber = $"NAME-A-{suffix}", DisplayName = $"Smith, John {suffix}", TachoMasterDriverId = $"MEM-A-{suffix}", Active = true },
+                new Driver { EmployeeNumber = $"NAME-B-{suffix}", DisplayName = $"John Smith {suffix}", TachoMasterDriverId = $"MEM-B-{suffix}", Active = true });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser(LyonsUser);
+        var response = await client.GetAsync("/api/v1/operational-master-data/duplicates?entityType=drivers");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var candidates = await response.Content.ReadFromJsonAsync<List<MasterDataDuplicateCandidate>>();
+        var candidate = Assert.Single(candidates!.Where(x =>
+            x.EntityType == "drivers" &&
+            x.Canonical.Name.Contains(suffix, StringComparison.OrdinalIgnoreCase) &&
+            x.Duplicates.Any(row => row.Name.Contains(suffix, StringComparison.OrdinalIgnoreCase))));
+        Assert.False(candidate.CanAutoMerge);
+        Assert.Contains("Member/Tacho DB numbers differ", candidate.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -87,7 +87,11 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var existingByKey = idempotencyKeys.Count == 0
             ? new Dictionary<string, StagedImport>(StringComparer.Ordinal)
             : await db.StagedImports.AsNoTracking()
-                .Where(item => idempotencyKeys.Contains(item.IdempotencyKey))
+                // Archived/rejected history must not block a fresh projection of
+                // the same retained message. Only an active pending-review row is
+                // an idempotent existing candidate for replay.
+                .Where(item => item.Status == StagingStatus.PendingReview &&
+                              idempotencyKeys.Contains(item.IdempotencyKey))
                 .ToDictionaryAsync(item => item.IdempotencyKey, StringComparer.Ordinal, ct);
 
         var missingOrders = prepared

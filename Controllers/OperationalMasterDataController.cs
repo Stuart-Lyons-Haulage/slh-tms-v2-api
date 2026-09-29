@@ -271,12 +271,13 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
             .Where(x => includeInactive || x.Active)
             .ToListAsync(ct);
 
-        // Some approved RoadTech geofences exist in the runtime seed before a user links
-        // them to a Site Master record. Include them here so they can be selected directly.
-        var storedIds = stored.Select(x => x.Id).ToHashSet();
-        var seeded = EmbeddedGeofenceEngine.ApprovedFences
-            .Where(fence => !storedIds.Contains(fence.Id))
-            .Select(fence => new SiteGeofence
+        // Once SQL contains the current catalogue, it is authoritative for Master Data.
+        // Do not append the older embedded catalogue here: its provider IDs differ from
+        // the imported DOT rows, so the same physical locations appeared twice in the UI.
+        // The embedded payload remains the runtime fallback when SQL is empty.
+        IEnumerable<SiteGeofence> rows = stored.Count > 0
+            ? stored
+            : EmbeddedGeofenceEngine.ApprovedFences.Select(fence => new SiteGeofence
             {
                 Id = fence.Id,
                 Name = fence.Name,
@@ -290,8 +291,6 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
                 PolygonJson = PolygonJson(fence),
                 Active = true
             });
-
-        var rows = stored.Concat(seeded);
         if (q.Length > 0)
             rows = rows.Where(x => x.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
                 || (x.SiteNumber?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)

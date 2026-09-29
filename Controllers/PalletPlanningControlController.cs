@@ -195,6 +195,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 x.PalletSpacesUsed,
                 x.TotalPalletSpaces,
                 x.CapacityType,
+                capacityStatus = CapacityStatus(x.CapacityType),
+                capacityUtilisationPercent = CapacityUtilisation(x.CapacityType, x.PalletSpacesUsed, x.TotalPalletSpaces),
                 stopCount = x.Stops.Count
             }).ToList()
         });
@@ -268,6 +270,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             overplannedPallets = Math.Max(totalPlanned - ordered, 0),
             runCapacityStatus = capacity?.Status,
             runUtilisationPercent = capacity?.UtilisationPercent,
+            standardPallets = capacity?.StandardPallets,
+            euroPallets = capacity?.EuroPallets,
+            standardCapacity = capacity?.StandardCapacity,
+            euroCapacity = capacity?.EuroCapacity,
+            runCapacityMessage = capacity?.Message,
             trolleyUtilisationPercent = capacity?.TrolleyUtilisationPercent,
             trolleyPositionsRemaining = capacity?.TrolleyPositionsRemaining,
             updatedAtUtc = now
@@ -526,6 +533,24 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             case "Euro": euro += quantity; break;
             default: unknown += quantity; break;
         }
+    }
+
+    private static string? CapacityStatus(string? capacityType)
+    {
+        if (string.IsNullOrWhiteSpace(capacityType)) return null;
+        var parts = capacityType.Split('·', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        return parts.FirstOrDefault(part => part is "Green" or "Amber" or "Red");
+    }
+
+    private static decimal? CapacityUtilisation(string? capacityType, decimal? used, decimal? total)
+    {
+        var status = CapacityStatus(capacityType);
+        if (status is null || used is null || total is not > 0) return null;
+        var marker = capacityType!.Split('·', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(part => part.EndsWith('%'));
+        return marker is not null && decimal.TryParse(marker.TrimEnd('%'), out var parsed)
+            ? parsed
+            : Math.Round(used.Value / total.Value * 100m, 1, MidpointRounding.AwayFromZero);
     }
 
     private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)

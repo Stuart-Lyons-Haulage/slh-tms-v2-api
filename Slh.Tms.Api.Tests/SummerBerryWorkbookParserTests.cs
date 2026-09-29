@@ -1,4 +1,5 @@
 using IntakeParser = Slh.Tms.Api.Controllers.SpecialistMailboxOrderParser;
+using Slh.Tms.Api.Services;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;

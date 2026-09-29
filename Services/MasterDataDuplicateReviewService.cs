@@ -179,6 +179,14 @@ public static class MasterDataDuplicateReviewService
             // fields remain sufficient for a safe duplicate scan.
             db.ChangeTracker.Clear();
         }
+        var geofenceHashesBySite = (await db.SiteGeofences.AsNoTracking()
+                .Where(fence => fence.Active && fence.SiteId.HasValue)
+                .Select(fence => new { SiteId = fence.SiteId!.Value, fence.PolygonJson })
+                .ToListAsync(ct))
+            .GroupBy(fence => fence.SiteId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Select(fence => PolygonHash(fence.PolygonJson)).ToHashSet(StringComparer.OrdinalIgnoreCase));
         var groups = new Dictionary<string, HashSet<Site>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var row in rows)
@@ -204,10 +212,16 @@ public static class MasterDataDuplicateReviewService
                 if (address.Length >= 8) Add(groups, $"site-token-address:{token}|{address}", row);
                 if (string.IsNullOrWhiteSpace(postcode) && address.Length == 0 && token.Length >= 8) Add(groups, $"site-token-only:{token}", row);
             }
+
+            // A repeated DOT boundary is strong evidence that two Site records refer
+            // to the same physical location, but it is not enough to auto-merge: one
+            // boundary can legitimately be shared by different customers or purposes.
+            if (geofenceHashesBySite.TryGetValue(row.Id, out var hashes))
+                foreach (var hash in hashes) Add(groups, $"site-geofence:{hash}", row);
         }
 
         return DistinctGroups(groups.Values, row => row.Id)
-            .Select(BuildSiteCandidate)
+            .Select(group => BuildSiteCandidate(group, geofenceHashesBySite))
             .OrderByDescending(candidate => candidate.Confidence)
             .ThenBy(candidate => candidate.Canonical.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -240,6 +254,7 @@ public static class MasterDataDuplicateReviewService
             var employee = Normalise(row.EmployeeNumber);
             var licence  = Normalise(row.DrivingLicenceNumber);
             var card     = Normalise(row.TachoCardNumber);
+            var nameKeys = DriverNameKeys(row);
 
             // Hard identity keys only — name+mobile intentionally excluded.
             // Two drivers with the same name and mobile number are not necessarily the same person;
@@ -248,6 +263,8 @@ public static class MasterDataDuplicateReviewService
             if (employee.Length > 0) Add(groups, $"driver-employee:{employee}", row);
             if (licence.Length > 6)  Add(groups, $"driver-licence:{licence}", row);
             if (card.Length > 6)     Add(groups, $"driver-card:{card}", row);
+            foreach (var nameKey in nameKeys)
+                if (nameKey.Length >= 5) Add(groups, $"driver-name:{nameKey}", row);
         }
 
         return DistinctGroups(groups.Values, row => row.Id)
@@ -365,12 +382,20 @@ public static class MasterDataDuplicateReviewService
 
         var canonicalActiveGeofences = await db.SiteGeofences
             .Where(row => row.Active && row.SiteId == canonical.Id)
-            .OrderByDescending(row => row.UpdatedAtUtc)
             .ToListAsync(ct);
         var geofences = await db.SiteGeofences
             .Where(row => row.SiteId.HasValue && duplicateIds.Contains(row.SiteId.Value))
-            .OrderByDescending(row => row.UpdatedAtUtc)
             .ToListAsync(ct);
+
+        // SQLite test storage cannot translate DateTimeOffset ordering. The result
+        // sets are site-bounded, so ordering after materialisation is safe and keeps
+        // SQL Server and the test provider behaviour identical.
+        canonicalActiveGeofences = canonicalActiveGeofences
+            .OrderByDescending(row => row.UpdatedAtUtc)
+            .ToList();
+        geofences = geofences
+            .OrderByDescending(row => row.UpdatedAtUtc)
+            .ToList();
 
         var activeDuplicateGeofences = geofences.Where(row => row.Active).ToList();
         var retainedGeofence = canonicalActiveGeofences.FirstOrDefault();
@@ -704,7 +729,9 @@ public static class MasterDataDuplicateReviewService
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, [$"Merged {duplicates.Count} market duplicate(s) into {canonical.Market} / {canonical.Name}."]);
     }
 
-    private static MasterDataDuplicateCandidate BuildSiteCandidate(IReadOnlyList<Site> group)
+    private static MasterDataDuplicateCandidate BuildSiteCandidate(
+        IReadOnlyList<Site> group,
+        IReadOnlyDictionary<Guid, HashSet<string>> geofenceHashesBySite)
     {
         var canonical = group.OrderByDescending(SiteCompleteness).ThenBy(row => row.ExternalCode, StringComparer.OrdinalIgnoreCase).First();
         var duplicates = group.Where(row => row.Id != canonical.Id).ToList();
@@ -713,18 +740,40 @@ public static class MasterDataDuplicateReviewService
         var canonicalTokens = SiteIdentityTokens(canonical).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sameIdentity = duplicates.All(row => SiteIdentityTokens(row).Any(canonicalTokens.Contains));
         var samePostcode = !string.IsNullOrWhiteSpace(postcode) && duplicates.All(row => ExtractPostcode(row.CollectionAddress) == postcode);
-        var confidence = sameExternalCode && sameIdentity ? 99 : sameIdentity && samePostcode ? 98 : sameExternalCode ? 94 : sameIdentity ? 88 : samePostcode ? 82 : 70;
+        var sameGeofence = geofenceHashesBySite.TryGetValue(canonical.Id, out var canonicalGeofences) &&
+                           duplicates.Any(row => geofenceHashesBySite.TryGetValue(row.Id, out var duplicateGeofences) && canonicalGeofences.Overlaps(duplicateGeofences));
+        var customerCodes = group.Select(row => Clean(row.CustomerCode))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => Normalise(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var conflictingCustomers = customerCodes.Count > 1;
+        var confidence = sameExternalCode && sameIdentity ? 99 : sameIdentity && samePostcode ? 98 : sameExternalCode ? 94 : sameIdentity ? 88 : samePostcode ? 82 : sameGeofence ? 84 : 70;
+        var canAutoMerge = confidence >= 95 && !conflictingCustomers;
+        var reason = conflictingCustomers
+            ? "Same site candidate has conflicting Customer assignments — review ownership before merging."
+            : sameExternalCode
+                ? "Same site external code; merge preserves address/routing data."
+                : sameIdentity && samePostcode
+                    ? "Same site name/alias and postcode."
+                    : sameIdentity
+                        ? "Same site name/alias; review address before merging."
+                        : sameGeofence
+                            ? "Same geofence boundary; review site name and Customer before merging."
+                            : "Likely duplicate site name/address. Review before merging.";
 
         return new MasterDataDuplicateCandidate(
             CandidateId($"site:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
             "sites",
             confidence,
-            sameExternalCode ? "Same site external code; merge preserves address/routing data." : sameIdentity && samePostcode ? "Same site name/alias and postcode." : sameIdentity ? "Same site name/alias; review address before merging." : "Likely duplicate site name/address. Review before merging.",
-            confidence >= 95,
+            reason,
+            canAutoMerge,
             SiteRecord(canonical),
             duplicates.Select(SiteRecord).ToList(),
             ["collectionAddress", "mapLink", "latitude", "longitude", "collectionInstructions", "driverTextName", "aliases", "geofences", "integrationMappings", "runStops"]);
     }
+
+    private static string PolygonHash(string? polygonJson) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(polygonJson ?? string.Empty)));
 
     private static MasterDataDuplicateCandidate BuildDriverCandidate(IReadOnlyList<Driver> group)
     {
@@ -751,6 +800,11 @@ public static class MasterDataDuplicateReviewService
                            duplicates.Any(row => Normalise(row.EmployeeNumber) == Normalise(canonical.EmployeeNumber) &&
                                                  !string.IsNullOrWhiteSpace(row.EmployeeNumber));
         var employeeWithCorroboration = sameEmployee && (sameLicence || sameCard);
+        var sameName = duplicates.Any(row => DriverNameKeys(row).Intersect(DriverNameKeys(canonical), StringComparer.OrdinalIgnoreCase).Any());
+        var conflictingMember = duplicates.Any(row =>
+            !string.IsNullOrWhiteSpace(canonical.TachoMasterDriverId) &&
+            !string.IsNullOrWhiteSpace(row.TachoMasterDriverId) &&
+            !TachoDriverIdentityRules.MemberMatches(canonical.TachoMasterDriverId, row.TachoMasterDriverId));
 
         var confidence = sameTacho ? 99
             : sameCard ? 98
@@ -759,23 +813,32 @@ public static class MasterDataDuplicateReviewService
             : sameEmployee ? 88   // employee alone: review only, not auto-merge
             : 80;
 
-        var reason = sameTacho   ? "Same TachoMaster member code — strong identity match." :
+        var reason = conflictingMember ? "Same driver name in a different format, but the Member/Tacho DB numbers differ — review separately; no automatic merge." :
+                     sameTacho   ? "Same TachoMaster member code — strong identity match." :
                      sameCard    ? "Same digital tachograph card number." :
                      sameLicence ? "Same driving licence number." :
                      employeeWithCorroboration ? "Same employee number corroborated by matching licence or card." :
                      sameEmployee ? "Same employee number only — review before merging; could be a data entry repeat." :
-                     "Grouped by name or partial identity; review all fields before merging.";
+                     sameName ? "Same driver name after normalising first/last-name formats; review Member/Tacho DB identity before merging." :
+                     "Grouped by partial identity; review all fields before merging.";
 
         return new MasterDataDuplicateCandidate(
             CandidateId($"driver:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
             "drivers",
             confidence,
             reason,
-            confidence >= 95,
+            confidence >= 95 && !conflictingMember,
             DriverRecord(canonical),
             duplicates.Select(DriverRecord).ToList(),
             ["tachomasterDriverId", "tachoCardNumber", "mobileNumber", "driverType", "driverGroup", "skills", "linked loads/runs"]);
     }
+
+    private static IReadOnlyCollection<string> DriverNameKeys(Driver row) =>
+        new[] { row.DisplayName, row.TachoName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(TachoDriverIdentityRules.NormalisePerson)
+            .Where(value => value.Length >= 5 && value.Contains(' '))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static MasterDataDuplicateCandidate BuildVehicleCandidate(IReadOnlyList<Vehicle> group)
     {
