@@ -198,6 +198,121 @@ public sealed class SamsaraDispatchController(
         });
     }
 
+    [HttpGet("sites/address-sync/status")]
+    public async Task<IActionResult> SiteAddressSyncStatus(CancellationToken ct)
+    {
+        var sites = await ReadEnrichedSitesAsync(ct);
+        var candidates = ToSiteAddressCandidates(sites);
+        var mappedIds = await db.IntegrationMappings.AsNoTracking()
+            .Where(item => item.Active &&
+                           item.Provider == "Samsara" &&
+                           item.TmsEntityType == "Site")
+            .Select(item => item.TmsEntityId)
+            .ToListAsync(ct);
+        var mapped = candidates.Count(item => mappedIds.Contains(item.Site.Id));
+        var pending = candidates.Count - mapped;
+        var activeSites = sites.Count;
+        var sitesWithReference = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode));
+        var sitesWithAddress = sites.Count(site => !string.IsNullOrWhiteSpace(site.CollectionAddress));
+        var sitesWithCoordinates = sites.Count(site => site.Latitude is not null && site.Longitude is not null);
+        var missingCoordinates = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
+                                                     (site.Latitude is null || site.Longitude is null));
+        var missingAddress = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
+                                                 string.IsNullOrWhiteSpace(site.CollectionAddress));
+
+        return Ok(new
+        {
+            configured = samsara.IsConfigured,
+            addressSyncEnabled = samsara.AddressSyncEnabled,
+            activeSites,
+            sitesWithReference,
+            sitesWithAddress,
+            sitesWithCoordinates,
+            eligibleSites = candidates.Count,
+            alreadyMapped = mapped,
+            pending,
+            missingCoordinates,
+            missingAddress,
+            message = !samsara.IsConfigured
+                ? $"Samsara settings are incomplete: {string.Join(", ", samsara.MissingSettings)}."
+                : candidates.Count == 0
+                    ? "No active Master Sites currently have both an address and coordinates for reusable Samsara Addresses."
+                    : $"{candidates.Count} active Master Site(s) are ready for Samsara Address synchronisation."
+        });
+    }
+
+    [HttpPost("sites/address-sync")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SyncSiteAddresses(CancellationToken ct)
+    {
+        if (!samsara.IsConfigured)
+            return BadRequest(new
+            {
+                message = $"Samsara cannot synchronise site addresses until these settings are complete: {string.Join(", ", samsara.MissingSettings)}.",
+                missingSettings = samsara.MissingSettings
+            });
+
+        if (!samsara.AddressSyncEnabled)
+            return BadRequest(new { message = "Samsara reusable Address synchronisation is disabled in runtime configuration." });
+
+        var candidates = await ReadSiteAddressCandidatesAsync(ct);
+        using var addressGate = new SemaphoreSlim(4, 4);
+        var results = await Task.WhenAll(candidates.Select(async candidate =>
+        {
+            await addressGate.WaitAsync(ct);
+            try
+            {
+                var result = await samsara.UpsertAddressAsync(
+                    new SamsaraAddressRequest(
+                        candidate.Site.Id,
+                        candidate.Site.ExternalCode,
+                        candidate.Site.DriverTextName ?? candidate.Site.Name,
+                        candidate.Site.CollectionAddress!,
+                        (double)candidate.Site.Latitude!.Value,
+                        (double)candidate.Site.Longitude!.Value,
+                        candidate.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
+                    ct);
+                return new SiteAddressSyncResult(candidate.Site, result, null);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara Master Site address sync failed for {SiteReference}.", candidate.Site.ExternalCode);
+                return new SiteAddressSyncResult(candidate.Site, null, exception.GetBaseException().Message);
+            }
+            finally
+            {
+                addressGate.Release();
+            }
+        }));
+
+        foreach (var result in results.Where(item => item.Upsert is not null))
+        {
+            await SaveMappingAsync(
+                "Site",
+                result.Site.Id,
+                result.Upsert!.AddressId ?? result.Upsert.ExternalId,
+                result.Site.Name,
+                ct);
+        }
+
+        var failures = results.Where(item => item.Error is not null)
+            .Select(item => new { siteReference = item.Site.ExternalCode, siteName = item.Site.Name, error = item.Error })
+            .ToList();
+        var created = results.Count(item => item.Upsert?.Created == true);
+        var updated = results.Count(item => item.Upsert?.Updated == true);
+        return Ok(new
+        {
+            eligibleSites = candidates.Count,
+            created,
+            updated,
+            failed = failures.Count,
+            failures,
+            message = failures.Count == 0
+                ? $"{created + updated} Master Site address(es) synchronised to Samsara."
+                : $"{created + updated} Master Site address(es) synchronised; {failures.Count} require attention."
+        });
+    }
+
     [HttpGet("dispatch/{runId:guid}/status")]
     public async Task<IActionResult> DispatchStatus(Guid runId, CancellationToken ct)
     {
@@ -912,6 +1027,39 @@ public sealed class SamsaraDispatchController(
         return mapping?.ExternalKey;
     }
 
+    private async Task<List<SiteAddressCandidate>> ReadSiteAddressCandidatesAsync(CancellationToken ct)
+    {
+        var sites = await ReadEnrichedSitesAsync(ct);
+        return ToSiteAddressCandidates(sites);
+    }
+
+    private async Task<List<Site>> ReadEnrichedSitesAsync(CancellationToken ct)
+    {
+        var sites = await db.Sites.AsNoTracking()
+            .Where(site => site.Active)
+            .OrderBy(site => site.Name)
+            .Take(5000)
+            .ToListAsync(ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Site Master coordinate enrichment was unavailable during Samsara address synchronisation.");
+        }
+
+        return sites;
+    }
+
+    private static List<SiteAddressCandidate> ToSiteAddressCandidates(IEnumerable<Site> sites) => sites
+            .Where(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
+                          !string.IsNullOrWhiteSpace(site.CollectionAddress) &&
+                          site.Latitude is not null &&
+                          site.Longitude is not null)
+            .Select(site => new SiteAddressCandidate(site))
+            .ToList();
+
     private async Task SaveMappingAsync(string entityType, Guid entityId, string samsaraId, string label, CancellationToken ct)
     {
         var mapping = await db.IntegrationMappings.SingleOrDefaultAsync(item =>
@@ -1112,6 +1260,13 @@ public sealed class SamsaraDispatchController(
     private sealed record AddressSyncResult(
         Guid SiteId,
         string? AddressId);
+
+    private sealed record SiteAddressCandidate(Site Site);
+
+    private sealed record SiteAddressSyncResult(
+        Site Site,
+        SamsaraAddressUpsertResult? Upsert,
+        string? Error);
 
     private sealed record ResolvedStopLocation(string Address, double? Latitude, double? Longitude, Site? Site);
 }
