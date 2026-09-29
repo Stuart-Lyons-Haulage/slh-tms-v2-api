@@ -182,7 +182,7 @@ public sealed class DriverDispatchController(
             }
             else if (allocated.Count > 0)
             {
-                suggestion = allocated.Count == 1 ? "Already allocated." : $"{allocated.Count} runs already allocated.";
+                suggestion = allocated.Count == 1 ? "Already allocated." : $"{allocated.Count} routes already allocated.";
             }
             else if (assisted is not null)
             {
