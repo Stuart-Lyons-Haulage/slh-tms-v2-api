@@ -16,6 +16,11 @@ public static class PalletHandlingRules
         if (ContainsAny(sourceKey, "TROLLEY", "TROLLEYS", "DOLLY", "DOLLIES")) return NonPallet("Trolley", "trolley", "Source unit type");
         if (ContainsAny(sourceKey, "MIXED")) return NonPallet("Mixed", "mixed", "Source unit type");
 
+        // These collection-site defaults are recorded in the current master-data workbook.
+        // Keep them after explicit source-unit rules, but before broad customer defaults.
+        if (ContainsAny(collectionKey, "WAITROSEBRACKNELL", "FERRYSPEED", "VITACRESS", "APSCHICHESTER"))
+            return Pallet("Euro", "euro", "Master-data site rule: Euro");
+
         // Customer rules are authoritative where the business has defined an explicit pallet standard.
         if (ContainsAny(customerKey, "MORRISONS", "MORRISON") || ContainsAny(destinationKey, "MORRISONS", "MORRISON"))
             return Pallet("Standard", "standard", "Customer rule: Morrisons");
@@ -25,12 +30,17 @@ public static class PalletHandlingRules
 
         var isAldi = ContainsAny(customerKey, "ALDI") || ContainsAny(destinationKey, "ALDI");
         var isBarefoots = ContainsAny(collectionKey, "BAREFOOT", "BAREFOOTS");
+        var isBarfoots = ContainsAny(collectionKey, "BARFOOT", "BARFOOTS");
         var isNwf = ContainsAny(collectionKey, "NWF");
+        var isSummerBerry = ContainsAny(customerKey, "SUMMERBERRY", "SUMMERBERRIES") || ContainsAny(collectionKey, "GROVESFARM");
         var isLangmeads = ContainsAny(collectionKey, "LANGMEAD", "LANGMEADS", "HAMFARM");
         var isAtherstone = ContainsAny(destinationKey, "ATHERSTONE");
 
-        if (isAldi && (isBarefoots || isNwf))
-            return Pallet("Euro", "euro", isBarefoots ? "Site/customer rule: Barefoots + Aldi" : "Site/customer rule: NWF + Aldi");
+        if (isAldi && (isBarefoots || isBarfoots || isNwf || isSummerBerry))
+        {
+            var source = isNwf ? "NWF" : isSummerBerry ? "Summer Berry" : "Barfoots";
+            return Pallet("Euro", "euro", $"Route rule: {source} + Aldi");
+        }
 
         if (isLangmeads && isAldi && isAtherstone)
             return Pallet("Euro", "euro", "Destination override: Langmeads + Aldi Atherstone");

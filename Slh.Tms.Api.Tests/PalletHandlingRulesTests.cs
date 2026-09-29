@@ -92,4 +92,28 @@ public sealed class PalletHandlingRulesTests
         Assert.Equal("Euro", result.PalletType);
         Assert.Equal("Source pallet type", result.RuleSource);
     }
+
+    [Theory]
+    [InlineData("BARFOOTS", "Barfoots South", "Aldi-Cardiff")]
+    [InlineData("SUMMERBERRY", "Groves Farm", "Aldi-Swindon")]
+    public void Confirmed_route_workbook_aldi_routes_are_euro(string customer, string collection, string destination)
+    {
+        var result = PalletHandlingRules.Resolve(customer, collection, destination, "Pallets");
+        Assert.True(result.IsPallet);
+        Assert.Equal("Euro", result.PalletType);
+        Assert.Equal("euro", result.ColourKey);
+    }
+
+    [Theory]
+    [InlineData("Waitrose", "Waitrose Bracknell", "Other depot")]
+    [InlineData("Other", "Ferry Speed", "Other depot")]
+    [InlineData("Other", "Vitacress", "Other depot")]
+    [InlineData("Other", "APS Chichester", "Covent Garden Market")]
+    public void Master_data_euro_collection_sites_are_euro(string customer, string collection, string destination)
+    {
+        var result = PalletHandlingRules.Resolve(customer, collection, destination, "Pallets");
+        Assert.True(result.IsPallet);
+        Assert.Equal("Euro", result.PalletType);
+        Assert.Equal("euro", result.ColourKey);
+    }
 }
