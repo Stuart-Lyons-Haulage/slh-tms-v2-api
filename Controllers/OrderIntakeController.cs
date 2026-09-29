@@ -315,19 +315,38 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // retailer name or generic "looks like an order" heuristic must never create
         // a staging order. If none of the verified formats below recognise the
         // message, retain its source evidence and stop.
-        var parsed = nwfQuantityChangeParser.TryParse(request)
-            ?? nwfCsvParser.TryParse(request)
-            ?? nwfWorkbookParser.TryParse(request)
-            ?? nwfParser.TryParse(request)
-            ?? sainsburyParser.TryParse(request)
-            ?? specialistParser.TryParse(request)
-            ?? (IsVerifiedGenericIntakeSource(request)
-                ? new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct))
-                : null)
-            ?? new EmailIntakeParseResult(
+        EmailIntakeParseResult parsed;
+        try
+        {
+            parsed = nwfQuantityChangeParser.TryParse(request)
+                ?? nwfCsvParser.TryParse(request)
+                ?? nwfWorkbookParser.TryParse(request)
+                ?? nwfParser.TryParse(request)
+                ?? sainsburyParser.TryParse(request)
+                ?? specialistParser.TryParse(request)
+                ?? (IsVerifiedGenericIntakeSource(request)
+                    ? new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct))
+                    : null)
+                ?? new EmailIntakeParseResult(
+                    [],
+                    [],
+                    "No verified order format matched; source evidence retained.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Intake and retained replay must keep the mailbox evidence visible even
+            // when a provider document or parser profile is malformed. Do not let a
+            // parser implementation detail become an HTTP 500 for the planner.
+            logger.LogWarning(
+                ex,
+                "Order intake parser failed for message {MessageId} / {Subject}; retaining source evidence for manual review.",
+                request.MessageId,
+                request.Subject);
+            parsed = new EmailIntakeParseResult(
                 [],
-                [],
-                "No verified order format matched; source evidence retained.");
+                [$"The order document could not be parsed automatically: {ex.GetBaseException().Message}"],
+                "Parser error; source evidence retained for manual review.");
+        }
 
         if (parsed.Orders.Count == 0)
             return parsed;

@@ -11,6 +11,7 @@ public sealed class SamsaraOptions
     public string ExternalIdKey { get; set; } = "slhTmsRun";
     public string StopExternalIdKey { get; set; } = "slhTmsStop";
     public string SiteExternalIdKey { get; set; } = "slhTmsSite";
+    public string AssetExternalIdKey { get; set; } = "slhTmsAsset";
 
     public int StopRadiusMeters { get; set; } = 250;
 
@@ -25,6 +26,11 @@ public sealed class SamsaraOptions
     // locations remain as a safe fallback for an ad-hoc stop that cannot be mapped.
     public bool EnableAddressSync { get; set; } = true;
 
+    // The Assets API is the outbound master-data path for vehicles and trailers.
+    // Keep this explicit so an organisation can run address/route sync without
+    // creating asset records until the Samsara permission has been verified.
+    public bool EnableAssetSync { get; set; } = true;
+
     // Route execution is consumed from Samsara's append-only audit feed. The TMS
     // stores only the latest stop snapshot plus the feed cursor, not raw events.
     public bool EnableRouteProgressSync { get; set; } = true;
@@ -36,7 +42,8 @@ public sealed class SamsaraOptions
         !string.IsNullOrWhiteSpace(ApiToken) &&
         !string.IsNullOrWhiteSpace(ExternalIdKey) &&
         !string.IsNullOrWhiteSpace(StopExternalIdKey) &&
-        !string.IsNullOrWhiteSpace(SiteExternalIdKey);
+        !string.IsNullOrWhiteSpace(SiteExternalIdKey) &&
+        !string.IsNullOrWhiteSpace(AssetExternalIdKey);
 
     public string[] MissingSettings => new[]
     {
@@ -45,6 +52,7 @@ public sealed class SamsaraOptions
         string.IsNullOrWhiteSpace(ApiToken) ? "Samsara API token" : string.Empty,
         string.IsNullOrWhiteSpace(ExternalIdKey) ? "Samsara route external ID key" : string.Empty,
         string.IsNullOrWhiteSpace(StopExternalIdKey) ? "Samsara stop external ID key" : string.Empty,
-        string.IsNullOrWhiteSpace(SiteExternalIdKey) ? "Samsara site external ID key" : string.Empty
+        string.IsNullOrWhiteSpace(SiteExternalIdKey) ? "Samsara site external ID key" : string.Empty,
+        string.IsNullOrWhiteSpace(AssetExternalIdKey) ? "Samsara asset external ID key" : string.Empty
     }.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
 }

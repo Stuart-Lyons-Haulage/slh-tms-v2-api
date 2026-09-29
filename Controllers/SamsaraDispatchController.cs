@@ -34,6 +34,7 @@ public sealed class SamsaraDispatchController(
                 samsaraRole = "Execution and route progress",
                 recomputeScheduledTimes = options.RecomputeScheduledTimes,
                 addressSyncEnabled = options.EnableAddressSync,
+                assetSyncEnabled = options.EnableAssetSync,
                 routeProgressSyncEnabled = options.EnableRouteProgressSync,
                 routeProgressPollSeconds = options.RouteProgressPollSeconds,
                 missingSettings = samsara.MissingSettings,
@@ -53,6 +54,7 @@ public sealed class SamsaraDispatchController(
                 samsaraRole = "Execution and route progress",
                 recomputeScheduledTimes = options.RecomputeScheduledTimes,
                 addressSyncEnabled = options.EnableAddressSync,
+                assetSyncEnabled = options.EnableAssetSync,
                 routeProgressSyncEnabled = options.EnableRouteProgressSync,
                 routeProgressPollSeconds = options.RouteProgressPollSeconds,
                 routeStartingCondition = options.RouteStartingCondition,
@@ -311,6 +313,81 @@ public sealed class SamsaraDispatchController(
                 ? $"{created + updated} Master Site address(es) synchronised to Samsara."
                 : $"{created + updated} Master Site address(es) synchronised; {failures.Count} require attention."
         });
+    }
+
+    [HttpPost("master-data/sync")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SyncMasterData(CancellationToken ct)
+    {
+        if (!samsara.IsConfigured)
+            return BadRequest(new { message = $"Samsara settings are incomplete: {string.Join(", ", samsara.MissingSettings)}." });
+
+        if (!samsara.AddressSyncEnabled && !options.EnableAssetSync)
+            return BadRequest(new { message = "Both Samsara address and asset synchronisation are disabled in runtime configuration." });
+
+        var sites = samsara.AddressSyncEnabled ? await ReadSiteAddressCandidatesAsync(ct) : [];
+        var vehicles = options.EnableAssetSync
+            ? await db.Vehicles.AsNoTracking().Where(item => item.Active).OrderBy(item => item.Registration).ToListAsync(ct)
+            : [];
+        var trailers = options.EnableAssetSync
+            ? await db.Trailers.AsNoTracking().Where(item => item.Active).OrderBy(item => item.TrailerNumber).ToListAsync(ct)
+            : [];
+
+        var siteResults = new List<object>();
+        foreach (var candidate in sites)
+        {
+            try
+            {
+                var result = await samsara.UpsertAddressAsync(new SamsaraAddressRequest(
+                    candidate.Site.Id,
+                    candidate.Site.ExternalCode,
+                    candidate.Site.DriverTextName ?? candidate.Site.Name,
+                    candidate.Site.CollectionAddress!,
+                    (double)candidate.Site.Latitude!.Value,
+                    (double)candidate.Site.Longitude!.Value,
+                    candidate.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters), ct);
+                await SaveMappingAsync("Site", candidate.Site.Id, result.AddressId ?? result.ExternalId, candidate.Site.Name, ct);
+                siteResults.Add(new { reference = candidate.Site.ExternalCode, status = result.Created ? "created" : "updated" });
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara Master Site sync failed for {SiteReference}.", candidate.Site.ExternalCode);
+                siteResults.Add(new { reference = candidate.Site.ExternalCode, status = "failed", error = exception.GetBaseException().Message });
+            }
+        }
+
+        var assetResults = new List<object>();
+        foreach (var vehicle in vehicles)
+        {
+            await SyncAsset("Vehicle", "vehicle", vehicle.Id.ToString("N"), vehicle.Registration, vehicle.Registration, vehicle.VIN, vehicle.Notes, assetResults, ct);
+        }
+        foreach (var trailer in trailers)
+        {
+            await SyncAsset("Trailer", "trailer", trailer.Id.ToString("N"), trailer.TrailerNumber, null, null, trailer.Notes, assetResults, ct);
+        }
+
+        return Ok(new
+        {
+            sites = new { eligible = sites.Count, succeeded = siteResults.Count(item => !item.ToString()!.Contains("failed", StringComparison.OrdinalIgnoreCase)), results = siteResults },
+            assets = new { eligible = vehicles.Count + trailers.Count, succeeded = assetResults.Count(item => !item.ToString()!.Contains("failed", StringComparison.OrdinalIgnoreCase)), results = assetResults },
+            message = "SLH Master Data synchronisation completed. Review any failed records before exporting routes."
+        });
+
+        async Task SyncAsset(string entityType, string type, string reference, string name, string? licensePlate, string? vin, string? notes, List<object> results, CancellationToken token)
+        {
+            try
+            {
+                var result = await samsara.UpsertAssetAsync(new SamsaraAssetRequest(type, entityType, reference, name, licensePlate, vin, notes, options.AssetExternalIdKey), token);
+                var entityId = Guid.ParseExact(reference, "N");
+                await SaveMappingAsync(entityType, entityId, result.Id ?? result.ExternalId, name, token);
+                results.Add(new { entityType, reference = name, status = result.Created ? "created" : "updated" });
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara {EntityType} asset sync failed for {Name}.", entityType, name);
+                results.Add(new { entityType, reference = name, status = "failed", error = exception.GetBaseException().Message });
+            }
+        }
     }
 
     [HttpGet("dispatch/{runId:guid}/status")]

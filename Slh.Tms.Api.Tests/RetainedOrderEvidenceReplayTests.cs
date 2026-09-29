@@ -177,4 +177,47 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         Assert.DoesNotContain(checkDb.StagedImports,
             item => item.EntityType == "order" && item.PayloadJson.Contains(messageId));
     }
+
+    [Fact]
+    public async Task Replay_malformed_waitrose_pdf_returns_controlled_result_and_retains_evidence()
+    {
+        var messageId = $"replay-waitrose-malformed-{Guid.NewGuid():N}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "email-evidence",
+                IdempotencyKey = $"email-evidence:{messageId}",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    messageId,
+                    mailbox = "info@lyonshaulage.com",
+                    senderAddress = "goods.innv@barfoots.co.uk",
+                    subject = "WAITROSE booking",
+                    receivedAtUtc = "2026-09-29T08:00:00Z",
+                    bodyText = "Please review the attached Waitrose booking.",
+                    attachments = new[] { new { name = "booking.pdf", contentType = "application/pdf", contentBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes("not a PDF")) } },
+                    evidenceAvailable = true
+                }),
+                Status = StagingStatus.Archived,
+                Source = "Info mailbox evidence / goods.innv@barfoots.co.uk",
+                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-29T08:00:00Z")
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Approve");
+        var response = await client.PostAsync(
+            "/api/v1/order-intake/replay-retained-evidence",
+            new StringContent(JsonSerializer.Serialize(new
+            {
+                receivedFromUtc = "2026-09-29T00:00:00Z",
+                minimumPlanningDate = "2026-09-29"
+            }), Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.Contains("invalidEvidence", payload, StringComparison.Ordinal);
+    }
 }

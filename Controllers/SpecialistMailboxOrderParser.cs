@@ -215,17 +215,22 @@ public sealed class SpecialistMailboxOrderParser
 
         var orders = new List<ParsedEmailOrder>();
         var warnings = new List<string>();
+        var recognisedPdf = false;
         foreach (var attachment in pdfAttachments)
         {
             try
             {
+                recognisedPdf = true;
                 using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
                 using var document = PdfDocument.Open(stream);
                 var pdfText = string.Join("\n", document.GetPages().Select(page => page.Text));
                 var rows = ParseWaitrosePdfRows(pdfText);
                 var planningDate = ExtractPlanningDate(request) ?? rows.Select(row => row.Date).FirstOrDefault();
                 if (rows.Count == 0)
+                {
+                    warnings.Add($"Attachment '{attachment.Name}' is recognised as a Waitrose booking PDF but no usable rows were found. The source document was retained for manual review.");
                     continue;
+                }
 
                 foreach (var row in rows)
                 {
@@ -285,7 +290,12 @@ public sealed class SpecialistMailboxOrderParser
             }
         }
 
-        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
+        if (orders.Count > 0)
+            return new EmailIntakeParseResult(orders, warnings, null);
+
+        return recognisedPdf
+            ? new EmailIntakeParseResult([], warnings, "Waitrose booking PDF could not be parsed into usable order rows; source evidence retained for manual review.")
+            : null;
     }
 
     private static string WaitroseCollectionSite(string sourceCode) =>

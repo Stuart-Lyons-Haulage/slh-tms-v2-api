@@ -38,6 +38,23 @@ public sealed class SpecialistMailboxOrderParserTests
     }
 
     [Fact]
+    public void WaitrosePdfTable_ToleratesPdfColumnSeparatorsAndBlankPalletType()
+    {
+        const string text = """
+            REF NUMBER | CASES ORDERED | NUMBER OF BASE PALLETS | PALLET TYPE | TEMP
+            LEYCHI | Waitrose Ltd (A/C 005096) | Waitrose Ltd (Aylesford) | 30/09/2026 | O79001/3564471 | 196 | 2 | | +2 C
+            """;
+
+        var rows = IntakeParser.ParseWaitrosePdfRows(text);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(196, row.Cases);
+        Assert.Equal(2, row.Pallets);
+        Assert.Null(row.PalletType);
+        Assert.Equal("+2 C", row.Temperature);
+    }
+
+    [Fact]
     public void Vitacress_waitrose_collection_rows_preserve_dates_time_amendment_and_total()
     {
         var rows = new List<object?[]>

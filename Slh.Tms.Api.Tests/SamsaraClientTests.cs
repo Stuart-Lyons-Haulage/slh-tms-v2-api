@@ -139,6 +139,38 @@ public sealed class SamsaraClientTests
         Assert.Equal(-0.67, root.GetProperty("longitude").GetDouble(), 2);
     }
 
+    [Fact]
+    public async Task Asset_upsert_creates_a_vehicle_with_a_stable_external_id()
+    {
+        string? postedBody = null;
+        var handler = new StubHandler(async request =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return JsonResponse("{\"data\":[],\"pagination\":{\"hasNextPage\":false}}");
+
+            if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/assets")
+            {
+                postedBody = await request.Content!.ReadAsStringAsync();
+                return JsonResponse("{\"data\":{\"id\":\"asset-1\",\"type\":\"vehicle\",\"name\":\"BL70RHV\"}}");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.BadRequest);
+        });
+
+        var client = Client(handler);
+        var result = await client.UpsertAssetAsync(
+            new SamsaraAssetRequest("vehicle", "Vehicle", "vehicle-123", "BL70RHV", "BL70RHV", "VIN-123", "SLH test vehicle", "slhTmsAsset"),
+            CancellationToken.None);
+
+        Assert.Equal("asset-1", result.Id);
+        Assert.True(result.Created);
+        using var document = JsonDocument.Parse(postedBody!);
+        var root = document.RootElement;
+        Assert.Equal("vehicle", root.GetProperty("type").GetString());
+        Assert.Equal("BL70RHV", root.GetProperty("licensePlate").GetString());
+        Assert.Equal("slhTmsAsset:Vehicle:vehicle-123", root.GetProperty("externalIds").GetProperty("slhTmsAsset").GetString());
+    }
+
     private static SamsaraClient Client(HttpMessageHandler handler)
     {
         var options = new SamsaraOptions
@@ -149,6 +181,7 @@ public sealed class SamsaraClientTests
             ExternalIdKey = "slhTmsRun",
             StopExternalIdKey = "slhTmsStop",
             SiteExternalIdKey = "slhTmsSite",
+            AssetExternalIdKey = "slhTmsAsset",
             RecomputeScheduledTimes = true,
             RouteStartingCondition = "departFirstStop",
             RouteCompletionCondition = "departLastStop",

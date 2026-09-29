@@ -43,6 +43,39 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     public Task<IReadOnlyList<SamsaraDriver>> GetDriversAsync(CancellationToken ct) =>
         ReadPagedAsync("fleet/drivers", ParseDriver, ct);
 
+    public Task<IReadOnlyList<SamsaraAsset>> GetAssetsAsync(string type, CancellationToken ct) =>
+        ReadPagedAsync($"assets?type={Uri.EscapeDataString(type)}&includeExternalIds=true", ParseAsset, ct);
+
+    public async Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, CancellationToken ct)
+    {
+        EnsureConfigured();
+        var externalId = ExternalAssetId(asset.EntityType, asset.ExternalReference);
+        var existing = await FindAssetByExternalIdAsync(asset.Type, externalId, ct);
+        var payload = AssetPayload(asset, externalId);
+
+        if (existing is not null)
+        {
+            using var patch = CreateRequest(HttpMethod.Patch, $"assets?id={Uri.EscapeDataString(existing.Id)}", payload);
+            using var patchResponse = await httpClient.SendAsync(patch, ct);
+            var patchBody = await patchResponse.Content.ReadAsStringAsync(ct);
+            if (patchResponse.StatusCode != HttpStatusCode.NotFound)
+            {
+                EnsureSuccess(patchResponse, patchBody, "asset update");
+                var updated = ParseAssetResponse(patchBody);
+                return new SamsaraAssetUpsertResult(updated?.Id ?? existing.Id, externalId, false, true, updated ?? existing);
+            }
+
+            logger.LogWarning("Samsara asset {ExternalId} disappeared between lookup and update; recreating it.", externalId);
+        }
+
+        using var create = CreateRequest(HttpMethod.Post, "assets", payload);
+        using var createResponse = await httpClient.SendAsync(create, ct);
+        var createBody = await createResponse.Content.ReadAsStringAsync(ct);
+        EnsureSuccess(createResponse, createBody, "asset create");
+        var created = ParseAssetResponse(createBody);
+        return new SamsaraAssetUpsertResult(created?.Id, externalId, true, false, created);
+    }
+
     public async Task<SamsaraRouteSnapshot?> GetRouteByRunIdAsync(Guid runId, CancellationToken ct)
     {
         EnsureConfigured();
@@ -192,6 +225,19 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         using var response = await httpClient.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
         EnsureSuccess(response, body, operation);
+    }
+
+    private async Task<SamsaraAsset?> FindAssetByExternalIdAsync(string type, string externalId, CancellationToken ct)
+    {
+        var path = $"assets?type={Uri.EscapeDataString(type)}&externalIds={Uri.EscapeDataString(externalId)}&includeExternalIds=true";
+        using var request = CreateRequest(HttpMethod.Get, path);
+        using var response = await httpClient.SendAsync(request, ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+        EnsureSuccess(response, body, "asset lookup");
+        using var document = JsonDocument.Parse(body);
+        if (!document.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            return null;
+        return data.EnumerateArray().Select(ParseAsset).FirstOrDefault(item => item is not null);
     }
 
     private async Task<IReadOnlyList<T>> ReadPagedAsync<T>(
@@ -398,6 +444,44 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             ExternalIds(item));
     }
 
+    private static SamsaraAsset? ParseAsset(JsonElement item)
+    {
+        var id = Text(item, "id");
+        if (string.IsNullOrWhiteSpace(id)) return null;
+        return new SamsaraAsset(
+            id,
+            Text(item, "type"),
+            Text(item, "name"),
+            Text(item, "licensePlate"),
+            Text(item, "vin"),
+            ExternalIds(item));
+    }
+
+    private static SamsaraAsset? ParseAssetResponse(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        var asset = root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object ? data : root;
+        return asset.ValueKind == JsonValueKind.Object ? ParseAsset(asset) : null;
+    }
+
+    private object AssetPayload(SamsaraAssetRequest asset, string externalId) => new
+    {
+        type = asset.Type,
+        name = asset.Name,
+        licensePlate = asset.LicensePlate,
+        vin = asset.Vin,
+        notes = asset.Notes,
+        externalIds = new Dictionary<string, string>
+        {
+            [asset.ExternalIdKey] = externalId
+        }
+    };
+
+    private string ExternalAssetId(string entityType, string reference) =>
+        $"{options.AssetExternalIdKey}:{entityType}:{reference}";
+
     private static SamsaraAddressSnapshot? ParseAddress(string body)
     {
         if (string.IsNullOrWhiteSpace(body)) return null;
@@ -520,6 +604,9 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
 public sealed record SamsaraConnectionSummary(bool Connected, int VehicleCount, int DriverCount);
 public sealed record SamsaraVehicle(string Id, string? Name, string? LicensePlate, string? Vin, IReadOnlyDictionary<string, string> ExternalIds);
 public sealed record SamsaraDriver(string Id, string? Name, string? Username, string? LicenseNumber, IReadOnlyDictionary<string, string> ExternalIds);
+public sealed record SamsaraAsset(string Id, string? Type, string? Name, string? LicensePlate, string? Vin, IReadOnlyDictionary<string, string> ExternalIds);
+public sealed record SamsaraAssetRequest(string Type, string EntityType, string ExternalReference, string Name, string? LicensePlate, string? Vin, string? Notes, string ExternalIdKey);
+public sealed record SamsaraAssetUpsertResult(string? Id, string ExternalId, bool Created, bool Updated, SamsaraAsset? Asset);
 
 public sealed record SamsaraAddressRequest(
     Guid SiteId,
