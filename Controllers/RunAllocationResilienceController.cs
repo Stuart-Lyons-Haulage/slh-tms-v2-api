@@ -14,23 +14,14 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     [HttpGet]
     public async Task<IActionResult> Runs([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var merged = new Dictionary<Guid, Load>();
-        try
-        {
-            var query = db.Loads.AsNoTracking().Include(x => x.Stops).AsQueryable();
-            if (date is not null) query = query.Where(x => x.PlanningDate == date.Value);
-            foreach (var load in await query.Where(x => x.Status != LoadStatus.Cancelled).OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToListAsync(ct))
-                merged[load.Id] = load;
-        }
-        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        foreach (var load in (await PlanningRegisterStore.ReadLoadsAsync(db, date, ct)).Where(load => load.Status != LoadStatus.Cancelled))
-            merged[load.Id] = load;
-
-        var rows = merged.Values.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToList();
+        // Use the same resilient reader as the rest of the operational system. A run can
+        // temporarily exist in both dbo.Loads and the audited planning register; directly
+        // overlaying the register copy here allowed an older copy with stale stops to hide
+        // pallet allocations that were already saved to the live run.
+        var rows = (await PlanningResilience.ReadLoadsAsync(db, date, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .Take(1000)
+            .ToList();
         foreach (var load in rows) load.Stops = RenumberOperationalStops(load.Stops);
         await RunOperationalStore.EnrichAsync(db, rows, ct);
         return Ok(rows);
