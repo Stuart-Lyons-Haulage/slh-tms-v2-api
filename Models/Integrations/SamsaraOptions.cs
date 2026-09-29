@@ -14,9 +14,9 @@ public sealed class SamsaraOptions
 
     public int StopRadiusMeters { get; set; } = 250;
 
-    // SLH TMS is the planning authority. Samsara executes and reports progress;
-    // it must not rewrite the HGV-aware schedule created by the TMS.
-    public bool RecomputeScheduledTimes { get; set; } = false;
+    // SLH TMS owns the legal start, route order and stop constraints. Samsara
+    // calculates the intermediate travel schedule from the first-stop start.
+    public bool RecomputeScheduledTimes { get; set; } = true;
     public string RouteStartingCondition { get; set; } = "departFirstStop";
     public string RouteCompletionCondition { get; set; } = "departLastStop";
     public string SequencingMethod { get; set; } = "manual";

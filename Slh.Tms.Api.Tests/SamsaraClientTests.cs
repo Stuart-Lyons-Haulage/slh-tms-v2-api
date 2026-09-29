@@ -78,7 +78,7 @@ public sealed class SamsaraClientTests
         using var document = JsonDocument.Parse(postedBody!);
         var root = document.RootElement;
 
-        Assert.False(root.GetProperty("recomputeScheduledTimes").GetBoolean());
+        Assert.True(root.GetProperty("recomputeScheduledTimes").GetBoolean());
         Assert.Equal("manual", root.GetProperty("settings").GetProperty("sequencingMethod").GetString());
         Assert.Equal("departFirstStop", root.GetProperty("settings").GetProperty("routeStartingCondition").GetString());
         Assert.Equal("departLastStop", root.GetProperty("settings").GetProperty("routeCompletionCondition").GetString());
@@ -149,7 +149,7 @@ public sealed class SamsaraClientTests
             ExternalIdKey = "slhTmsRun",
             StopExternalIdKey = "slhTmsStop",
             SiteExternalIdKey = "slhTmsSite",
-            RecomputeScheduledTimes = false,
+            RecomputeScheduledTimes = true,
             RouteStartingCondition = "departFirstStop",
             RouteCompletionCondition = "departLastStop",
             SequencingMethod = "manual",

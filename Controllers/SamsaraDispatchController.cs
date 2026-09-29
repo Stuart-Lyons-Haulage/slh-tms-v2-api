@@ -799,7 +799,9 @@ public sealed class SamsaraDispatchController(
                 var stopNotes = BuildStopNotes(stop, order);
                 var scheduledArrival = isFirst && departFirstStop
                     ? null
-                    : stop.PlannedArrivalUtc ?? firstScheduled;
+                    : options.RecomputeScheduledTimes
+                        ? null
+                        : stop.PlannedArrivalUtc ?? firstScheduled;
                 var scheduledDeparture = isFirst && departFirstStop
                     ? stop.PlannedArrivalUtc ?? firstScheduled
                     : isLast && departLastStop
@@ -827,7 +829,7 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingLocations
                 });
 
-            if (missingSchedule.Count > 0)
+            if (!options.RecomputeScheduledTimes && missingSchedule.Count > 0)
                 return BadRequest(new
                 {
                     message = $"Every Samsara stop after the route start needs a planned arrival time because SLH TMS owns the schedule. Complete the plan for: {string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase))}.",
