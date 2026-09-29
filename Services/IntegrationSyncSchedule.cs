@@ -43,6 +43,7 @@ public sealed class IntegrationSyncSchedulerBackgroundService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        logger.LogInformation("Automatic integration sync schedules enabled: Fleetio hourly; Sage HR daily at 05:00 and 14:00 Europe/London.");
         await Task.WhenAll(RunFleetioScheduleAsync(stoppingToken), RunSageScheduleAsync(stoppingToken));
     }
 
