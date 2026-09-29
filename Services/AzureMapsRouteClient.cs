@@ -18,6 +18,15 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
     public async Task<object> Directions(IReadOnlyList<(decimal Longitude, decimal Latitude)> points, CancellationToken ct)
     {
         if (points.Count < 2) throw new ArgumentException("At least two mapped stops are required.");
+        // Local Docker does not have the managed identity used by Azure Container Apps.
+        // Avoid waiting for the IMDS probe when Azure Maps is not configured and use the
+        // deterministic resilient estimate instead. The route response still contains the
+        // same summary shape consumed by Driver Dispatch, with an explicit approximate source.
+        if (string.IsNullOrWhiteSpace(configuration["Maps:ClientId"]))
+        {
+            logger.LogInformation("Azure Maps client ID is not configured; using resilient approximate road route.");
+            return ApproximateDirections(points);
+        }
         try
         {
             var token = await new DefaultAzureCredential().GetTokenAsync(TokenContext, ct);
@@ -49,6 +58,9 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
             var postcodeResult = await SearchPostcode(postcode, ct);
             if (postcodeResult is not null) return postcodeResult;
         }
+
+        if (string.IsNullOrWhiteSpace(configuration["Maps:ClientId"]))
+            return new { results = Array.Empty<object>(), source = "Unavailable", query = address.Trim() };
 
         try
         {
