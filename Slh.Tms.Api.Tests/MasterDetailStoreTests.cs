@@ -106,6 +106,31 @@ public sealed class MasterDetailStoreTests
         });
     }
 
+    [Fact]
+    public async Task LinkedGeofenceCentroidFillsMissingSiteCoordinates()
+    {
+        await using var db = CreateDb();
+        var site = new Site { ExternalCode = "SITE-185", Name = "NWF Selsey", DriverTextName = "NWF-Selsey" };
+        db.Sites.Add(site);
+        db.SiteGeofences.Add(new SiteGeofence
+        {
+            Name = "Selsey (Natures Way)",
+            NormalizedName = "SELSEYNATURESWAY",
+            SiteId = site.Id,
+            PolygonJson = "[[-0.780000,50.740000],[-0.770000,50.740000],[-0.770000,50.750000],[-0.780000,50.750000]]",
+            Active = true
+        });
+        await db.SaveChangesAsync();
+
+        db.ChangeTracker.Clear();
+        var rows = await db.Sites.AsNoTracking().ToListAsync();
+        await MasterDetailStore.EnrichSitesAsync(db, rows, CancellationToken.None);
+
+        var enriched = Assert.Single(rows);
+        Assert.Equal(50.745m, enriched.Latitude);
+        Assert.Equal(-0.775m, enriched.Longitude);
+    }
+
     private static TmsDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase($"master-detail-{Guid.NewGuid()}").Options;
