@@ -168,7 +168,7 @@ public sealed class SamsaraClientTests
         var root = document.RootElement;
         Assert.Equal("vehicle", root.GetProperty("type").GetString());
         Assert.Equal("BL70RHV", root.GetProperty("licensePlate").GetString());
-        Assert.Equal("slhTmsAsset:Vehicle:vehicle-123", root.GetProperty("externalIds").GetProperty("slhTmsAsset").GetString());
+        Assert.Equal("vehicle-123", root.GetProperty("externalIds").GetProperty("slhTmsAsset").GetString());
     }
 
     private static SamsaraClient Client(HttpMessageHandler handler)

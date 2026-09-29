@@ -357,13 +357,15 @@ public sealed class SamsaraDispatchController(
         }
 
         var assetResults = new List<object>();
+        var remoteVehicles = options.EnableAssetSync ? await samsara.GetAssetsAsync("vehicle", ct) : [];
+        var remoteTrailers = options.EnableAssetSync ? await samsara.GetAssetsAsync("trailer", ct) : [];
         foreach (var vehicle in vehicles)
         {
-            await SyncAsset("Vehicle", "vehicle", vehicle.Id.ToString("N"), vehicle.Registration, vehicle.Registration, vehicle.VIN, vehicle.Notes, assetResults, ct);
+            await SyncAsset("Vehicle", "vehicle", vehicle.Id.ToString("N"), vehicle.Registration, vehicle.Registration, vehicle.VIN, vehicle.Notes, remoteVehicles, assetResults, ct);
         }
         foreach (var trailer in trailers)
         {
-            await SyncAsset("Trailer", "trailer", trailer.Id.ToString("N"), trailer.TrailerNumber, null, null, trailer.Notes, assetResults, ct);
+            await SyncAsset("Trailer", "trailer", trailer.Id.ToString("N"), trailer.TrailerNumber, null, null, trailer.Notes, remoteTrailers, assetResults, ct);
         }
 
         return Ok(new
@@ -373,11 +375,12 @@ public sealed class SamsaraDispatchController(
             message = "SLH Master Data synchronisation completed. Review any failed records before exporting routes."
         });
 
-        async Task SyncAsset(string entityType, string type, string reference, string name, string? licensePlate, string? vin, string? notes, List<object> results, CancellationToken token)
+        async Task SyncAsset(string entityType, string type, string reference, string name, string? licensePlate, string? vin, string? notes, IReadOnlyList<SamsaraAsset> existingAssets, List<object> results, CancellationToken token)
         {
             try
             {
-                var result = await samsara.UpsertAssetAsync(new SamsaraAssetRequest(type, entityType, reference, name, licensePlate, vin, notes, options.AssetExternalIdKey), token);
+                var existing = existingAssets.FirstOrDefault(item => item.ExternalIds.TryGetValue(options.AssetExternalIdKey, out var value) && string.Equals(value, reference, StringComparison.OrdinalIgnoreCase));
+                var result = await samsara.UpsertAssetAsync(new SamsaraAssetRequest(type, entityType, reference, name, licensePlate, vin, notes, options.AssetExternalIdKey), existing, token);
                 var entityId = Guid.ParseExact(reference, "N");
                 await SaveMappingAsync(entityType, entityId, result.Id ?? result.ExternalId, name, token);
                 results.Add(new { entityType, reference = name, status = result.Created ? "created" : "updated" });

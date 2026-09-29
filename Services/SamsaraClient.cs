@@ -46,11 +46,14 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     public Task<IReadOnlyList<SamsaraAsset>> GetAssetsAsync(string type, CancellationToken ct) =>
         ReadPagedAsync($"assets?type={Uri.EscapeDataString(type)}&includeExternalIds=true", ParseAsset, ct);
 
-    public async Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, CancellationToken ct)
+    public Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, CancellationToken ct) =>
+        UpsertAssetAsync(asset, null, ct);
+
+    public async Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, SamsaraAsset? knownExisting, CancellationToken ct)
     {
         EnsureConfigured();
         var externalId = ExternalAssetId(asset.EntityType, asset.ExternalReference);
-        var existing = await FindAssetByExternalIdAsync(asset.Type, externalId, ct);
+        var existing = knownExisting ?? await FindAssetByExternalIdAsync(asset.Type, externalId, ct);
         var payload = AssetPayload(asset, externalId);
 
         if (existing is not null)
@@ -252,7 +255,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
 
         for (var page = 0; page < 20; page++)
         {
-            var path = $"{resource}?limit=512";
+            var path = $"{resource}{(resource.Contains('?') ? '&' : '?')}limit=512";
             if (!string.IsNullOrWhiteSpace(after))
                 path += $"&after={Uri.EscapeDataString(after)}";
 
@@ -479,8 +482,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         }
     };
 
-    private string ExternalAssetId(string entityType, string reference) =>
-        $"{options.AssetExternalIdKey}:{entityType}:{reference}";
+    private string ExternalAssetId(string entityType, string reference) => reference;
 
     private static SamsaraAddressSnapshot? ParseAddress(string body)
     {
