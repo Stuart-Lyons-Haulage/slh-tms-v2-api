@@ -6,6 +6,18 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class InfoMailboxGraphPollingServiceTests
 {
+    [Theory]
+    [InlineData("orders@doubleh.co.uk", true)]
+    [InlineData("planner@sub.nwfltd.co.uk", true)]
+    [InlineData("orders@not-a-customer.example", false)]
+    [InlineData(null, false)]
+    public void Customer_domain_allowlist_matches_root_and_subdomains(string? sender, bool expected)
+    {
+        var domains = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "doubleh.co.uk", "nwfltd.co.uk" };
+
+        Assert.Equal(expected, InfoMailboxGraphPollingService.IsCustomerDomain(sender, domains));
+    }
+
     [Fact]
     public void GraphMessage_IsMappedToCanonicalMailboxRequest()
     {

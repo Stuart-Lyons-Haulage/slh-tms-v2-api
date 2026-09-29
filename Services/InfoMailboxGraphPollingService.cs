@@ -33,6 +33,10 @@ public sealed class InfoMailboxGraphOptions
     public int OverlapMinutes { get; set; } = 1440;
     public int MaxMessagesPerPoll { get; set; } = 250;
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
+    // Comma/semicolon-separated customer domains that should be inspected in the
+    // whole mailbox, including messages where info@ is only BCC'd.
+    public string CustomerSenderDomains { get; set; } =
+        "doubleh.co.uk;vitacress.com;sainsburys.com;nwfltd.co.uk;greenhousesussex.co.uk;thegreenhousesussex.co.uk;summerberry.co.uk";
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(TenantId) &&
@@ -159,7 +163,17 @@ public sealed class InfoMailboxGraphPollingService(
             ? DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.InitialLookbackHours, 1, 168))
             : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 60, 10080));
 
-        var messages = await FetchMessagesAsync(client, token.Token, since, ct);
+        var configuredDomains = ParseDomains(options.CustomerSenderDomains);
+        var mappedDomains = await db.CustomerEmailRoutes.AsNoTracking()
+            .Where(route => route.Active && route.SenderDomain != null)
+            .Select(route => route.SenderDomain!)
+            .ToListAsync(ct);
+        var customerDomains = configuredDomains
+            .Concat(mappedDomains.Select(NormalizeDomain).Where(item => item is not null).Select(item => item!))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var messages = await FetchMessagesAsync(client, token.Token, since, customerDomains, ct);
         var seen = messages.Count;
         var ingested = 0;
 
@@ -216,6 +230,7 @@ public sealed class InfoMailboxGraphPollingService(
         HttpClient client,
         string accessToken,
         DateTimeOffset since,
+        IReadOnlySet<string> customerDomains,
         CancellationToken ct)
     {
         var mailbox = Uri.EscapeDataString(options.Mailbox);
@@ -230,26 +245,40 @@ public sealed class InfoMailboxGraphPollingService(
 
         await AppendMessagePagesAsync(client, accessToken, next, messages, limit, ct);
 
-        // BCC'd NWF reports may not expose info@ in To/Cc and may be materialised
-        // outside the Inbox collection. Search the whole mailbox subject index as a
-        // bounded customer-specific safety net. This is deliberately limited to
-        // NWAY subject lines so unrelated mail is not pulled into the intake lane.
-        var supplementalSearch = Uri.EscapeDataString("subject:NWAY");
-        var supplemental =
+        // The Inbox collection is not sufficient: customer orders can be BCC'd to
+        // info@ or be filed by an Outlook rule. Read the whole mailbox date window,
+        // then retain only approved customer sender domains. This avoids relying on
+        // visible To/Cc recipients or fragile subject-specific searches.
+        var dateFilter = Uri.EscapeDataString($"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}");
+        var mailboxSearch =
             $"users/{mailbox}/messages" +
             "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,body,bodyPreview,from,toRecipients,ccRecipients,importance,webLink,hasAttachments" +
-            $"&$search=\"{supplementalSearch}\"&$top=50";
+            $"&$filter={dateFilter}&$orderby=receivedDateTime asc&$top=50";
 
         try
         {
-            await AppendMessagePagesAsync(client, accessToken, supplemental, messages, limit, ct, since);
+            var customerMessages = new List<GraphMailboxMessage>();
+            await AppendMessagePagesAsync(
+                client,
+                accessToken,
+                mailboxSearch,
+                customerMessages,
+                limit,
+                ct,
+                since,
+                message => IsCustomerDomain(message.SenderAddress, customerDomains));
+            var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (var customerMessage in customerMessages)
+            {
+                if (knownIds.Add(customerMessage.Id)) messages.Add(customerMessage);
+            }
         }
         catch (HttpRequestException ex)
         {
             // A tenant may reject, throttle or time out this safety-net query. The
-            // normal Inbox poll remains valid; never turn a supplemental NWF search
-            // failure into a mailbox-wide intake outage.
-            logger.LogWarning(ex, "NWF supplemental Graph subject search was unavailable; Inbox polling remains active.");
+            // normal Inbox poll remains valid; never turn a mailbox-wide intake
+            // failure into an outage.
+            logger.LogWarning(ex, "Customer-domain Graph mailbox search was unavailable; Inbox polling remains active.");
         }
 
         return messages;
@@ -262,7 +291,8 @@ public sealed class InfoMailboxGraphPollingService(
         List<GraphMailboxMessage> messages,
         int limit,
         CancellationToken ct,
-        DateTimeOffset? minimumReceivedUtc = null)
+        DateTimeOffset? minimumReceivedUtc = null,
+        Func<GraphMailboxMessage, bool>? predicate = null)
     {
         var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         while (!string.IsNullOrWhiteSpace(next) && messages.Count < limit)
@@ -284,6 +314,7 @@ public sealed class InfoMailboxGraphPollingService(
                     var parsed = ParseMessage(item);
                     if (parsed is not null &&
                         (minimumReceivedUtc is null || parsed.ReceivedAtUtc >= minimumReceivedUtc.Value) &&
+                        (predicate is null || predicate(parsed)) &&
                         knownIds.Add(parsed.Id))
                         messages.Add(parsed);
                 }
@@ -574,6 +605,31 @@ public sealed class InfoMailboxGraphPollingService(
         if (compact.Length > 96) compact = compact[^96..];
         var key = $"email-evidence:{compact}";
         return key.Length <= 200 ? key : key[..200];
+    }
+
+    internal static bool IsCustomerDomain(string? senderAddress, IReadOnlySet<string> domains)
+    {
+        var normalizedSender = senderAddress?.Trim().ToLowerInvariant();
+        var at = normalizedSender?.LastIndexOf('@') ?? -1;
+        if (at < 1 || at == normalizedSender!.Length - 1) return false;
+        var senderDomain = normalizedSender[(at + 1)..];
+        return domains.Any(root => senderDomain.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+            senderDomain.EndsWith("." + root, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IReadOnlyList<string> ParseDomains(string? value) =>
+        (value ?? string.Empty)
+            .Split(new[] { ';', ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeDomain)
+            .Where(item => item is not null)
+            .Select(item => item!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static string? NormalizeDomain(string? value)
+    {
+        var domain = value?.Trim().TrimStart('@').TrimEnd('.').ToLowerInvariant();
+        return string.IsNullOrWhiteSpace(domain) || domain.Contains('@') ? null : domain;
     }
 }
 
