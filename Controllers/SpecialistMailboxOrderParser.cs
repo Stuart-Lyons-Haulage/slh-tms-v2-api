@@ -311,6 +311,37 @@ public sealed class SpecialistMailboxOrderParser
                 string.IsNullOrWhiteSpace(match.Groups["temperature"].Value) ? null : match.Groups["temperature"].Value.Trim(),
                 rowNumber));
         }
+        var compactReadingOrder = text.Contains("Waitrose Ltd  (", StringComparison.OrdinalIgnoreCase);
+        if (compactReadingOrder) rows.Clear();
+        if (rows.Count == 0)
+        {
+            // PdfPig can return this supplier PDF as a compact reading-order
+            // stream, with the column separators removed. The row still has
+            // stable anchors: cases -> collection code -> depot -> wave ->
+            // pallet count -> date -> references -> next customer name.
+            var compact = new Regex(
+                @"(?<cases>\d{1,6})(?<collection>LEYCHI|BARBOG)Waitrose\s+Ltd\s+\((?<destination>[^)\r\n]+)\)\s+AM/Group1\s+\d+\+(?<pallets>\d{1,3})\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{4}|\d{2}))(?<references>[A-Z0-9][A-Z0-9/& -]*?)(?=Waitrose\s+Ltd\s+\(A/C|$)",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled);
+            foreach (Match match in compact.Matches(text.Replace('\u00A0', ' ')))
+            {
+                rowNumber++;
+                var date = DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yy", "dd/MM/yy", "d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
+                    ? parsedDate
+                    : (DateOnly?)null;
+                if (!int.TryParse(match.Groups["cases"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cases) ||
+                    !int.TryParse(match.Groups["pallets"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pallets))
+                    continue;
+                rows.Add((
+                    match.Groups["collection"].Value.Trim().ToUpperInvariant(),
+                    match.Groups["destination"].Value.Trim(),
+                    date,
+                    match.Groups["references"].Value.Trim(),
+                    cases,
+                    pallets,
+                    null,
+                    rowNumber));
+            }
+        }
         return rows;
     }
 
