@@ -605,6 +605,7 @@ public sealed class SamsaraDispatchController(
                         var result = await samsara.UpsertAddressAsync(
                             new SamsaraAddressRequest(
                                 site.Id,
+                                site.ExternalCode,
                                 site.DriverTextName ?? site.Name,
                                 item.Location.Address,
                                 item.Location.Latitude,

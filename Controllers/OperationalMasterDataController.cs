@@ -204,7 +204,9 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         if (site is null) return NotFound();
         await MasterDetailStore.EnrichSitesAsync(db, new[] { site }, ct);
         var before = Snapshot(site);
-        site.ExternalCode = CleanRequired(request.ExternalCode, site.ExternalCode);
+        // SITE### is an immutable operational identity. The request field remains
+        // accepted for older clients, but a user edit can never rename a Site.
+        site.ExternalCode = CleanRequired(site.ExternalCode, site.ExternalCode);
         site.CustomerCode = Clean(request.CustomerCode);
         site.Name = CleanRequired(request.Name, site.Name);
         site.DriverTextName = Clean(request.DriverTextName);
@@ -217,8 +219,6 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         site.CustomField1 = Clean(request.CustomField1);
         site.CustomField2 = Clean(request.CustomField2);
         site.CustomField3 = Clean(request.CustomField3);
-        site.RoadrunnerCode = Clean(request.RoadrunnerCode);
-        site.RoadrunnerProfileJson = Clean(request.RoadrunnerProfileJson);
         site.OperationalRegion = Clean(request.OperationalRegion);
         await Audit("Site", id, "Updated", before, Snapshot(site), ct);
         await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, Snapshot(site), "SLH operational site editor", User.Identity?.Name, ct);
@@ -522,8 +522,6 @@ public sealed record SiteUpdateRequest(
     string? CustomField1,
     string? CustomField2,
     string? CustomField3,
-    string? RoadrunnerCode,
-    string? RoadrunnerProfileJson,
     string? OperationalRegion);
 public sealed record CustomerUpdateRequest(string? Code, string? Name, string? TradingName, string? AccountOwner, string? ServiceNotes, string? DefaultSiteCode);
 public sealed record GeofenceUpdateRequest(string? Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, Guid? SiteId, bool? LocationOnly, string? PolygonJson);

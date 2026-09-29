@@ -125,7 +125,7 @@ public sealed class SamsaraClientTests
         var siteId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
 
         var result = await client.UpsertAddressAsync(
-            new SamsaraAddressRequest(siteId, "Greenhouse", "Greenhouse Road", 50.84, -0.67, 300),
+            new SamsaraAddressRequest(siteId, "SITE123", "Greenhouse", "Greenhouse Road", 50.84, -0.67, 300),
             CancellationToken.None);
 
         Assert.Equal("address-99", result.AddressId);
@@ -133,7 +133,7 @@ public sealed class SamsaraClientTests
 
         using var document = JsonDocument.Parse(postedBody!);
         var root = document.RootElement;
-        Assert.Equal(siteId.ToString("N"), root.GetProperty("externalIds").GetProperty("slhTmsSite").GetString());
+        Assert.Equal("SITE123", root.GetProperty("externalIds").GetProperty("slhTmsSite").GetString());
         Assert.Equal(300, root.GetProperty("geofence").GetProperty("circle").GetProperty("radiusMeters").GetInt32());
         Assert.Equal(50.84, root.GetProperty("latitude").GetDouble(), 2);
         Assert.Equal(-0.67, root.GetProperty("longitude").GetDouble(), 2);

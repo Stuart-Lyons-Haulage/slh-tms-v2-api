@@ -107,11 +107,21 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return ParseAddress(body);
     }
 
+    private async Task<SamsaraAddressSnapshot?> GetAddressByExternalIdAsync(string externalId, CancellationToken ct)
+    {
+        using var request = CreateRequest(HttpMethod.Get, $"addresses/{Uri.EscapeDataString(externalId)}");
+        using var response = await httpClient.SendAsync(request, ct);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        var body = await response.Content.ReadAsStringAsync(ct);
+        EnsureSuccess(response, body, "address lookup");
+        return ParseAddress(body);
+    }
+
     public async Task<SamsaraAddressUpsertResult> UpsertAddressAsync(SamsaraAddressRequest address, CancellationToken ct)
     {
         EnsureConfigured();
-        var external = ExternalSiteId(address.SiteId);
-        var existing = await GetAddressBySiteIdAsync(address.SiteId, ct);
+        var external = ExternalSiteId(address.SiteReference);
+        var existing = await GetAddressByExternalIdAsync(external, ct);
         var payload = AddressPayload(address);
 
         if (existing is not null)
@@ -329,7 +339,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             ["formattedAddress"] = Clip(address.FormattedAddress, 500),
             ["externalIds"] = new Dictionary<string, string>
             {
-                [options.SiteExternalIdKey] = address.SiteId.ToString("N")
+                [options.SiteExternalIdKey] = address.SiteReference
             },
             ["geofence"] = new
             {
@@ -347,6 +357,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
 
     private string ExternalRouteId(Guid runId) => $"{options.ExternalIdKey}:{runId:N}";
     private string ExternalSiteId(Guid siteId) => $"{options.SiteExternalIdKey}:{siteId:N}";
+    private string ExternalSiteId(string siteReference) => $"{options.SiteExternalIdKey}:{siteReference}";
 
     private static string NormaliseStartingCondition(string? value) =>
         string.Equals(value, "arriveFirstStop", StringComparison.OrdinalIgnoreCase)
@@ -512,6 +523,7 @@ public sealed record SamsaraDriver(string Id, string? Name, string? Username, st
 
 public sealed record SamsaraAddressRequest(
     Guid SiteId,
+    string SiteReference,
     string Name,
     string FormattedAddress,
     double? Latitude,

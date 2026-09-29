@@ -131,8 +131,6 @@ public sealed class Site
     [NotMapped, MaxLength(200)] public string? CustomField1 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField2 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField3 { get; set; }
-    [NotMapped, MaxLength(80)] public string? RoadrunnerCode { get; set; }
-    [NotMapped] public string? RoadrunnerProfileJson { get; set; }
     [MaxLength(80)] public string? OperationalRegion { get; set; }
     public bool Active { get; set; } = true;
 }

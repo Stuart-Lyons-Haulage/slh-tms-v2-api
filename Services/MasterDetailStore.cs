@@ -231,8 +231,6 @@ public static class MasterDetailStore
                     site.CustomField1 = Text(payload, "customField1");
                     site.CustomField2 = Text(payload, "customField2");
                     site.CustomField3 = Text(payload, "customField3");
-                    site.RoadrunnerCode = Text(payload, "roadrunnerCode") ?? Text(payload, "roadRunnerCode") ?? Text(payload, "rrCode");
-                    site.RoadrunnerProfileJson = Text(payload, "roadrunnerProfileJson") ?? Text(payload, "roadRunnerProfileJson");
                     site.Latitude = Decimal(payload, "latitude");
                     site.Longitude = Decimal(payload, "longitude");
                     site.GeofenceRadiusMetres = Int(payload, "geofenceRadiusMetres")
