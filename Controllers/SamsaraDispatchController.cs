@@ -919,6 +919,31 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingSchedule
                 });
 
+            // Validate the exact payload that will be sent, not only the source
+            // register. A stale or partially-recovered planning copy can contain
+            // stops that are later excluded while resolving coordinates/times. Do
+            // not allow that to become Samsara's opaque `stops: []` 400 response.
+            if (samsaraStops.Count < 2)
+            {
+                var payloadStopNames = samsaraStops.Select(stop => stop.Name).ToList();
+                logger.LogWarning(
+                    "Samsara export blocked for run {RunId} ({Reference}): source stops {SourceStopCount}, payload stops {PayloadStopCount} ({PayloadStopNames}).",
+                    load.Id,
+                    load.Reference,
+                    orderedStops.Count,
+                    samsaraStops.Count,
+                    string.Join(", ", payloadStopNames));
+
+                return BadRequest(new
+                {
+                    message = $"Samsara export was stopped because {load.Reference} produced only {samsaraStops.Count} usable stop(s). At least two planned stops are required.",
+                    runId = load.Id,
+                    sourceStopCount = orderedStops.Count,
+                    payloadStopCount = samsaraStops.Count,
+                    payloadStops = payloadStopNames
+                });
+            }
+
             // Mapping pre-sync normally means these are local lookups only. Keep them
             // sequential because EF Core does not permit concurrent operations on one DbContext.
             var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
