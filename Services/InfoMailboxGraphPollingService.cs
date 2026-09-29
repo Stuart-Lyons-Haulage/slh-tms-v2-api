@@ -230,13 +230,13 @@ public sealed class InfoMailboxGraphPollingService(
 
         await AppendMessagePagesAsync(client, accessToken, next, messages, limit, ct);
 
-        // Some NWF reports have been visible in Outlook search but not returned by
-        // the normal Inbox page. Search the subject index as a bounded customer-
-        // specific safety net. This is deliberately limited to NWAY subject lines
-        // so unrelated mail is not pulled into the intake lane.
+        // BCC'd NWF reports may not expose info@ in To/Cc and may be materialised
+        // outside the Inbox collection. Search the whole mailbox subject index as a
+        // bounded customer-specific safety net. This is deliberately limited to
+        // NWAY subject lines so unrelated mail is not pulled into the intake lane.
         var supplementalSearch = Uri.EscapeDataString("subject:NWAY");
         var supplemental =
-            $"users/{mailbox}/mailFolders/inbox/messages" +
+            $"users/{mailbox}/messages" +
             "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,body,bodyPreview,from,toRecipients,ccRecipients,importance,webLink,hasAttachments" +
             $"&$search=\"{supplementalSearch}\"&$top=50";
 
