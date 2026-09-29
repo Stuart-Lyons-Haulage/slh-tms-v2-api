@@ -108,6 +108,29 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void NisaPdfBooking_Stages_each_destination_as_a_separate_stop()
+    {
+        var body = """
+Please be advised that a total of 1 pallet space will be required to accommodate all three destinations.
+
+BARBOG Nisa Retail Ltd Nisa Retail Ltd (Harlow) 30/09/2026 5168879/3565164 30 1
+BARBOG Nisa Retail Ltd Nisa Retail Ltd (Livingston) 30/09/2026 5168880/3565162 7 1
+BARBOG Nisa Retail Ltd Nisa Retail Ltd (Stoke) 30/09/2026 5168878/3565163 15 1
+""";
+
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-nisa-pdf-booking", null, "info@lyonshaulage.com",
+            "Mariela.Popova@barfoots.co.uk", "Barfoots",
+            "NISA pallet booking for depot 30/09/26.", DateTimeOffset.Parse("2026-09-29T12:12:42Z"),
+            body, null, null, null));
+
+        Assert.Equal(3, result.Orders.Count);
+        Assert.Equal(new[] { "Harlow", "Livingston", "Stoke" }, result.Orders.Select(order => order.Payload.GetProperty("stallNumber").GetString() ?? string.Empty).ToArray());
+        Assert.All(result.Orders, order => Assert.Equal(1, order.Payload.GetProperty("pallets").GetInt32()));
+        Assert.All(result.Orders, order => Assert.Equal(3, order.Payload.GetProperty("nisaStopCount").GetInt32()));
+    }
+
+    [Fact]
     public void DoubleH_week_commencing_context_uses_actual_weekday_movement_date()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

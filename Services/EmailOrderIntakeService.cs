@@ -137,6 +137,11 @@ public sealed class EmailOrderIntakeService
         var globalWarnings = new List<string>(pdfWarnings);
         var orders = new List<ParsedEmailOrder>();
 
+        // NISA also arrives as a PDF rather than the legacy workbook. Parse the
+        // depot rows before the generic body parser can collapse the message into
+        // one Barfoots placeholder.
+        orders.AddRange(ParseNisaPdfRows(request, body));
+
         foreach (var attachment in request.Attachments ?? [])
         {
             if (attachment.IsInline == true || string.IsNullOrWhiteSpace(attachment.EffectiveContentBase64))
@@ -774,16 +779,18 @@ public sealed class EmailOrderIntakeService
         var headerIndex = rows.FindIndex(row =>
         {
             var keys = row.Select(value => NormaliseKey(CellText(value))).Where(value => value.Length > 0).ToHashSet();
-            return (keys.Contains("pallets") || keys.Contains("palletcount") || keys.Contains("quantity")) &&
-                   (keys.Contains("location") || keys.Contains("deliverylocation") || keys.Contains("depot") ||
+            return (keys.Contains("pallets") || keys.Contains("palletcount") || keys.Contains("quantity") || keys.Contains("numberofpallets") || keys.Contains("numberofbasepallets")) &&
+                   (keys.Contains("location") || keys.Contains("deliverylocation") || keys.Contains("depot") || keys.Contains("receivingdepot") ||
                     keys.Contains("destination") || keys.Contains("deliverysite"));
         });
         if (headerIndex < 0) return [];
 
         var columns = HeaderMap(rows[headerIndex]);
-        var dateIndex = FindColumn(columns, "deliverydate", "date", "bookingdate", "depotdate");
-        var destinationIndex = FindColumn(columns, "deliverylocation", "location", "depotdescription", "depot", "destination", "deliverysite");
-        var attachmentPalletsIndex = FindColumn(columns, "pallets", "palletcount", "quantity", "qty");
+        var collectionDateIndex = FindColumn(columns, "dateofcollection", "collectiondate", "collection");
+        var dateIndex = FindColumn(columns, "deliverydate", "dateofdelivery", "date", "bookingdate", "depotdate");
+        var destinationIndex = FindColumn(columns, "deliverylocation", "location", "depotdescription", "depot", "receivingdepot", "destination", "deliverysite");
+        var attachmentPalletsIndex = FindColumn(columns, "pallets", "palletcount", "numberofpallets", "numberofbasepallets", "quantity", "qty");
+        var referenceIndex = FindColumn(columns, "cooperativepurchasordernumber", "cooperativepurchaseordernumber", "customerref", "orderno", "ordernumber", "po", "ponumber");
         if (dateIndex < 0 || destinationIndex < 0) return [];
 
         var bodyPallets = ExtractInt(TotalPalletsRegex, body, "qty")
@@ -799,11 +806,14 @@ public sealed class EmailOrderIntakeService
         for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
         {
             var row = rows[rowIndex];
-            var destination = CleanSourceLine(CellText(row, destinationIndex));
+            var destination = CleanSourceLine(CellText(row, destinationIndex) ?? string.Empty);
             if (string.IsNullOrWhiteSpace(destination)) continue;
 
             var deliveryDate = ParseDateText(CellText(row, dateIndex), request.ReceivedAtUtc ?? DateTimeOffset.UtcNow);
             if (deliveryDate is null) continue;
+            var collectionDate = collectionDateIndex >= 0
+                ? ParseDateText(CellText(row, collectionDateIndex), request.ReceivedAtUtc ?? DateTimeOffset.UtcNow) ?? deliveryDate
+                : deliveryDate;
 
             var pallets = isNisa
                 ? bodyPallets!.Value
@@ -821,21 +831,98 @@ public sealed class EmailOrderIntakeService
             if (string.IsNullOrWhiteSpace(collectionSite))
                 warnings.Add("Collection site was not explicit in the email body and needs review.");
 
-            results.Add(BuildStructuredOrder(
+            var rowReference = referenceIndex >= 0 ? CleanSourceLine(CellText(row, referenceIndex) ?? string.Empty) : null;
+            if (string.IsNullOrWhiteSpace(rowReference)) rowReference = null;
+            results.Add(BuildNisaOrder(
                 request,
                 $"attachment-driven-{(isNisa ? "nisa" : "coop")}-{NormaliseKey(destination)}-{rowIndex}",
                 isNisa ? "BARFOOTS" : "COOP",
-                ExtractPo($"{request.Subject}\n{body}"),
-                deliveryDate.Value,
+                rowReference ?? ExtractPo($"{request.Subject}\n{body}"),
+                collectionDate.Value,
                 deliveryDate.Value,
                 pallets!.Value,
                 collectionSite,
                 destination,
                 isNisa ? "NISA pallet booking" : "Co-op attachment booking",
-                warnings));
+                warnings,
+                attachment.Name,
+                isNisa ? bodyPallets : null));
         }
         return results;
     }
+
+    private static List<ParsedEmailOrder> ParseNisaPdfRows(MailboxEmailIntakeRequest request, string body)
+    {
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{body}";
+        if (!source.Contains("NISA", StringComparison.OrdinalIgnoreCase) ||
+            !source.Contains("Nisa Retail Ltd", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        var sharedPalletSpace = ExtractInt(PalletQuantityRegex, request.BodyText ?? string.Empty, "qty")
+                                ?? ExtractInt(PalletQuantityRegex, body, "qty");
+        if (sharedPalletSpace is not > 0) return [];
+
+        var rowPattern = @"(?im)^\s*(?<collection>[A-Z0-9]+)\s+Nisa\s+Retail\s+Ltd\s+Nisa\s+Retail\s+Ltd\s+\((?<destination>[^)\r\n]+)\)\s+(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\s+(?<reference>[A-Z0-9][A-Z0-9/-]+)\s+(?<cases>\d+)\s+(?<attachmentPallets>\d+)\b";
+        var matches = Regex.Matches(body, rowPattern).Cast<Match>().ToList();
+        if (matches.Count == 0) return [];
+
+        var results = new List<ParsedEmailOrder>();
+        foreach (var match in matches)
+        {
+            var date = ParseDateText(match.Groups["date"].Value, request.ReceivedAtUtc ?? DateTimeOffset.UtcNow);
+            if (date is null) continue;
+            var destination = CleanSourceLine(match.Groups["destination"].Value);
+            var warnings = new List<string>
+            {
+                "NISA PDF delivery rows were read from the attachment; pallet quantity was taken from the email body.",
+                $"The email states {sharedPalletSpace} shared pallet space across {matches.Count} NISA destinations; retain these as separate stops and confirm the physical load before approval."
+            };
+            results.Add(BuildNisaOrder(
+                request,
+                $"nisa-pdf-{NormaliseKey(destination)}",
+                "BARFOOTS",
+                match.Groups["reference"].Value.Trim(),
+                date.Value,
+                date.Value,
+                sharedPalletSpace.Value,
+                ExtractBodyCollectionPoint(body) ?? InferCollectionSiteFromSender(request.SenderAddress) ?? "Barfoots",
+                destination,
+                "NISA pallet booking",
+                warnings,
+                FindNisaAttachmentName(request),
+                sharedPalletSpace.Value));
+        }
+        return results;
+    }
+
+    private static ParsedEmailOrder BuildNisaOrder(
+        MailboxEmailIntakeRequest request,
+        string sourceKey,
+        string customer,
+        string? rawPo,
+        DateOnly collectionDate,
+        DateOnly deliveryDate,
+        int pallets,
+        string? collection,
+        string destination,
+        string jobType,
+        IReadOnlyList<string> warnings,
+        string? attachmentName,
+        int? sharedPalletSpace)
+    {
+        var order = BuildStructuredOrder(request, sourceKey, customer, rawPo, collectionDate, deliveryDate, pallets, collection, destination, jobType, warnings);
+        var fields = JsonSerializer.Deserialize<Dictionary<string, object?>>(order.Payload.GetRawText())!;
+        fields["sourceAttachmentName"] = attachmentName;
+        fields["nisaStopCount"] = 3;
+        fields["nisaSharedPalletSpace"] = sharedPalletSpace;
+        fields["sourceAttachmentPallets"] = pallets;
+        fields["intakeParser"] = "NISA workbook/PDF booking";
+        return new ParsedEmailOrder(order.SourceKey, order.NaturalKey, JsonSerializer.SerializeToElement(fields), warnings);
+    }
+
+    private static string? FindNisaAttachmentName(MailboxEmailIntakeRequest request) =>
+        (request.Attachments ?? []).FirstOrDefault(item => item.IsInline != true &&
+            (item.Name ?? string.Empty).Contains("NISA", StringComparison.OrdinalIgnoreCase))?.Name;
 
     private static string? ExtractBodyCollectionPoint(string body)
     {
