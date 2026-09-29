@@ -12,6 +12,37 @@ namespace Slh.Tms.Api.Tests;
 public sealed class PlanningResilienceAuditFallbackTests
 {
     [Fact]
+    public async Task Run_reader_keeps_30_September_2026_separate_from_adjacent_operating_days()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        var target = new DateOnly(2026, 9, 30);
+
+        db.Loads.AddRange(
+            new Load
+            {
+                Id = Guid.NewGuid(), Reference = "RUN-20260930-01", PlanningDate = target,
+                Status = LoadStatus.Draft,
+                Stops = [new LoadStop { Id = Guid.NewGuid(), Name = "Collect · 30 September" }]
+            },
+            new Load
+            {
+                Id = Guid.NewGuid(), Reference = "RUN-20261001-01", PlanningDate = target.AddDays(1),
+                Status = LoadStatus.Draft,
+                Stops = [new LoadStop { Id = Guid.NewGuid(), Name = "Collect · 1 October" }]
+            });
+        await db.SaveChangesAsync();
+
+        var rows = await PlanningResilience.ReadLoadsAsync(db, target, CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RUN-20260930-01", row.Reference);
+        Assert.Equal(target, row.PlanningDate);
+    }
+
+    [Fact]
     public async Task Full_imported_plan_is_recovered_when_only_one_live_run_survives()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()

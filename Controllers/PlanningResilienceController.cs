@@ -219,10 +219,10 @@ internal static class PlanningResilience
 
     public static async Task<Load?> ReadLoadAsync(TmsDbContext db, Guid id, CancellationToken ct)
     {
+        Load? registered = null;
         try
         {
-            var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
-            if (registered is not null) return registered;
+            registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -235,13 +235,15 @@ internal static class PlanningResilience
             if (live is not null)
             {
                 TmsMetrics.Shared.RecordPlanningRecovery(1, "relational_loads");
-                return live;
+                return registered is null ? live : PreferSameIdCopy(registered, live);
             }
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
             db.ChangeTracker.Clear();
         }
+
+        if (registered is not null) return registered;
 
         try
         {

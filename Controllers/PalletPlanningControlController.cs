@@ -299,25 +299,18 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
 
     private async Task<List<Load>> ReadLoads(DateOnly date, CancellationToken ct)
     {
-        try
-        {
-            var primary = await db.Loads.AsNoTracking().Include(x => x.Stops).Where(x => x.PlanningDate == date).OrderBy(x => x.Reference).Take(1000).ToListAsync(ct);
-            await LoadCommercialStore.EnrichAsync(db, primary, ct);
-            var registered = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
-            foreach (var row in registered.Where(x => primary.All(p => p.Id != x.Id))) primary.Add(row);
-            return primary;
-        }
-        catch (Exception ex) when (SchemaUnavailable(ex))
-        {
-            db.ChangeTracker.Clear();
-            return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
-        }
+        // Pallet Control must use the same resilient merge as Planner and Dispatch. The old
+        // reader preferred the live SQL row for a matching ID but preferred the register row's
+        // stale stops/details in other paths, so the three operational surfaces could disagree
+        // immediately after a run was created or its stops were saved.
+        var loads = await PlanningResilience.ReadLoadsAsync(db, date, ct);
+        try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Planning-control live load read failed; continuing from the audited planning register.");
+            logger.LogWarning(ex, "Planning-control run enrichment was unavailable; returning the persisted run set.");
             db.ChangeTracker.Clear();
-            return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
         }
+        return loads;
     }
 
     private async Task<Dictionary<string, OrderDetail>> ReadOrderDetails(DateOnly date, CancellationToken ct)
