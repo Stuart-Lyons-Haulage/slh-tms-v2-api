@@ -220,4 +220,42 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         var payload = await response.Content.ReadAsStringAsync();
         Assert.Contains("invalidEvidence", payload, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Staging_refresh_returns_waitrose_projection_without_reparsing_or_500()
+    {
+        var id = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                Id = id,
+                EntityType = "order",
+                IdempotencyKey = $"refresh-waitrose-{id:N}",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    customerCode = "WAITROSE",
+                    poNumber = "O79001/3564471",
+                    pallets = 2,
+                    casesOrdered = 196,
+                    palletType = "Standard",
+                    collectionDate = "2026-09-30",
+                    deliveryDate = "2026-09-30"
+                }),
+                Status = StagingStatus.PendingReview,
+                Source = "Info mailbox / goods.innv@barfoots.co.uk",
+                ReceivedAtUtc = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Read");
+        var response = await client.GetAsync("/api/v1/staging?entityType=order&take=20");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.Contains(id.ToString(), payload, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("O79001/3564471", payload, StringComparison.Ordinal);
+    }
 }
