@@ -33,10 +33,6 @@ public sealed class InfoMailboxGraphOptions
     public int OverlapMinutes { get; set; } = 1440;
     public int MaxMessagesPerPoll { get; set; } = 250;
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
-    // Comma/semicolon-separated customer domains that should be inspected in the
-    // whole mailbox, including messages where info@ is only BCC'd.
-    public string CustomerSenderDomains { get; set; } =
-        "doubleh.co.uk;vitacress.com;sainsburys.com;nwfltd.co.uk;greenhousesussex.co.uk;thegreenhousesussex.co.uk;summerberry.co.uk";
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(TenantId) &&
@@ -163,13 +159,11 @@ public sealed class InfoMailboxGraphPollingService(
             ? DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.InitialLookbackHours, 1, 168))
             : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 60, 10080));
 
-        var configuredDomains = ParseDomains(options.CustomerSenderDomains);
         var mappedDomains = await db.CustomerEmailRoutes.AsNoTracking()
             .Where(route => route.Active && route.SenderDomain != null)
             .Select(route => route.SenderDomain!)
             .ToListAsync(ct);
-        var customerDomains = configuredDomains
-            .Concat(mappedDomains.Select(NormalizeDomain).Where(item => item is not null).Select(item => item!))
+        var customerDomains = mappedDomains.Select(NormalizeDomain).Where(item => item is not null).Select(item => item!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -616,15 +610,6 @@ public sealed class InfoMailboxGraphPollingService(
         return domains.Any(root => senderDomain.Equals(root, StringComparison.OrdinalIgnoreCase) ||
             senderDomain.EndsWith("." + root, StringComparison.OrdinalIgnoreCase));
     }
-
-    private static IReadOnlyList<string> ParseDomains(string? value) =>
-        (value ?? string.Empty)
-            .Split(new[] { ';', ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(NormalizeDomain)
-            .Where(item => item is not null)
-            .Select(item => item!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
 
     private static string? NormalizeDomain(string? value)
     {
