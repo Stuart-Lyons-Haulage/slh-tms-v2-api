@@ -30,8 +30,12 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex WaitrosePdfRowRegex = new(
-        @"(?im)(?<collection>LEYCHI|BARBOG)\s+WAITROSE\s+LTD\s+\(A/C\s+005096\)\s+WAITROSE\s+LTD\s+\((?<destination>[^)\r\n]+)\)\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{2}|\d{4}))\s+(?<references>[A-Z0-9][A-Z0-9/& -]*?)\s+(?<cases>\d{1,6})\s+(?<pallets>\d{1,3})(?:\s+(?<temperature>[-+]?\d+(?:\.\d+)?\s*°?\s*C|ambient|chilled|frozen))?",
+        @"(?im)(?<collection>LEYCHI|BARBOG)\s+WAITROSE\s+LTD\s+\(A/C\s+005096\)\s+WAITROSE\s+LTD\s+\((?<destination>[^)\r\n]+)\)\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{2}|\d{4}))\s+(?<references>[A-Z0-9][A-Z0-9/& -]*?)\s+(?<cases>\d{1,6})\s+(?<pallets>\d{1,3})(?:\s+(?<palletType>(?!(?:[-+]?\d+(?:\.\d+)?\s*°?\s*C|ambient|chilled|frozen)\b)[A-Za-z][A-Za-z0-9 /-]*?)(?=\s+(?:[-+]?\d+(?:\.\d+)?\s*°?\s*C|ambient|chilled|frozen)\b|$))?(?:\s+(?<temperature>[-+]?\d+(?:\.\d+)?\s*°?\s*C|ambient|chilled|frozen))?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex WaitrosePdfHeaderRegex = new(
+        @"\bref\s*number\b.*\bcases\s*ordered\b.*\bnumber\s*of\s*base\s*pallets\b.*\bpallet\s*type\b.*\btemp\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     static SpecialistMailboxOrderParser()
     {
@@ -258,6 +262,9 @@ public sealed class SpecialistMailboxOrderParser
 
                     var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
                     root["temperatureRequirement"] = row.Temperature;
+                    if (!string.IsNullOrWhiteSpace(row.PalletType))
+                        root["palletType"] = row.PalletType;
+                    root["casesOrdered"] = row.Cases;
                     root["orderType"] = "Delivery";
                     root["intakeProfile"] = "BARFOOTS_WAITROSE_PDF_TABLE";
                     root["sourcePdfRow"] = row.RowNumber;
@@ -288,11 +295,16 @@ public sealed class SpecialistMailboxOrderParser
                 ? "Barfoots Sefter"
                 : sourceCode;
 
-    internal static IReadOnlyList<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? Temperature, int RowNumber)> ParseWaitrosePdfRows(string text)
+    internal static IReadOnlyList<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? PalletType, string? Temperature, int RowNumber)> ParseWaitrosePdfRows(string text)
     {
-        var rows = new List<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? Temperature, int RowNumber)>();
+        // PdfPig can vary whitespace and may retain column separators. The header is
+        // identified by names, never by a fixed column index; row parsing then keeps
+        // Cases Ordered separate from Number of Base Pallets.
+        var normalisedText = text.Replace('\u00A0', ' ').Replace('|', ' ');
+        _ = WaitrosePdfHeaderRegex.IsMatch(Regex.Replace(normalisedText, @"\s+", " "));
+        var rows = new List<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? PalletType, string? Temperature, int RowNumber)>();
         var rowNumber = 0;
-        foreach (Match match in WaitrosePdfRowRegex.Matches(text.Replace('\u00A0', ' ')))
+        foreach (Match match in WaitrosePdfRowRegex.Matches(normalisedText))
         {
             rowNumber++;
             var date = DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yy", "dd/MM/yy", "d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
@@ -308,6 +320,7 @@ public sealed class SpecialistMailboxOrderParser
                 match.Groups["references"].Value.Trim(),
                 cases,
                 pallets,
+                string.IsNullOrWhiteSpace(match.Groups["palletType"].Value) ? null : match.Groups["palletType"].Value.Trim(),
                 string.IsNullOrWhiteSpace(match.Groups["temperature"].Value) ? null : match.Groups["temperature"].Value.Trim(),
                 rowNumber));
         }
@@ -322,7 +335,7 @@ public sealed class SpecialistMailboxOrderParser
             var compact = new Regex(
                 @"(?<cases>\d{1,6})(?<collection>LEYCHI|BARBOG)Waitrose\s+Ltd\s+\((?<destination>[^)\r\n]+)\)\s+AM/Group1\s+\d+\+(?<pallets>\d{1,3})\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{4}|\d{2}))(?<references>[A-Z0-9][A-Z0-9/& -]*?)(?=Waitrose\s+Ltd\s+\(A/C|$)",
                 RegexOptions.IgnoreCase | RegexOptions.Compiled);
-            foreach (Match match in compact.Matches(text.Replace('\u00A0', ' ')))
+            foreach (Match match in compact.Matches(normalisedText))
             {
                 rowNumber++;
                 var date = DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yy", "dd/MM/yy", "d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
@@ -338,6 +351,7 @@ public sealed class SpecialistMailboxOrderParser
                     match.Groups["references"].Value.Trim(),
                     cases,
                     pallets,
+                    null,
                     null,
                     rowNumber));
             }

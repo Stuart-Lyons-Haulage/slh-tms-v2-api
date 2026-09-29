@@ -12,11 +12,11 @@ public sealed class SpecialistMailboxOrderParserTests
     public void WaitrosePdfTable_ExtractsEveryDepotRowAndTemperature()
     {
         const string text = """
-            COLLECTION POINT CUSTOMER NAME DELIVERY POINT DELIVERY DATE CUSTOMER REF / ORDER No. CASES ORDERED NUMBER OF BASE PALLETS TEMP
-            LEYCHI Waitrose Ltd (A/C 005096) Waitrose Ltd (Aylesford) 29/09/2026 O79001/3564471 196 2 +2 C
-            LEYCHI Waitrose Ltd (A/C 005096) Waitrose Ltd (Leyland) 29/09/2026 B79335/3564310 80 1 +2 C
-            BARBOG Waitrose Ltd (A/C 005096) Waitrose Ltd (Bracknell) 29/09/2026 K78937/3556123 830 12 Ambient
-            BARBOG Waitrose Ltd (A/C 005096) Waitrose Ltd (Brinklow Chill) 29/09/2026 P72621/3564470 64 1 Chilled
+            COLLECTION POINT CUSTOMER NAME DELIVERY POINT DELIVERY DATE REF NUMBER CASES ORDERED NUMBER OF BASE PALLETS PALLET TYPE TEMP
+            LEYCHI Waitrose Ltd (A/C 005096) Waitrose Ltd (Aylesford) 29/09/2026 O79001/3564471 196 2 Standard +2 C
+            LEYCHI Waitrose Ltd (A/C 005096) Waitrose Ltd (Leyland) 29/09/2026 B79335/3564310 80 1 Standard +2 C
+            BARBOG Waitrose Ltd (A/C 005096) Waitrose Ltd (Bracknell) 29/09/2026 K78937/3556123 830 12 Euro Ambient
+            BARBOG Waitrose Ltd (A/C 005096) Waitrose Ltd (Brinklow Chill) 29/09/2026 P72621/3556123 64 1 Standard Chilled
             """;
 
         var rows = IntakeParser.ParseWaitrosePdfRows(text);
@@ -26,8 +26,14 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal("LEYCHI", rows[0].Collection);
         Assert.Equal("Aylesford", rows[0].Destination);
         Assert.Equal("O79001/3564471", rows[0].References);
+        Assert.Equal(196, rows[0].Cases);
+        Assert.Equal(2, rows[0].Pallets);
+        Assert.Equal("Standard", rows[0].PalletType);
         Assert.Equal("+2 C", rows[0].Temperature);
         Assert.Equal("Brinklow Chill", rows[3].Destination);
+        Assert.Equal(64, rows[3].Cases);
+        Assert.Equal(1, rows[3].Pallets);
+        Assert.Equal("Standard", rows[3].PalletType);
         Assert.Equal("Chilled", rows[3].Temperature);
     }
 
