@@ -47,13 +47,13 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         ReadPagedAsync($"assets?type={Uri.EscapeDataString(type)}&includeExternalIds=true", ParseAsset, ct);
 
     public Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, CancellationToken ct) =>
-        UpsertAssetAsync(asset, null, ct);
+        UpsertAssetAsync(asset, null, lookupIfMissing: true, ct);
 
-    public async Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, SamsaraAsset? knownExisting, CancellationToken ct)
+    public async Task<SamsaraAssetUpsertResult> UpsertAssetAsync(SamsaraAssetRequest asset, SamsaraAsset? knownExisting, bool lookupIfMissing, CancellationToken ct)
     {
         EnsureConfigured();
         var externalId = ExternalAssetId(asset.EntityType, asset.ExternalReference);
-        var existing = knownExisting ?? await FindAssetByExternalIdAsync(asset.Type, externalId, ct);
+        var existing = knownExisting ?? (lookupIfMissing ? await FindAssetByExternalIdAsync(asset.Type, externalId, ct) : null);
         var payload = AssetPayload(asset, externalId);
 
         if (existing is not null)

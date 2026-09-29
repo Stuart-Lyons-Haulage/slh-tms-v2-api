@@ -379,8 +379,11 @@ public sealed class SamsaraDispatchController(
         {
             try
             {
-                var existing = existingAssets.FirstOrDefault(item => item.ExternalIds.TryGetValue(options.AssetExternalIdKey, out var value) && string.Equals(value, reference, StringComparison.OrdinalIgnoreCase));
-                var result = await samsara.UpsertAssetAsync(new SamsaraAssetRequest(type, entityType, reference, name, licensePlate, vin, notes, options.AssetExternalIdKey), existing, token);
+                var existing = existingAssets.FirstOrDefault(item =>
+                    (item.ExternalIds.TryGetValue(options.AssetExternalIdKey, out var value) && string.Equals(value, reference, StringComparison.OrdinalIgnoreCase)) ||
+                    (!string.IsNullOrWhiteSpace(licensePlate) && string.Equals(item.LicensePlate, licensePlate, StringComparison.OrdinalIgnoreCase)) ||
+                    (string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)));
+                var result = await samsara.UpsertAssetAsync(new SamsaraAssetRequest(type, entityType, reference, name, licensePlate, vin, notes, options.AssetExternalIdKey), existing, lookupIfMissing: false, token);
                 var entityId = Guid.ParseExact(reference, "N");
                 await SaveMappingAsync(entityType, entityId, result.Id ?? result.ExternalId, name, token);
                 results.Add(new { entityType, reference = name, status = result.Created ? "created" : "updated" });
