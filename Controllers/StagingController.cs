@@ -248,7 +248,12 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         var customerCodes = string.Equals(customerCode, "COVENTGARDEN", StringComparison.OrdinalIgnoreCase)
             ? new[] { "COVENTGARDEN", "COVMKT" }
             : new[] { customerCode };
-        if (!await db.Customers.AsNoTracking().AnyAsync(item => item.Active && customerCodes.Contains(item.Code), ct)) return $"Customer {customerCode} is not present in active Customer Master.";
+        var activeCustomerCodes = await db.Customers.AsNoTracking()
+            .Where(item => item.Active)
+            .Select(item => item.Code)
+            .ToListAsync(ct);
+        if (!activeCustomerCodes.Any(activeCode => customerCodes.Any(expectedCode => CustomerCodeMatcher.Equivalent(activeCode, expectedCode))))
+            return $"Customer {customerCode} is not present in active Customer Master.";
         if (!DateOnly.TryParse(Text(payload, "collectionDate"), out _)) return "Collection date is missing or invalid.";
         if (string.IsNullOrWhiteSpace(collection)) return "Collection point is missing.";
         if (string.IsNullOrWhiteSpace(delivery)) return "Delivery point is missing.";
