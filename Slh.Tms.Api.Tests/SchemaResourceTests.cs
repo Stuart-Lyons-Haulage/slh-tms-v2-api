@@ -42,6 +42,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.079_Booking_Invoice_History.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.080_Invoice_Line_Booking_Reservation.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.081_Booking_Allocation_Unmatch.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.084_Canonical_Summer_Berry_Customer.sql", resources);
     }
 
     [Fact]
@@ -97,7 +98,8 @@ public sealed class SchemaResourceTests
             "080_Invoice_Line_Booking_Reservation.sql",
             "081_Booking_Allocation_Unmatch.sql",
             "082_Barfoots_Physical_North_South_Sites.sql",
-            "083_Site_Samsara_Identity.sql"
+            "083_Site_Samsara_Identity.sql",
+            "084_Canonical_Summer_Berry_Customer.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }

@@ -84,7 +84,7 @@ public sealed class EmailOrderIntakeServiceTests
             "Could you please organise collection for the below\nNorthampton\n18/08\nTHE359/348310", null, null, null));
 
         var order = Assert.Single(result.Orders);
-        Assert.Equal("TSBC", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("SUMMERBERRY", order.Payload.GetProperty("customerCode").GetString());
         Assert.Equal("2026-08-18", order.Payload.GetProperty("collectionDate").GetString());
         Assert.Equal("Northampton", order.Payload.GetProperty("sellerName").GetString());
         Assert.Equal("THE359/348310/NORTHAMPTON", order.Payload.GetProperty("poNumber").GetString());

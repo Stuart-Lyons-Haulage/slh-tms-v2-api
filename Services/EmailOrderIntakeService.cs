@@ -2158,7 +2158,10 @@ public sealed class EmailOrderIntakeService
                     .Replace("LANGMEAD", "LANGMEADS", StringComparison.OrdinalIgnoreCase);
         }
         if ((senderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase)) return "NWF";
-        if ((senderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)) return "TSBC";
+        // TSBC is the source abbreviation used in some subjects/bodies. The SQL
+        // customer master key is SUMMERBERRY, so generic sender fallback must emit
+        // the canonical key or approval/mapping validation cannot resolve it.
+        if ((senderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)) return "SUMMERBERRY";
         if ((senderAddress ?? string.Empty).EndsWith("@hillsplants.com", StringComparison.OrdinalIgnoreCase)) return "HILLBROTHERS";
         if ((senderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
             (senderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase)) return "LANGMEADS";
