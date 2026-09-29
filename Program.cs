@@ -284,6 +284,7 @@ builder.Services.Configure<HostOptions>(options =>
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<TachoDriverHoursRefreshWorker>();
+builder.Services.AddHostedService<IntegrationSyncSchedulerBackgroundService>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();

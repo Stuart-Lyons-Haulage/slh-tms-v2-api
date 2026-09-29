@@ -22,7 +22,7 @@ public sealed class DependencyHealthService(
         ["RoadTech"] = "live every minute · history every 5 minutes",
         ["TachoMaster"] = "every 20 minutes",
         ["Fleetio"] = "every hour",
-        ["Sage HR"] = "05:30 Europe/London daily"
+        ["Sage HR"] = "05:00 and 14:00 Europe/London daily"
     };
 
     public async Task<DependencyHealthSnapshot> GetSnapshotAsync(CancellationToken ct)
