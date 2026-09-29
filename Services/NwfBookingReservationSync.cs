@@ -49,6 +49,30 @@ public static class NwfBookingReservationSync
                 if (sourceRowCandidates.Count == 1)
                     existing = await db.BookingReservations.SingleAsync(row => row.Id == sourceRowCandidates[0], ct);
             }
+
+            // A Daily Tracker pre-order can arrive before the authoritative pallet
+            // workbook. The later workbook often supplies the PO and sales order but
+            // uses a different parser natural key, so match only one unambiguous active
+            // pre-order on the retained business identity. Ambiguous candidates remain
+            // separate and visible for planner review.
+            if (existing is null)
+            {
+                var incomingPo = FirstText(payload, "poRef", "customerPo", "productPo", "transportPo", "nwfPoRef");
+                var incomingSales = FirstText(payload, "salesOrderId", "nwfSalesOrderId");
+                var incomingCollection = FirstText(payload, "collectionLocation", "collectionSite", "sellerName");
+                var incomingDestination = FirstText(payload, "deliveryLocation", "nwfDepotDescription", "stallNumber", "deliverySite", "deliveryAddress");
+                var incomingKeys = ReadMatchKeys(payload);
+                var candidates = await db.BookingReservations
+                    .Where(row => row.CustomerCode == "NWF" && row.CollectionDate == collectionDate &&
+                        row.Status != BookingReservationStatus.Cancelled &&
+                        row.Status != BookingReservationStatus.Superseded &&
+                        row.Status != BookingReservationStatus.Expired)
+                    .OrderByDescending(row => row.UpdatedAtUtc)
+                    .Take(50)
+                    .ToListAsync(ct);
+                var matches = candidates.Where(row => MatchesBusinessIdentity(row, incomingPo, incomingSales, incomingCollection, incomingDestination, incomingKeys)).ToList();
+                if (matches.Count == 1) existing = matches[0];
+            }
         }
         var units = Decimal(payload, "pallets") ?? Decimal(payload, "palletQty") ?? 0;
         var now = DateTimeOffset.UtcNow;
@@ -139,6 +163,51 @@ public static class NwfBookingReservationSync
     private static BookingReservationRevision Revision(BookingReservation row, JsonElement payload, string note, string? actor, DateTimeOffset now) => new() { BookingReservationId = row.Id, RevisionNumber = row.CurrentRevisionNumber, Status = row.Status, SourceRowKey = Clip(Text(payload, "sourceRow") ?? Text(payload, "sourceRowKey"), 120), SourceMessageId = Clip(Text(payload, "sourceMessageId") ?? Text(payload, "sourceEmailMessageId"), 500), SourceAttachmentIdentity = Clip(Text(payload, "sourceAttachmentName"), 500), PayloadJson = payload.GetRawText(), ChangeNote = note, Actor = Clip(actor, 200), CreatedAtUtc = now };
     private static OperationalHistoryEvent Event(Guid id, string type, string eventType, object payload, string? actor, DateTimeOffset now) => new() { EntityId = id, EntityType = type, EventType = eventType, Actor = Clip(actor, 200), PayloadJson = JsonSerializer.Serialize(payload), OccurredAtUtc = now };
     private static string? Text(JsonElement payload, string name) => payload.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null && value.ValueKind != JsonValueKind.Undefined ? value.ToString().Trim() : null;
+    private static string? FirstText(JsonElement payload, params string[] names) => names.Select(name => Text(payload, name)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+    private static HashSet<string> ReadMatchKeys(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("intakeMatchKeys", out var values) || values.ValueKind != JsonValueKind.Array) return [];
+        return values.EnumerateArray().Select(value => Canonical(value.ToString())).Where(value => value.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesBusinessIdentity(
+        BookingReservation reservation,
+        string? incomingPo,
+        string? incomingSales,
+        string? incomingCollection,
+        string? incomingDestination,
+        IReadOnlySet<string> incomingKeys)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(reservation.CompositionJson);
+            var payload = document.RootElement;
+            var storedKeys = ReadMatchKeys(payload);
+            if (incomingKeys.Count > 0 && storedKeys.Overlaps(incomingKeys)) return true;
+
+            var storedPo = FirstText(payload, "poRef", "customerPo", "productPo", "transportPo", "nwfPoRef");
+            var storedSales = FirstText(payload, "salesOrderId", "nwfSalesOrderId");
+            var storedCollection = FirstText(payload, "collectionLocation", "collectionSite", "sellerName");
+            var storedDestination = FirstText(payload, "deliveryLocation", "nwfDepotDescription", "stallNumber", "deliverySite", "deliveryAddress");
+            var sameRoute = SamePlace(incomingCollection, storedCollection) && SamePlace(incomingDestination, storedDestination);
+            var samePo = !string.IsNullOrWhiteSpace(incomingPo) && Canonical(incomingPo) == Canonical(storedPo);
+            var sameSales = !string.IsNullOrWhiteSpace(incomingSales) && Canonical(incomingSales) == Canonical(storedSales);
+            return sameRoute && (samePo || sameSales);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool SamePlace(string? left, string? right)
+    {
+        var a = Canonical(left);
+        var b = Canonical(right);
+        return a.Length >= 4 && b.Length >= 4 && (a == b || a.Contains(b, StringComparison.OrdinalIgnoreCase) || b.Contains(a, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string Canonical(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool? Bool(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
     private static bool IsCancellation(JsonElement payload)
     {

@@ -762,14 +762,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 var amendmentMatch = matchKeys.Count > 0 &&
                                      ReadText(root, "amendmentMatchKey") is { Length: > 0 } candidateAmendmentKey &&
                                      matchKeys.Contains(CanonicalMatchKey(candidateAmendmentKey));
-                if (!naturalMatch && !stableMatch && !amendmentMatch)
+                var nwfBusinessMatch = missingOrders.Any(order => NwfBusinessIdentityMatches(root, order.Payload));
+                if (!naturalMatch && !stableMatch && !amendmentMatch && !nwfBusinessMatch)
                     continue;
 
                 var previous = candidate.Status;
                 candidate.Status = StagingStatus.Archived;
                 candidate.ReviewedAtUtc = now;
-                candidate.ReviewedBy = stableMatch || amendmentMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
-                candidate.ReviewNote = stableMatch || amendmentMatch
+                candidate.ReviewedBy = stableMatch || amendmentMatch || nwfBusinessMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
+                candidate.ReviewNote = stableMatch || amendmentMatch || nwfBusinessMatch
                     ? $"Superseded by a newer/amended Info mailbox message ({currentMessageId}). Original evidence retained."
                     : $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
                 db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
@@ -784,6 +785,39 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         return count;
     }
+
+    private static bool NwfBusinessIdentityMatches(JsonElement existing, JsonElement incoming)
+    {
+        if (!string.Equals(ReadText(existing, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(ReadText(incoming, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!DateOnly.TryParse(ReadText(existing, "collectionDate"), out var existingDate) ||
+            !DateOnly.TryParse(ReadText(incoming, "collectionDate"), out var incomingDate) || existingDate != incomingDate) return false;
+
+        var existingPo = FirstText(existing, "poRef", "customerPo", "productPo", "transportPo", "nwfPoRef");
+        var incomingPo = FirstText(incoming, "poRef", "customerPo", "productPo", "transportPo", "nwfPoRef");
+        var existingSales = FirstText(existing, "salesOrderId", "nwfSalesOrderId");
+        var incomingSales = FirstText(incoming, "salesOrderId", "nwfSalesOrderId");
+        var samePo = !string.IsNullOrWhiteSpace(existingPo) && CanonicalNwfValue(existingPo) == CanonicalNwfValue(incomingPo);
+        var sameSales = !string.IsNullOrWhiteSpace(existingSales) && CanonicalNwfValue(existingSales) == CanonicalNwfValue(incomingSales);
+        if (!samePo && !sameSales) return false;
+
+        var existingCollection = FirstText(existing, "collectionLocation", "collectionSite", "sellerName");
+        var incomingCollection = FirstText(incoming, "collectionLocation", "collectionSite", "sellerName");
+        var existingDestination = FirstText(existing, "deliveryLocation", "nwfDepotDescription", "stallNumber", "deliverySite", "deliveryAddress");
+        var incomingDestination = FirstText(incoming, "deliveryLocation", "nwfDepotDescription", "stallNumber", "deliverySite", "deliveryAddress");
+        return SameNwfPlace(existingCollection, incomingCollection) && SameNwfPlace(existingDestination, incomingDestination);
+    }
+
+    private static string? FirstText(JsonElement payload, params string[] names) => names.Select(name => ReadText(payload, name)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+    private static bool SameNwfPlace(string? left, string? right)
+    {
+        var a = CanonicalNwfValue(left);
+        var b = CanonicalNwfValue(right);
+        return a.Length >= 4 && b.Length >= 4 && (a == b || a.Contains(b, StringComparison.OrdinalIgnoreCase) || b.Contains(a, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string CanonicalNwfValue(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private async Task<int> SupersedeOlderPendingByMatchKeys(IReadOnlyCollection<string> currentKeys, string currentMessageId, CancellationToken ct)
     {

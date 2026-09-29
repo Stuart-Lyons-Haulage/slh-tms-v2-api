@@ -81,6 +81,13 @@ public sealed class NwfDailyTrackerParser
 
                 var orderReference = BuildReference(sourceRef, destination.Name);
                 var naturalKey = $"nwf|{date:yyyy-MM-dd}|{Normalise(loadRef)}|{Normalise(transportPo)}|{Normalise(productPo)}|{Normalise(destination.Name)}";
+                // Keep the same business match keys used by the later workbook/CSV
+                // snapshots. This lets a pre-order tracker row be superseded by the
+                // authoritative pallet sheet without relying on the generated reference.
+                var matchKeys = new List<string>();
+                AddMatchKey(matchKeys, date, "PRODUCT", productPo);
+                AddMatchKey(matchKeys, date, "TRANSPORT", transportPo);
+                AddMatchKey(matchKeys, date, "LOADING", loadingPlace);
                 var instructionParts = new[]
                 {
                     "Order type: NWF inbound",
@@ -124,6 +131,7 @@ public sealed class NwfDailyTrackerParser
                     ["sourceWebLink"] = request.WebLink,
                     ["sourceAttachmentName"] = (request.Attachments ?? []).FirstOrDefault(item => item.IsInline != true)?.Name,
                     ["intakeNaturalKey"] = naturalKey,
+                    ["intakeMatchKeys"] = matchKeys,
                     ["intakeConfidence"] = plannerReady && warnings.Count == 0 ? "High" : plannerReady ? "Medium" : "PreOrder",
                     ["intakeWarnings"] = warnings,
                     ["intakeParser"] = "NWF Daily Tracker"
@@ -155,6 +163,13 @@ public sealed class NwfDailyTrackerParser
 
     private static string Clean(string? value) => Regex.Replace((value ?? string.Empty).Trim(), @"\s+", " ");
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static void AddMatchKey(List<string> keys, DateOnly date, string type, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        var key = $"NWF|{date:yyyy-MM-dd}|{type}:{Normalise(value)}";
+        if (!keys.Contains(key, StringComparer.OrdinalIgnoreCase)) keys.Add(key);
+    }
 
     private static bool IsMeaningfulLoadRef(string? value) =>
         !string.IsNullOrWhiteSpace(value) && !string.Equals(Normalise(value), "SLH", StringComparison.OrdinalIgnoreCase);
