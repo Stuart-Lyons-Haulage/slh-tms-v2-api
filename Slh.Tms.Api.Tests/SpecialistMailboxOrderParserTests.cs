@@ -55,6 +55,24 @@ public sealed class SpecialistMailboxOrderParserTests
     }
 
     [Fact]
+    public void WaitrosePdfTable_SplitsPdfPigCompactTemperatureAndPalletColumns()
+    {
+        const string text = """
+            CUSTOMER CODECUSTOMER NAMEDELIVERY POINTNUMBER OFBASEPALLETSDELIVERY DATECASESORDEREDCUSTOMER REF /ORDER No.PALLET TYPEPL / EU / MUTEMPSHIPPER CODEBOBBOBCOLLECTION POINTStuart Lyons (Haulage) Ltd. For Depot Date: 30/09/2026 239LEYCHIWaitrose Ltd  (Aylesford) AM/Group1 272+82 30/09/2026O79035/3564895Waitrose Ltd (A/C 005096) 106BARBOGWaitrose Ltd (Leyland) AM/Group1 777+102 30/09/2026B79366/3564833Waitrose Ltd (A/C 005096)
+            """;
+
+        var rows = IntakeParser.ParseWaitrosePdfRows(text);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(239, rows[0].Cases);
+        Assert.Equal(2, rows[0].Pallets);
+        Assert.Equal("+8", rows[0].Temperature);
+        Assert.Equal(106, rows[1].Cases);
+        Assert.Equal(2, rows[1].Pallets);
+        Assert.Equal("+10", rows[1].Temperature);
+    }
+
+    [Fact]
     public void Vitacress_waitrose_collection_rows_preserve_dates_time_amendment_and_total()
     {
         var rows = new List<object?[]>

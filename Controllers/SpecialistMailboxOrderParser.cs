@@ -341,9 +341,11 @@ public sealed class SpecialistMailboxOrderParser
             // PdfPig can return this supplier PDF as a compact reading-order
             // stream, with the column separators removed. The row still has
             // stable anchors: cases -> collection code -> depot -> wave ->
-            // pallet count -> date -> references -> next customer name.
+            // pallet count -> date -> references -> next customer name. PdfPig
+            // joins the temperature and pallet columns, so +8 followed by 2
+            // becomes +82, while +10 followed by 3 becomes +103.
             var compact = new Regex(
-                @"(?<cases>\d{1,6})(?<collection>LEYCHI|BARBOG)Waitrose\s+Ltd\s+\((?<destination>[^)\r\n]+)\)\s+AM/Group1\s+\d+\+(?<pallets>\d{1,3})\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{4}|\d{2}))(?<references>[A-Z0-9][A-Z0-9/& -]*?)(?=Waitrose\s+Ltd\s+\(A/C|$)",
+                @"(?<cases>\d{1,6})(?<collection>LEYCHI|BARBOG)Waitrose\s+Ltd\s+\((?<destination>[^)\r\n]+)\)\s+AM/Group1\s+\d+(?<temperature>\+(?:10|\d))(?<pallets>\d{1,2})\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{4}|\d{2}))(?<references>[A-Z0-9][A-Z0-9/& -]*?)(?=Waitrose\s+Ltd\s+\(A/C|$)",
                 RegexOptions.IgnoreCase | RegexOptions.Compiled);
             foreach (Match match in compact.Matches(normalisedText))
             {
@@ -362,7 +364,7 @@ public sealed class SpecialistMailboxOrderParser
                     cases,
                     pallets,
                     null,
-                    null,
+                    match.Groups["temperature"].Value.Trim(),
                     rowNumber));
             }
         }
