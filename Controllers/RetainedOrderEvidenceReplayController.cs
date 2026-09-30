@@ -48,6 +48,22 @@ public sealed class RetainedOrderEvidenceReplayController(
             minimumPlanningDate,
             maximumPlanningDate,
             ct);
+        var pendingCandidates = request.RefreshUnamendedPending != false
+            ? await db.StagedImports
+                .Where(item => item.EntityType == "order" &&
+                               item.Status == StagingStatus.PendingReview &&
+                               item.ReceivedAtUtc >= receivedFromUtc)
+                .ToListAsync(ct)
+            : [];
+        var manuallyAmendedPendingIds = pendingCandidates.Count == 0
+            ? []
+            : (await db.StagedImportEvents.AsNoTracking()
+                .Where(item => item.EventType == "Amended" &&
+                               pendingCandidates.Select(candidate => candidate.Id).Contains(item.StagedImportId))
+                .Select(item => item.StagedImportId)
+                .ToListAsync(ct))
+                .ToHashSet();
+        var pendingKeysAfterReplay = new HashSet<string>(StringComparer.Ordinal);
         foreach (var evidence in evidenceRows)
         {
             ct.ThrowIfCancellationRequested();
@@ -129,6 +145,7 @@ public sealed class RetainedOrderEvidenceReplayController(
                 .Select(order => OrderIntakeController.BuildOrderIdempotencyKey(mailboxRequest.MessageId, order.SourceKey))
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
+            foreach (var key in keys) pendingKeysAfterReplay.Add(key);
 
             var archivedForRefresh = 0;
             var archivedOriginalIds = new List<Guid>();
@@ -139,15 +156,10 @@ public sealed class RetainedOrderEvidenceReplayController(
                 // source key. Match retained message evidence in memory after a
                 // bounded pending-review query so replay always replaces the stale
                 // import without relying on provider-specific JSON string translation.
-                var pendingCandidates = await db.StagedImports
-                    .Where(item => item.EntityType == "order" &&
-                                   item.Status == StagingStatus.PendingReview &&
-                                   item.ReceivedAtUtc >= receivedFromUtc)
-                    .ToListAsync(ct);
-
                 var existingPending = pendingCandidates
                     .Where(item =>
                     {
+                        if (item.Status != StagingStatus.PendingReview) return false;
                         // Refresh every unamended pending projection for this retained
                         // message, including one with the current deterministic key.
                         // The source evidence is authoritative: a parser correction or
@@ -160,10 +172,7 @@ public sealed class RetainedOrderEvidenceReplayController(
 
                 foreach (var pending in existingPending)
                 {
-                    var manuallyAmended = await db.StagedImportEvents.AsNoTracking()
-                        .AnyAsync(item => item.StagedImportId == pending.Id &&
-                                         item.EventType == "Amended", ct);
-                    if (manuallyAmended)
+                    if (manuallyAmendedPendingIds.Contains(pending.Id))
                     {
                         summary.ManuallyAmendedPreserved++;
                         continue;
@@ -237,12 +246,6 @@ public sealed class RetainedOrderEvidenceReplayController(
                     await db.SaveChangesAsync(ct);
             }
 
-            var stagedNow = await db.StagedImports.AsNoTracking()
-                .CountAsync(item => item.EntityType == "order" &&
-                                    item.Status == StagingStatus.PendingReview &&
-                                    keys.Contains(item.IdempotencyKey), ct);
-
-            summary.PendingAfterReplay += stagedNow;
             summary.Messages.Add(new ReplayMessageResult(
                 evidence.Id,
                 mailboxRequest.MessageId,
@@ -251,6 +254,14 @@ public sealed class RetainedOrderEvidenceReplayController(
                 replayableOrders.Count,
                 archivedForRefresh,
                 null));
+        }
+
+        if (pendingKeysAfterReplay.Count > 0)
+        {
+            summary.PendingAfterReplay = await db.StagedImports.AsNoTracking()
+                .CountAsync(item => item.EntityType == "order" &&
+                                    item.Status == StagingStatus.PendingReview &&
+                                    pendingKeysAfterReplay.Contains(item.IdempotencyKey), ct);
         }
 
         return Ok(new
