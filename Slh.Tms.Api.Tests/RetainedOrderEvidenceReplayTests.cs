@@ -186,7 +186,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            for (var index = 0; index < 21; index++)
+            for (var index = 0; index < 6; index++)
             {
                 var messageId = $"{prefix}-{index}";
                 db.StagedImports.Add(new StagedImport
@@ -218,7 +218,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         {
             receivedFromUtc = receivedFrom,
             minimumPlanningDate = "2026-09-27",
-            maxMessages = 20
+            maxMessages = 5
         };
 
         var first = await client.PostAsync(
@@ -236,7 +236,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
             {
                 receivedFromUtc = receivedFrom,
                 minimumPlanningDate = "2026-09-27",
-                maxMessages = 20,
+                maxMessages = 5,
                 afterReceivedAtUtc = nextReceived,
                 afterEvidenceId = nextId
             }), Encoding.UTF8, "application/json"));

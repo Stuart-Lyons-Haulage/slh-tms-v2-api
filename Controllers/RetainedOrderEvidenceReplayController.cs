@@ -26,10 +26,10 @@ public sealed class RetainedOrderEvidenceReplayController(
         var maximumPlanningDate = request.MaximumPlanningDate;
         if (maximumPlanningDate is not null && maximumPlanningDate < minimumPlanningDate)
             return BadRequest(new { error = "maximum_planning_date_before_minimum_planning_date" });
-        // Keep each HTTP call bounded. Large retained-mailbox replays contain PDFs and
-        // must be continued with the cursor returned below rather than held open until
-        // the local reverse proxy times out.
-        var maxMessages = Math.Clamp(request.MaxMessages ?? 20, 1, 25);
+        // Keep each HTTP call very small. Large retained-mailbox replays contain PDFs
+        // and must be continued with the cursor returned below rather than held open
+        // until the local reverse proxy times out.
+        var maxMessages = Math.Clamp(request.MaxMessages ?? 5, 1, 5);
 
         var evidenceRows = await db.StagedImports
             .AsNoTracking()
