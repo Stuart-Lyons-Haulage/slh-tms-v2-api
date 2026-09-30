@@ -599,7 +599,7 @@ public sealed class SamsaraDispatchController(
                 return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Complete Site Master/geofence mapping for {stop.Name}." });
 
             orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
-            var stopNotes = BuildStopNotes(stop, order);
+            var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
             if (index == 0)
             {
                 stopNotes = string.Join("\n", new[]
@@ -712,7 +712,7 @@ public sealed class SamsaraDispatchController(
                 return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
             var firstScheduled = state?.DriverId == driver.Id && state.PlannedStartUtc is DateTimeOffset persistedStart
                 ? persistedStart
-                : available.AvailableFrom;
+                : available.AvailableFrom.Value;
             if (firstScheduled < available.AvailableFrom)
                 return BadRequest(new { message = $"The run cannot be sent to Samsara before the TachoMaster legal start {available.AvailableFrom:O}." });
             if (state?.DriverId != driver.Id || state.PlannedStartUtc is null)
@@ -879,14 +879,17 @@ public sealed class SamsaraDispatchController(
                 }
 
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
-                var stopNotes = BuildStopNotes(stop, order);
-                var scheduledArrival = isFirst && departFirstStop
+                var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
+                DateTimeOffset? scheduledArrival = isFirst && departFirstStop
                     ? null
                     : options.RecomputeScheduledTimes
                         ? null
                         : stop.PlannedArrivalUtc ?? firstScheduled;
+                var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
                 var scheduledDeparture = isFirst && departFirstStop
-                    ? stop.PlannedArrivalUtc ?? firstScheduled
+                    ? stop.PlannedArrivalUtc is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
+                        ? plannedFirstDeparture
+                        : earliestFirstDeparture
                     : isLast && departLastStop
                         ? stop.PlannedArrivalUtc
                         : null;
@@ -952,17 +955,20 @@ public sealed class SamsaraDispatchController(
             var notes = string.Join("\n", new[]
             {
                 $"SLH TMS run {load.Reference}",
+                $"Planning date: {load.PlanningDate:yyyy-MM-dd}",
                 "Planning authority: SLH TMS",
                 driver is null ? null : $"Driver: {driver.DisplayName}",
                 $"Vehicle: {vehicle.Registration}",
                 state?.PlannedStartUtc is null ? null : $"Planned yard start: {state.PlannedStartUtc:O}",
+                $"Walkaround/sign-on allowance: {Math.Max(0, options.WalkaroundMinutes)} minutes",
+                $"Default site dwell/wait allowance: {Math.Max(0, options.DefaultStopDwellMinutes)} minutes",
                 trailer is null ? null : $"Trailer: {trailer.TrailerNumber}",
                 string.IsNullOrWhiteSpace(load.PlannerNotes) ? null : $"Planner: {load.PlannerNotes}"
             }.Where(line => !string.IsNullOrWhiteSpace(line)));
 
             var request = new SamsaraRouteRequest(
                 load.Id,
-                $"SLH {load.Reference}",
+                SamsaraRouteName(load),
                 notes,
                 samsaraDriverId,
                 string.IsNullOrWhiteSpace(samsaraDriverId) ? samsaraVehicleId : null,
@@ -1233,11 +1239,12 @@ public sealed class SamsaraDispatchController(
             await db.SaveChangesAsync(ct);
     }
 
-    private static string BuildStopNotes(LoadStop stop, TransportOrder? order)
+    private static string BuildStopNotes(LoadStop stop, TransportOrder? order, int defaultDwellMinutes)
     {
         var lines = new List<string>
         {
-            stop.Name
+            stop.Name,
+            $"Default site dwell/wait: {Math.Max(0, defaultDwellMinutes)} minutes"
         };
 
         if (order is not null)
@@ -1264,6 +1271,13 @@ public sealed class SamsaraDispatchController(
         }
 
         return string.Join("\n", lines);
+    }
+
+    private static string SamsaraRouteName(Load load)
+    {
+        var display = RunDisplayLabel.For(load);
+        var number = new string(display.SkipWhile(character => !char.IsDigit(character)).TakeWhile(char.IsDigit).ToArray());
+        return string.IsNullOrWhiteSpace(number) ? $"SLH {display}" : $"SLH Route {number}";
     }
 
     private static string Csv(string? value)

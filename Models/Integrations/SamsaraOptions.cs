@@ -14,6 +14,8 @@ public sealed class SamsaraOptions
     public string AssetExternalIdKey { get; set; } = "slhTmsAsset";
 
     public int StopRadiusMeters { get; set; } = 250;
+    public int WalkaroundMinutes { get; set; } = 10;
+    public int DefaultStopDwellMinutes { get; set; } = 30;
 
     // SLH TMS owns the legal start, route order and stop constraints. Samsara
     // calculates the intermediate travel schedule from the first-stop start.
