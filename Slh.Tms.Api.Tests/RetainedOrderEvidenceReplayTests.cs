@@ -179,6 +179,74 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
     }
 
     [Fact]
+    public async Task Replay_returns_cursor_for_large_evidence_set()
+    {
+        var prefix = $"replay-cursor-{Guid.NewGuid():N}";
+        var receivedFrom = DateTimeOffset.Parse("2026-09-27T00:00:00Z");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            for (var index = 0; index < 21; index++)
+            {
+                var messageId = $"{prefix}-{index}";
+                db.StagedImports.Add(new StagedImport
+                {
+                    Id = Guid.NewGuid(),
+                    EntityType = "email-evidence",
+                    IdempotencyKey = $"email-evidence:{messageId}",
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        messageId,
+                        mailbox = "info@lyonshaulage.com",
+                        senderAddress = "unknown@example.test",
+                        subject = "Unrecognised retained evidence",
+                        receivedAtUtc = receivedFrom.AddMinutes(index).ToString("O"),
+                        bodyText = "Please review this retained message.",
+                        attachments = Array.Empty<object>(),
+                        evidenceAvailable = true
+                    }),
+                    Status = StagingStatus.Archived,
+                    Source = "Info mailbox evidence / unknown@example.test",
+                    ReceivedAtUtc = receivedFrom.AddMinutes(index)
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Approve");
+        var request = new
+        {
+            receivedFromUtc = receivedFrom,
+            minimumPlanningDate = "2026-09-27",
+            maxMessages = 20
+        };
+
+        var first = await client.PostAsync(
+            "/api/v1/order-intake/replay-retained-evidence",
+            new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        using var firstJson = JsonDocument.Parse(await first.Content.ReadAsStringAsync());
+        Assert.True(firstJson.RootElement.GetProperty("hasMore").GetBoolean());
+        var nextReceived = firstJson.RootElement.GetProperty("nextAfterReceivedAtUtc").GetDateTimeOffset();
+        var nextId = firstJson.RootElement.GetProperty("nextAfterEvidenceId").GetGuid();
+
+        var second = await client.PostAsync(
+            "/api/v1/order-intake/replay-retained-evidence",
+            new StringContent(JsonSerializer.Serialize(new
+            {
+                receivedFromUtc = receivedFrom,
+                minimumPlanningDate = "2026-09-27",
+                maxMessages = 20,
+                afterReceivedAtUtc = nextReceived,
+                afterEvidenceId = nextId
+            }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        using var secondJson = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+        Assert.False(secondJson.RootElement.GetProperty("hasMore").GetBoolean());
+        Assert.InRange(secondJson.RootElement.GetProperty("evidenceScanned").GetInt32(), 1, 20);
+    }
+
+    [Fact]
     public async Task Replay_malformed_waitrose_pdf_returns_controlled_result_and_retains_evidence()
     {
         var messageId = $"replay-waitrose-malformed-{Guid.NewGuid():N}";

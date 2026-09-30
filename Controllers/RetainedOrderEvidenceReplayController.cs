@@ -26,15 +26,26 @@ public sealed class RetainedOrderEvidenceReplayController(
         var maximumPlanningDate = request.MaximumPlanningDate;
         if (maximumPlanningDate is not null && maximumPlanningDate < minimumPlanningDate)
             return BadRequest(new { error = "maximum_planning_date_before_minimum_planning_date" });
-        var maxMessages = Math.Clamp(request.MaxMessages ?? 500, 1, 1000);
+        // Keep each HTTP call bounded. Large retained-mailbox replays contain PDFs and
+        // must be continued with the cursor returned below rather than held open until
+        // the local reverse proxy times out.
+        var maxMessages = Math.Clamp(request.MaxMessages ?? 20, 1, 25);
 
         var evidenceRows = await db.StagedImports
             .AsNoTracking()
             .Where(item => item.EntityType == "email-evidence" &&
-                           item.ReceivedAtUtc >= receivedFromUtc)
+                           item.ReceivedAtUtc >= receivedFromUtc &&
+                           (request.AfterReceivedAtUtc == null ||
+                            item.ReceivedAtUtc > request.AfterReceivedAtUtc ||
+                            (item.ReceivedAtUtc == request.AfterReceivedAtUtc &&
+                             request.AfterEvidenceId != null && item.Id > request.AfterEvidenceId)))
             .OrderBy(item => item.ReceivedAtUtc)
-            .Take(maxMessages)
+            .ThenBy(item => item.Id)
+            .Take(maxMessages + 1)
             .ToListAsync(ct);
+
+        var hasMore = evidenceRows.Count > maxMessages;
+        if (hasMore) evidenceRows.RemoveAt(evidenceRows.Count - 1);
 
         var canonical = new OrderIntakeController(db, stagingService, intakeLogger)
         {
@@ -270,6 +281,13 @@ public sealed class RetainedOrderEvidenceReplayController(
             minimumPlanningDate = minimumPlanningDate.ToString("yyyy-MM-dd"),
             maximumPlanningDate = maximumPlanningDate?.ToString("yyyy-MM-dd"),
             maxMessages,
+            hasMore,
+            nextAfterReceivedAtUtc = hasMore && evidenceRows.Count > 0
+                ? evidenceRows[^1].ReceivedAtUtc
+                : (DateTimeOffset?)null,
+            nextAfterEvidenceId = hasMore && evidenceRows.Count > 0
+                ? evidenceRows[^1].Id
+                : (Guid?)null,
             refreshUnamendedPending = request.RefreshUnamendedPending != false,
             summary.EvidenceScanned,
             summary.MessagesMatched,
@@ -529,7 +547,9 @@ public sealed record RetainedOrderEvidenceReplayRequest(
     DateOnly? MinimumPlanningDate = null,
     DateOnly? MaximumPlanningDate = null,
     bool? RefreshUnamendedPending = true,
-    int? MaxMessages = 500);
+    int? MaxMessages = 20,
+    DateTimeOffset? AfterReceivedAtUtc = null,
+    Guid? AfterEvidenceId = null);
 
 public sealed record ReplayMessageResult(
     Guid EvidenceId,
