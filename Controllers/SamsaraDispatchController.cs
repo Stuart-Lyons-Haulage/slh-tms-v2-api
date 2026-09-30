@@ -948,11 +948,6 @@ public sealed class SamsaraDispatchController(
             // sequential because EF Core does not permit concurrent operations on one DbContext.
             var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
             var samsaraVehicleId = await ResolveVehicleIdAsync(vehicle, ct);
-            if (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId))
-                return BadRequest(new
-                {
-                    message = $"No Samsara driver or vehicle match could be found for run {load.Reference}. Vehicle {vehicle.Registration} must exist in Samsara or be mapped before export."
-                });
 
             var notes = string.Join("\n", new[]
             {
@@ -1009,7 +1004,9 @@ public sealed class SamsaraDispatchController(
                 result.Updated,
                 planningAuthority = "SLH TMS",
                 samsaraRecomputedSchedule = options.RecomputeScheduledTimes,
-                assignment = !string.IsNullOrWhiteSpace(samsaraDriverId) ? "driver" : "vehicle",
+                assignment = !string.IsNullOrWhiteSpace(samsaraDriverId)
+                    ? "driver"
+                    : !string.IsNullOrWhiteSpace(samsaraVehicleId) ? "vehicle" : "unallocated",
                 samsaraDriverId,
                 samsaraVehicleId,
                 allocatedVehicle = vehicle.Registration,
@@ -1020,8 +1017,12 @@ public sealed class SamsaraDispatchController(
                 singleUseFallbackStops = samsaraStops.Count(stop => string.IsNullOrWhiteSpace(stop.AddressId)),
                 addressFallbacks,
                 message = result.Created
-                    ? $"{load.Reference} was created in Samsara from the SLH TMS plan."
-                    : $"{load.Reference} already existed in Samsara and was updated from the current SLH TMS plan rather than duplicated."
+                    ? (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId)
+                        ? $"{load.Reference} was created in Samsara as an unallocated route from the SLH TMS plan."
+                        : $"{load.Reference} was created in Samsara from the SLH TMS plan.")
+                    : (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId)
+                        ? $"{load.Reference} already existed in Samsara and was updated as an unallocated route from the current SLH TMS plan rather than duplicated."
+                        : $"{load.Reference} already existed in Samsara and was updated from the current SLH TMS plan rather than duplicated.")
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
