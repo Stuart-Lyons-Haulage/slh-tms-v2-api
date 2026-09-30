@@ -858,7 +858,7 @@ public sealed class SamsaraDispatchController(
                 var index = resolvedStop.Index;
                 var isFirst = index == 0;
                 var isLast = index == orderedStops.Count - 1;
-                if (!isFirst && stop.PlannedArrivalUtc is null)
+                if (!options.RecomputeScheduledTimes && !isFirst && stop.PlannedArrivalUtc is null)
                 {
                     missingSchedule.Add(stop.Name);
                     continue;
