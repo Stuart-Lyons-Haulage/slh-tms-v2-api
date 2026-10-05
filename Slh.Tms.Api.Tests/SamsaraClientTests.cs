@@ -11,6 +11,17 @@ namespace Slh.Tms.Api.Tests;
 public sealed class SamsaraClientTests
 {
     [Fact]
+    public void Job_notes_are_capped_at_samsaras_two_thousand_character_limit()
+    {
+        var notes = new string('x', SamsaraNoteRules.MaximumJobNoteLength + 43);
+
+        var result = SamsaraNoteRules.LimitJobNotes(notes);
+
+        Assert.Equal(SamsaraNoteRules.MaximumJobNoteLength, result.Length);
+        Assert.EndsWith("Samsara limit is 2,000 characters]", result);
+    }
+
+    [Fact]
     public async Task Connectivity_probe_uses_small_vehicle_and_driver_requests()
     {
         var paths = new List<string>();

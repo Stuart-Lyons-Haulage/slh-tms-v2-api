@@ -1313,7 +1313,7 @@ public sealed class SamsaraDispatchController(
             }
         }
 
-        return string.Join("\n", lines);
+        return SamsaraNoteRules.LimitJobNotes(string.Join("\n", lines));
     }
 
     private static string SamsaraRouteName(Load load)
