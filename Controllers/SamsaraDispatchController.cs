@@ -758,10 +758,22 @@ public sealed class SamsaraDispatchController(
                     index,
                     ResolveLocation(stop, sites)))
                 .ToList();
+            var physicalStops = SamsaraPhysicalStopGrouping.GroupAdjacent(resolvedStops.Select(item =>
+                new SamsaraPhysicalStopCandidate(
+                    item.Stop.Id,
+                    item.Stop.Name,
+                    item.Location.Site?.Id,
+                    item.Location.Address,
+                    item.Location.Latitude,
+                    item.Location.Longitude,
+                    item.Stop.PlannedArrivalUtc,
+                    OperationalStopOrdering.IsCollection(item.Stop.Name),
+                    item.Stop.OrderId,
+                    item.Stop.PlannerNote)));
 
-            var mappedSiteIds = resolvedStops
-                .Where(item => item.Location.Site is not null)
-                .Select(item => item.Location.Site!.Id)
+            var mappedSiteIds = physicalStops
+                .Where(item => item.Representative.SiteId is not null)
+                .Select(item => item.Representative.SiteId!.Value)
                 .Distinct()
                 .ToList();
             var existingSiteMappings = mappedSiteIds.Count == 0
@@ -785,18 +797,18 @@ public sealed class SamsaraDispatchController(
             if (samsara.AddressSyncEnabled)
             {
                 using var addressGate = new SemaphoreSlim(4, 4);
-                var sitesToSync = resolvedStops
-                    .Where(item => item.Location.Site is not null &&
-                                   item.Location.Latitude is not null &&
-                                   item.Location.Longitude is not null &&
-                                   !samsaraAddressBySiteId.ContainsKey(item.Location.Site!.Id))
-                    .GroupBy(item => item.Location.Site!.Id)
+                var sitesToSync = physicalStops
+                    .Where(item => item.Representative.SiteId is not null &&
+                                   item.Representative.Latitude is not null &&
+                                   item.Representative.Longitude is not null &&
+                                   !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
+                    .GroupBy(item => item.Representative.SiteId!.Value)
                     .Select(group => group.First())
                     .ToList();
 
                 var addressResults = await Task.WhenAll(sitesToSync.Select(async item =>
                 {
-                    var site = item.Location.Site!;
+                    var site = sites.Single(site => site.Id == item.Representative.SiteId!.Value);
                     await addressGate.WaitAsync(ct);
                     try
                     {
@@ -805,9 +817,9 @@ public sealed class SamsaraDispatchController(
                                 site.Id,
                                 site.ExternalCode,
                                 site.DriverTextName ?? site.Name,
-                                item.Location.Address,
-                                item.Location.Latitude,
-                                item.Location.Longitude,
+                                item.Representative.Address!,
+                                item.Representative.Latitude!.Value,
+                                item.Representative.Longitude!.Value,
                                 site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
                             ct);
                         return new AddressSyncResult(site.Id, result.AddressId);
@@ -835,7 +847,7 @@ public sealed class SamsaraDispatchController(
                             "Site",
                             addressResult.SiteId,
                             addressResult.AddressId,
-                            resolvedStops.First(item => item.Location.Site?.Id == addressResult.SiteId).Location.Site!.Name,
+                            sites.Single(item => item.Id == addressResult.SiteId).Name,
                             ct);
                     }
                     else
@@ -852,57 +864,63 @@ public sealed class SamsaraDispatchController(
             var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
             var departLastStop = !string.Equals(options.RouteCompletionCondition, "arriveLastStop", StringComparison.OrdinalIgnoreCase);
 
-            foreach (var resolvedStop in resolvedStops)
+            foreach (var physicalStop in physicalStops.Select((item, index) => (Group: item, Index: index)))
             {
-                var stop = resolvedStop.Stop;
-                var index = resolvedStop.Index;
+                var representative = physicalStop.Group.Representative;
+                var stop = orderedStops.First(item => item.Id == representative.StopId);
+                var representativeSite = representative.SiteId is Guid representativeSiteId
+                    ? sites.SingleOrDefault(item => item.Id == representativeSiteId)
+                    : null;
+                var physicalStopName = representativeSite?.DriverTextName ?? representativeSite?.Name ?? CleanStopName(stop.Name);
+                var index = physicalStop.Index;
                 var isFirst = index == 0;
-                var isLast = index == orderedStops.Count - 1;
-                if (!options.RecomputeScheduledTimes && !isFirst && stop.PlannedArrivalUtc is null)
+                var isLast = index == physicalStops.Count - 1;
+                var plannedArrival = physicalStop.Group.EarliestPlannedArrivalUtc;
+                if (!options.RecomputeScheduledTimes && !isFirst && plannedArrival is null)
                 {
-                    missingSchedule.Add(stop.Name);
+                    missingSchedule.Add(physicalStopName);
                     continue;
                 }
-                var resolved = resolvedStop.Location;
-                if (resolved.Latitude is null || resolved.Longitude is null)
+                if (representative.Latitude is null || representative.Longitude is null)
                 {
-                    missingLocations.Add(stop.Name);
+                    missingLocations.Add(physicalStopName);
                     continue;
                 }
 
                 string? samsaraAddressId = null;
-                if (samsara.AddressSyncEnabled && resolved.Site is not null)
+                if (samsara.AddressSyncEnabled && representative.SiteId is Guid siteId)
                 {
-                    samsaraAddressBySiteId.TryGetValue(resolved.Site.Id, out samsaraAddressId);
-                    if (addressFallbackBySiteId.Contains(resolved.Site.Id))
-                        addressFallbacks.Add(stop.Name);
+                    samsaraAddressBySiteId.TryGetValue(siteId, out samsaraAddressId);
+                    if (addressFallbackBySiteId.Contains(siteId))
+                        addressFallbacks.Add(physicalStopName);
                 }
 
-                orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
-                var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
+                var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
                 DateTimeOffset? scheduledArrival = isFirst && departFirstStop
                     ? null
                     : options.RecomputeScheduledTimes
                         ? null
-                        : stop.PlannedArrivalUtc ?? firstScheduled;
+                        : plannedArrival ?? firstScheduled;
                 var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
                 var scheduledDeparture = isFirst && departFirstStop
-                    ? stop.PlannedArrivalUtc is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
+                    ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
                         ? plannedFirstDeparture
                         : earliestFirstDeparture
                     : isLast && departLastStop
-                        ? stop.PlannedArrivalUtc
+                        ? plannedArrival
                         : null;
 
                 samsaraStops.Add(new SamsaraRouteStopRequest(
-                    stop.Id,
+                    representative.StopId,
                     index + 1,
-                    CleanStopName(stop.Name),
+                    physicalStopName,
                     samsaraAddressId,
-                    resolved.Address,
-                    resolved.Latitude.Value,
-                    resolved.Longitude.Value,
-                    resolved.Site?.GeofenceRadiusMetres ?? samsara.StopRadiusMeters,
+                    representative.Address ?? CleanStopName(stop.Name),
+                    representative.Latitude.Value,
+                    representative.Longitude.Value,
+                    representativeSite is not null
+                        ? representativeSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters
+                        : samsara.StopRadiusMeters,
                     scheduledArrival,
                     scheduledDeparture,
                     stopNotes));
@@ -975,12 +993,8 @@ public sealed class SamsaraDispatchController(
                 samsaraStops);
 
             var result = await samsara.UpsertRouteAsync(request, ct);
-            await SaveMappingAsync(
-                "Load",
-                load.Id,
-                result.RouteId ?? result.ExternalId,
-                load.Reference,
-                ct);
+            await DeactivateMappingsAsync(runId, ct, orderedStops.Select(stop => stop.Id).ToList());
+            await SaveMappingAsync("Load", load.Id, result.RouteId ?? result.ExternalId, load.Reference, ct);
 
             if (result.Route is not null)
             {
@@ -989,13 +1003,11 @@ public sealed class SamsaraDispatchController(
                     var tmsStopId = ResolveTmsStopId(remoteStop);
                     if (tmsStopId is null || string.IsNullOrWhiteSpace(remoteStop.Id)) continue;
 
-                    var localStop = orderedStops.FirstOrDefault(stop => stop.Id == tmsStopId.Value);
-                    await SaveMappingAsync(
-                        "LoadStop",
-                        tmsStopId.Value,
-                        remoteStop.Id,
-                        localStop?.Name ?? tmsStopId.Value.ToString(),
-                        ct);
+                    var group = physicalStops.FirstOrDefault(item => item.Representative.StopId == tmsStopId.Value);
+                    foreach (var member in group?.Members ?? [])
+                    {
+                        await SaveMappingAsync("LoadStop", member.StopId, remoteStop.Id, member.Name, ct);
+                    }
                 }
             }
 
@@ -1214,12 +1226,14 @@ public sealed class SamsaraDispatchController(
         await db.SaveChangesAsync(ct);
     }
 
-    private async Task DeactivateMappingsAsync(Guid runId, CancellationToken ct)
+    private async Task DeactivateMappingsAsync(Guid runId, CancellationToken ct, IReadOnlyCollection<Guid>? knownStopIds = null)
     {
         var stopIds = await db.LoadStops.AsNoTracking()
             .Where(stop => stop.LoadId == runId)
             .Select(stop => stop.Id)
             .ToListAsync(ct);
+        if (knownStopIds is not null)
+            stopIds = stopIds.Concat(knownStopIds).Distinct().ToList();
 
         var mappings = await db.IntegrationMappings
             .Where(item => item.Active &&
@@ -1239,35 +1253,61 @@ public sealed class SamsaraDispatchController(
             await db.SaveChangesAsync(ct);
     }
 
-    private static string BuildStopNotes(LoadStop stop, TransportOrder? order, int defaultDwellMinutes)
+    private static string BuildStopNotes(LoadStop stop, TransportOrder? order, int defaultDwellMinutes) =>
+        BuildStopNotes(
+            new SamsaraPhysicalStopGroup([
+                new SamsaraPhysicalStopCandidate(
+                    stop.Id,
+                    stop.Name,
+                    null,
+                    stop.Address,
+                    stop.Latitude is null ? null : (double)stop.Latitude.Value,
+                    stop.Longitude is null ? null : (double)stop.Longitude.Value,
+                    stop.PlannedArrivalUtc,
+                    OperationalStopOrdering.IsCollection(stop.Name),
+                    stop.OrderId,
+                    stop.PlannerNote)
+            ]),
+            [stop],
+            order is null ? new Dictionary<Guid, TransportOrder>() : new Dictionary<Guid, TransportOrder> { [order.Id] = order },
+            defaultDwellMinutes);
+
+    private static string BuildStopNotes(
+        SamsaraPhysicalStopGroup group,
+        IReadOnlyCollection<LoadStop> orderedStops,
+        IReadOnlyDictionary<Guid, TransportOrder> orders,
+        int defaultDwellMinutes)
     {
+        var representative = group.Representative;
         var lines = new List<string>
         {
-            stop.Name,
+            representative.Name,
             $"Default site dwell/wait: {Math.Max(0, defaultDwellMinutes)} minutes"
         };
 
-        if (order is not null)
+        var seenOrders = new HashSet<Guid>();
+        foreach (var member in group.Members)
         {
-            lines.Add($"Order: {order.Reference}");
-            lines.Add($"Customer: {order.CustomerCode}");
-            if (order.Pallets is not null) lines.Add($"Pallets: {order.Pallets}");
-            if (order.DeliveryWindowStartUtc is not null || order.DeliveryWindowEndUtc is not null)
-                lines.Add($"Delivery window: {FormatWindow(order.DeliveryWindowStartUtc, order.DeliveryWindowEndUtc)}");
-            if (!string.IsNullOrWhiteSpace(order.MarketName)) lines.Add($"Market: {order.MarketName}");
-            if (!string.IsNullOrWhiteSpace(order.SellerName)) lines.Add($"Seller: {order.SellerName}");
-            if (!string.IsNullOrWhiteSpace(order.StallNumber)) lines.Add($"Stand/Stall: {order.StallNumber}");
-            if (!string.IsNullOrWhiteSpace(order.DriverInstructions))
+            var localStop = orderedStops.FirstOrDefault(stop => stop.Id == member.StopId);
+            if (member.OrderId is Guid orderId && seenOrders.Add(orderId) && orders.TryGetValue(orderId, out var order))
             {
                 lines.Add(string.Empty);
-                lines.Add($"Instructions: {order.DriverInstructions}");
+                lines.Add($"Job: {order.Reference} · {order.CustomerCode} · {order.Pallets?.ToString() ?? "pallet quantity not recorded"} pallets");
+                if (order.DeliveryWindowStartUtc is not null || order.DeliveryWindowEndUtc is not null)
+                    lines.Add($"Delivery window: {FormatWindow(order.DeliveryWindowStartUtc, order.DeliveryWindowEndUtc)}");
+                if (!string.IsNullOrWhiteSpace(order.MarketName)) lines.Add($"Market: {order.MarketName}");
+                if (!string.IsNullOrWhiteSpace(order.SellerName)) lines.Add($"Seller: {order.SellerName}");
+                if (!string.IsNullOrWhiteSpace(order.StallNumber)) lines.Add($"Stand/Stall: {order.StallNumber}");
+                if (!string.IsNullOrWhiteSpace(order.DriverInstructions)) lines.Add($"Instructions: {order.DriverInstructions}");
             }
-        }
 
-        if (!string.IsNullOrWhiteSpace(stop.PlannerNote))
-        {
-            lines.Add(string.Empty);
-            lines.Add($"Planner: {stop.PlannerNote}");
+            if ((member.OrderId is null || !orders.ContainsKey(member.OrderId.Value)) && !string.IsNullOrWhiteSpace(localStop?.Address))
+                lines.Add($"Job manifest: {localStop.Address}");
+
+            if (!string.IsNullOrWhiteSpace(localStop?.PlannerNote) && !lines.Contains($"Planner: {localStop.PlannerNote}"))
+            {
+                lines.Add($"Planner: {localStop.PlannerNote}");
+            }
         }
 
         return string.Join("\n", lines);

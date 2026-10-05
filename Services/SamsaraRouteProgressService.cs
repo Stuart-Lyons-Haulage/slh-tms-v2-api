@@ -163,9 +163,9 @@ public sealed class SamsaraRouteProgressService(
             var updated = 0;
             foreach (var changedStop in changedStops)
             {
-                var mapping = mappings.FirstOrDefault(item =>
-                    string.Equals(item.ExternalKey, changedStop.Id, StringComparison.Ordinal));
-                if (mapping is null)
+                var matchingMappings = mappings.Where(item =>
+                    string.Equals(item.ExternalKey, changedStop.Id, StringComparison.Ordinal)).ToList();
+                if (matchingMappings.Count == 0)
                     continue;
 
                 var stop = changedStop.Element;
@@ -180,10 +180,13 @@ public sealed class SamsaraRouteProgressService(
                     ParseDate(stop, "eta") ?? ParseDate(stop, "estimatedArrivalTime"),
                     Text(stop, "liveSharingUrl"));
 
-                mapping.Notes = JsonSerializer.Serialize(progress, JsonOptions);
-                mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                mapping.UpdatedBy = "system:samsara-progress";
-                updated++;
+                foreach (var mapping in matchingMappings)
+                {
+                    mapping.Notes = JsonSerializer.Serialize(progress, JsonOptions);
+                    mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    mapping.UpdatedBy = "system:samsara-progress";
+                    updated++;
+                }
             }
 
             if (updated > 0)
