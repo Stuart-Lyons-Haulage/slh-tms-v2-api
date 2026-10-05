@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController> logger) : ControllerBase
+public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController> logger, SiteAddressPropagationService siteAddressPropagation) : ControllerBase
 {
     [HttpGet("customers")] public async Task<IActionResult> Customers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Customers.AsNoTracking().Where(x => x.Active && (q == null || x.Code.Contains(q) || x.Name.Contains(q))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct));
     [HttpGet("customer-contacts")] public async Task<IActionResult> CustomerContacts([FromQuery] string? q, CancellationToken ct) => Ok(await db.CustomerContacts.AsNoTracking().Where(x => x.Active && (q == null || x.CustomerCode.Contains(q) || x.Name.Contains(q) || (x.Email != null && x.Email.Contains(q)))).OrderBy(x => x.CustomerCode).ThenBy(x => x.Name).Take(5000).ToListAsync(ct));
@@ -185,6 +185,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         site.ExternalCode = code; site.Name = ClipRequired(request.Name, 200); site.DriverTextName = Clip(request.DriverTextName, 200); site.Aliases = Clip(request.Aliases, 500); site.CollectionAddress = Clip(request.CollectionAddress, 500); site.CollectionInstructions = Clip(request.CollectionInstructions, 1000); site.MapLink = Clip(request.MapLink, 1000); site.Latitude = request.Latitude; site.Longitude = request.Longitude; site.CustomField1 = Clip(request.CustomField1, 200); site.CustomField2 = Clip(request.CustomField2, 200); site.CustomField3 = Clip(request.CustomField3, 200); site.Active = request.Active;
         await db.SaveChangesAsync(ct);
         await MasterDetailStore.SaveAsync(db, "site", code, JsonSerializer.Serialize(site), "SLH site editor", User.Identity?.Name, ct);
+        await siteAddressPropagation.PropagateMasterAddressToOpenOrdersAsync(site, ct);
         return Ok(site);
     }
 

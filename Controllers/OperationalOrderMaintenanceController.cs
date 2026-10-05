@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -18,7 +19,8 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize(Policy = "TmsWrite")]
 public sealed class OperationalOrderMaintenanceController(
     TmsDbContext db,
-    ILogger<OperationalOrderMaintenanceController> logger) : ControllerBase
+    ILogger<OperationalOrderMaintenanceController> logger,
+    SiteAddressPropagationService siteAddressPropagation) : ControllerBase
 {
     [HttpPut("{id:guid}")]
     public async Task<IActionResult> Update(Guid id, [FromBody] OperationalOrderUpdateRequest request, CancellationToken ct)
@@ -41,6 +43,7 @@ public sealed class OperationalOrderMaintenanceController(
             var collectionSite = Clip(request.CollectionSite, 200);
             var depotId = Clip(request.DepotId, 80);
             var destination = Clip(request.Destination, 200);
+            var siteAddressResult = await siteAddressPropagation.UpdateMasterFromOrderAsync(depotId ?? destination, deliveryAddress, request.MapLink, User.Identity?.Name, ct);
 
             order.Reference = reference!;
             order.CustomerCode = customerCode!;
@@ -97,7 +100,7 @@ public sealed class OperationalOrderMaintenanceController(
             }
 
             await db.SaveChangesAsync(ct);
-            return Ok(new { order.Id, order.Reference, order.CustomerCode, source = "TransportOrders" });
+            return Ok(new { order.Id, order.Reference, order.CustomerCode, source = "TransportOrders", siteMasterUpdated = siteAddressResult.Updated, siteMasterMessage = siteAddressResult.Message });
         }
 
         var register = await db.StagedImports.SingleOrDefaultAsync(item => item.Id == id &&

@@ -141,6 +141,7 @@ builder.Services.AddDbContext<TmsDbContext>((services, options) =>
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<MasterDataService>();
+builder.Services.AddScoped<SiteAddressPropagationService>();
 builder.Services.AddScoped<MasterAssignmentComplianceService>();
 builder.Services.AddSingleton<CustomerCommunicationExtractionService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();

@@ -11,7 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/operational-master-data")]
 [Authorize]
-public sealed class OperationalMasterDataController(TmsDbContext db) : ControllerBase
+public sealed class OperationalMasterDataController(TmsDbContext db, SiteAddressPropagationService siteAddressPropagation) : ControllerBase
 {
     [HttpGet("drivers/search")]
     public async Task<IActionResult> SearchDrivers([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
@@ -222,6 +222,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         site.OperationalRegion = Clean(request.OperationalRegion);
         await Audit("Site", id, "Updated", before, Snapshot(site), ct);
         await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, Snapshot(site), "SLH operational site editor", User.Identity?.Name, ct);
+        await siteAddressPropagation.PropagateMasterAddressToOpenOrdersAsync(site, ct);
         return Ok(site);
     }
 
