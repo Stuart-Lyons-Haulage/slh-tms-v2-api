@@ -100,6 +100,7 @@ public static class DriverAvailabilityService
         static bool AvailableForRequirement(DriverAvailabilityItem item) => item.Dispatchable ||
             item.BlockReasons.Count > 0 && item.BlockReasons.All(reason => reason.StartsWith("Already allocated", StringComparison.Ordinal));
         var available = items.Count(AvailableForRequirement);
+        var driversRequired = RequiredDriverCount(loads);
         var summary = new DriverAvailabilitySummary(
             items.Count(item => item.EmploymentType == "Employed" && AvailableForRequirement(item)),
             items.Count(item => item.EmploymentType == "Agency" && item.AvailabilityConfirmed && AvailableForRequirement(item)),
@@ -107,11 +108,29 @@ public static class DriverAvailabilityService
             items.Count(item => item.EmploymentType == "Casual" && item.AvailabilityConfirmed && AvailableForRequirement(item)),
             items.Count(item => item.Group == "Casual unconfirmed"),
             items.Count(item => item.Group == "Unavailable/blocked"),
-            loads.Count,
+            driversRequired,
             available,
-            available - loads.Count);
+            available - driversRequired);
 
         return new DriverAvailabilitySnapshot(planningDate, DateTimeOffset.UtcNow, summary, items, items.Count(item => item.ClassificationMismatch));
+    }
+
+    internal static int RequiredDriverCount(IReadOnlyCollection<Load> loads)
+    {
+        var assignedDrivers = new HashSet<Guid>();
+        var unassignedSlots = 0;
+
+        foreach (var load in loads)
+        {
+            if (load.DriverId is Guid driverId) assignedDrivers.Add(driverId);
+            else unassignedSlots++;
+
+            if (load.RelayPlan?.Enabled != true) continue;
+            if (load.RelayPlan.DeliveryDriverId is Guid deliveryDriverId) assignedDrivers.Add(deliveryDriverId);
+            else unassignedSlots++;
+        }
+
+        return assignedDrivers.Count + unassignedSlots;
     }
 
     internal static DriverAvailabilityItem Evaluate(

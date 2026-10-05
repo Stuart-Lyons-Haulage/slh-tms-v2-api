@@ -74,6 +74,49 @@ public sealed class DriverAvailabilityServiceTests
         Assert.Contains(item.BlockReasons, reason => reason.Contains("Already allocated to AM 1"));
     }
 
+    [Fact]
+    public void Sequential_runs_assigned_to_the_same_driver_require_one_driver()
+    {
+        var driverId = Guid.NewGuid();
+        var loads = new[]
+        {
+            new Load { Reference = "AM 1", PlanningDate = Day, DriverId = driverId },
+            new Load { Reference = "AM 4", PlanningDate = Day, DriverId = driverId }
+        };
+
+        Assert.Equal(1, DriverAvailabilityService.RequiredDriverCount(loads));
+    }
+
+    [Fact]
+    public void Unassigned_runs_each_retain_a_driver_demand_slot()
+    {
+        var loads = new[]
+        {
+            new Load { Reference = "AM 1", PlanningDate = Day },
+            new Load { Reference = "AM 2", PlanningDate = Day }
+        };
+
+        Assert.Equal(2, DriverAvailabilityService.RequiredDriverCount(loads));
+    }
+
+    [Fact]
+    public void Relay_with_a_different_delivery_driver_requires_both_drivers()
+    {
+        var load = new Load
+        {
+            Reference = "TRANSFER 1",
+            PlanningDate = Day,
+            DriverId = Guid.NewGuid(),
+            RelayPlan = new LoadRelayPlan
+            {
+                Enabled = true,
+                DeliveryDriverId = Guid.NewGuid()
+            }
+        };
+
+        Assert.Equal(2, DriverAvailabilityService.RequiredDriverCount([load]));
+    }
+
     private static Driver Driver(string employeeNumber, string type) => new()
     {
         Id = Guid.NewGuid(),
