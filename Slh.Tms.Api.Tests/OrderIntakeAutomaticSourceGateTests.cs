@@ -31,6 +31,23 @@ public sealed class OrderIntakeAutomaticSourceGateTests
             Request("Small customer booking", "Please collect 4 pallets on 05/10/2026.")));
     }
 
+    [Theory]
+    [InlineData("stuart@lyonshaulage.com")]
+    [InlineData("MicrosoftExchange329e71ec88ae4615bbc36ab6ce41109e@lyonshaulage.com")]
+    [InlineData("planner@stuartlyonshaulage.co.uk")]
+    public void InternalOutboundSendersAreRecognised(string sender)
+    {
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsInternalSender(sender));
+    }
+
+    [Theory]
+    [InlineData("sender@external.example")]
+    [InlineData("sender@notlyonshaulage.com")]
+    public void ExternalSendersAreNotRecognisedAsInternal(string sender)
+    {
+        Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsInternalSender(sender));
+    }
+
     private static MailboxEmailIntakeRequest Request(string subject, string body) => new(
         "source-gate-test", null, "info@lyonshaulage.com", "planner@example.test", "Planner",
         subject, DateTimeOffset.Parse("2026-10-05T07:00:00Z"), body, null, null, null);

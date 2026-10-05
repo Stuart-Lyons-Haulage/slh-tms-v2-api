@@ -312,6 +312,17 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             operationalSignal.IgnoredReason?.Contains("Operational request", StringComparison.OrdinalIgnoreCase) == true)
             return operationalSignal;
 
+        // Outbound SLH messages can contain customer names, dates and quantities
+        // because they quote or forward an inbound order. They are source evidence,
+        // not new customer orders. Keep the evidence via Intake(), but stop before
+        // any approved-source or specialist parser can turn the quoted content into
+        // a staging order.
+        if (IsInternalSender(request.SenderAddress))
+            return new EmailIntakeParseResult(
+                [],
+                [],
+                "Internal outbound mailbox message retained as source evidence; it was not converted into a transport order.");
+
         // Keep the automatic mailbox lane deliberately small. Markets and other
         // ad-hoc sources remain fully supported through the standard order template
         // or manual admin entry, but must not be claimed by a bespoke parser merely
@@ -388,6 +399,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private static bool IsVerifiedGenericIntakeSource(MailboxEmailIntakeRequest request)
     {
         return IsApprovedAutomaticSource(request);
+    }
+
+    internal static bool IsInternalSender(string? senderAddress)
+    {
+        var sender = senderAddress?.Trim();
+        return !string.IsNullOrWhiteSpace(sender) &&
+               (sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase) ||
+                sender.EndsWith("@stuartlyonshaulage.co.uk", StringComparison.OrdinalIgnoreCase));
     }
 
     internal static bool IsApprovedAutomaticSource(MailboxEmailIntakeRequest request)
