@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -596,8 +598,23 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
 
     private static string PlanningGroup(OrderDetail? detail, TransportOrder order)
     {
-        if (!string.IsNullOrWhiteSpace(detail?.Group)) return detail.Group!;
         var collection = Collection(detail, order);
+        var suppliedGroup = detail?.Group?.Trim();
+        var sefters = $"{collection} {suppliedGroup}";
+        if (sefters.Contains("Sefter", StringComparison.OrdinalIgnoreCase) ||
+            sefters.Contains("Barfoots North", StringComparison.OrdinalIgnoreCase) ||
+            sefters.Contains("Barfoots South", StringComparison.OrdinalIgnoreCase))
+        {
+            var side = sefters.Contains("North", StringComparison.OrdinalIgnoreCase)
+                ? "Sefter North"
+                : sefters.Contains("South", StringComparison.OrdinalIgnoreCase)
+                    ? "Sefter South"
+                    : collection;
+            var canonicalTemperature = CanonicalSefterTemperature(detail?.Temperature, suppliedGroup);
+            return string.IsNullOrWhiteSpace(canonicalTemperature) ? side : $"{side} {canonicalTemperature}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(suppliedGroup)) return suppliedGroup;
         var temperature = detail?.Temperature;
         if (string.IsNullOrWhiteSpace(temperature) || collection.Contains("°", StringComparison.OrdinalIgnoreCase) || collection.Contains("temp", StringComparison.OrdinalIgnoreCase)) return collection;
         var clean = temperature.Trim()
@@ -605,6 +622,18 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             .Replace("degrees", "°", StringComparison.OrdinalIgnoreCase);
         if (!clean.Contains("°") && decimal.TryParse(new string(clean.Where(c => char.IsDigit(c) || c is '-' or '.').ToArray()), out var number)) clean = $"{number:0.#}°C";
         return $"{collection} {clean}";
+    }
+
+    private static string? CanonicalSefterTemperature(string? temperature, string? group)
+    {
+        var source = !string.IsNullOrWhiteSpace(temperature) ? temperature! : group ?? string.Empty;
+        var match = Regex.Match(source, @"(?<sign>[+-]?)(?<value>\d+(?:\.\d+)?)\s*(?:°\s*C?|℃|C)?", RegexOptions.IgnoreCase);
+        if (!match.Success || !decimal.TryParse(match.Groups["value"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var value))
+            return null;
+
+        if (match.Groups["sign"].Value == "-") value = -value;
+        var sign = value >= 0 ? "+" : string.Empty;
+        return $"{sign}{value:0.#}°C";
     }
 
     private static string Collection(OrderDetail? detail, TransportOrder order)

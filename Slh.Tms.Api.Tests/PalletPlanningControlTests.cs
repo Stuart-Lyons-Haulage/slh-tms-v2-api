@@ -62,12 +62,12 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
                 new StagedImport
                 {
                     EntityType = "order", IdempotencyKey = $"bar-n-{Guid.NewGuid():N}", Status = StagingStatus.Promoted,
-                    PayloadJson = JsonSerializer.Serialize(new { poNumber = northReference, customerCode = "BARFOOTS", collectionDate = date.ToString("yyyy-MM-dd"), deliveryDate = date.ToString("yyyy-MM-dd"), collectionSite = "Sefter North (Barfoots)", deliverySite = "Aldi Chelmsford", temperatureRequirement = "+10℃", pallets = 10 })
+                    PayloadJson = JsonSerializer.Serialize(new { poNumber = northReference, customerCode = "BARFOOTS", collectionDate = date.ToString("yyyy-MM-dd"), deliveryDate = date.ToString("yyyy-MM-dd"), collectionSite = "Sefter North (Barfoots)", planningGroup = "BAR-Sefter North (10℃)", deliverySite = "Aldi Chelmsford", temperatureRequirement = "+10℃", pallets = 10 })
                 },
                 new StagedImport
                 {
                     EntityType = "order", IdempotencyKey = $"bar-s-{Guid.NewGuid():N}", Status = StagingStatus.Promoted,
-                    PayloadJson = JsonSerializer.Serialize(new { poNumber = southReference, customerCode = "BARFOOTS", collectionDate = date.ToString("yyyy-MM-dd"), deliveryDate = date.ToString("yyyy-MM-dd"), collectionSite = "Barfoots South", deliverySite = "Aldi Chelmsford", temperatureRequirement = "+3℃", pallets = 3 })
+                    PayloadJson = JsonSerializer.Serialize(new { poNumber = southReference, customerCode = "BARFOOTS", collectionDate = date.ToString("yyyy-MM-dd"), deliveryDate = date.ToString("yyyy-MM-dd"), collectionSite = "Barfoots South", planningGroup = "Sefter South 3°C", deliverySite = "Aldi Chelmsford", temperatureRequirement = "+3℃", pallets = 3 })
                 });
             await db.SaveChangesAsync();
         }

@@ -25,6 +25,22 @@ public sealed class SpecialistMailboxOrderParser
         @"\b(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])[./-](?<year>20\d{2}|\d{2})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex NwfConfirmedCollectionDateRegex = new(
+        @"\b(?:confirmation|collection)\s+for\s+(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])(?:[./-](?<year>20\d{2}|\d{2}))?\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex CancellationInstructionRegex = new(
+        @"\b(cancelled|canceled|cancellation)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex NwfSiteThenQuantityRegex = new(
+        @"(?<site>Barnham|Merston|Runcton|Selsey|Drayton)\s+(?<qty>\d{1,3})\s*/?\s*(?:p|plts?|pallets?)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex NwfQuantityThenSiteRegex = new(
+        @"(?<qty>\d{1,3})\s*(?:p|plts?|pallets?)\s+(?<site>Barnham|Merston|Runcton|Selsey|Drayton)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex PurchaseOrderRegex = new(
         @"\b(?<po>PORD[A-Z0-9/-]+)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -51,6 +67,10 @@ public sealed class SpecialistMailboxOrderParser
         var southbound = TryParseSouthboundLoadPlan(request);
         if (southbound is not null)
             return southbound;
+
+        var nwfConfirmedCollection = TryParseNwfConfirmedCollectionWorkbook(request);
+        if (nwfConfirmedCollection is not null)
+            return nwfConfirmedCollection;
 
         // Verified workbook profiles are deliberately evaluated before the older
         // body parsers. A known sender + subject family + workbook structure is the
@@ -80,6 +100,216 @@ public sealed class SpecialistMailboxOrderParser
             return vitacress;
 
         return inner.TryParse(request);
+    }
+
+    private static EmailIntakeParseResult? TryParseNwfConfirmedCollectionWorkbook(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("confirm", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // Let the shared body parser route cancellations to review. An original
+        // workbook can be attached to a cancellation and must never recreate it.
+        if (CancellationInstructionRegex.IsMatch($"{subject}\n{request.BodyText}"))
+            return null;
+
+        var planningDate = ExtractNwfConfirmedCollectionDate(request);
+        if (planningDate is null)
+            return null;
+
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true &&
+                           !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
+                           IsExcel(item.Name))
+            .GroupBy(item => $"{item.Name}|{item.EffectiveContentBase64}", StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+        if (attachments.Count == 0)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var globalWarnings = new List<string>();
+
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                var sheetNumber = 0;
+                do
+                {
+                    sheetNumber++;
+                    var rows = ReadRows(reader);
+                    if (!reader.Name.Equals("Collections", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var headerIndex = rows.FindIndex(row =>
+                    {
+                        var keys = row.Select(CellText)
+                            .Where(value => !string.IsNullOrWhiteSpace(value))
+                            .Select(NormaliseKey)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        return keys.Contains("CUSTOMER") &&
+                               keys.Contains("TRANSPORTPO") &&
+                               keys.Contains("COLLECTIONDATE") &&
+                               keys.Contains("COLLECTIONDEPOT") &&
+                               keys.Contains("NWFCRATEPONUMBER") &&
+                               keys.Contains("DELIVERYSITE") &&
+                               keys.Contains("PALLETS");
+                    });
+                    if (headerIndex < 0)
+                        continue;
+
+                    var headers = HeaderMap(rows[headerIndex]);
+                    var customerIndex = FindColumn(headers, "customer");
+                    var transportPoIndex = FindColumn(headers, "transportpo");
+                    var collectionDateIndex = FindColumn(headers, "collectiondate");
+                    var deliveryDateIndex = FindColumn(headers, "deliverydate");
+                    var depotIndex = FindColumn(headers, "collectiondepot");
+                    var collectionReferenceIndex = FindColumn(headers, "collectionreference");
+                    var cratePoIndex = FindColumn(headers, "nwfcrateponumber", "crateponumber");
+                    var siteIndex = FindColumn(headers, "deliverysite");
+                    var palletsIndex = FindColumn(headers, "pallets");
+                    var commentsIndex = FindColumn(headers, "comments");
+                    if (customerIndex < 0 || transportPoIndex < 0 || collectionDateIndex < 0 ||
+                        deliveryDateIndex < 0 || depotIndex < 0 || siteIndex < 0 || palletsIndex < 0)
+                        continue;
+
+                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+                    {
+                        var row = rows[rowIndex];
+                        if (!string.Equals(CellText(row, customerIndex), "ALDI", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var collectionDate = CellDate(row, collectionDateIndex);
+                        if (collectionDate != planningDate)
+                            continue;
+
+                        var deliveryDate = CellDate(row, deliveryDateIndex) ?? collectionDate.Value;
+                        var collectionDepot = CellText(row, depotIndex);
+                        var sourceSite = CellText(row, siteIndex);
+                        var totalPallets = CellInt(row, palletsIndex);
+                        var transportPo = CellText(row, transportPoIndex)?.Trim();
+                        var cratePo = CellText(row, cratePoIndex)?.Trim();
+                        var collectionReference = CellText(row, collectionReferenceIndex)?.Trim();
+                        var comments = CellText(row, commentsIndex) ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(collectionDepot) || string.IsNullOrWhiteSpace(sourceSite) ||
+                            totalPallets is null or <= 0 ||
+                            (string.IsNullOrWhiteSpace(transportPo) && string.IsNullOrWhiteSpace(cratePo)))
+                            continue;
+
+                        var sites = Regex.Split(sourceSite, @"\s*[/&,]\s*")
+                            .Where(site => !string.IsNullOrWhiteSpace(site))
+                            .Select(site => site.Trim())
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        var splits = ParseNwfCollectionSplits(comments);
+                        var splitIsReconciled = sites.Count > 1 &&
+                                                splits.Count == sites.Count &&
+                                                splits.Sum(item => item.Pallets) == totalPallets.Value &&
+                                                sites.All(site => splits.Any(item => item.Site.Equals(site, StringComparison.OrdinalIgnoreCase)));
+
+                        var movements = sites.Count == 1
+                            ? new List<(string Site, int Pallets)> { (sites[0], totalPallets.Value) }
+                            : splitIsReconciled
+                                ? splits
+                                : new List<(string Site, int Pallets)> { (sourceSite.Trim(), totalPallets.Value) };
+
+                        foreach (var movement in movements)
+                        {
+                            var rowWarnings = new List<string>();
+                            if (sites.Count > 1 && !splitIsReconciled)
+                                rowWarnings.Add($"Collection split '{sourceSite}' could not be reconciled to {totalPallets.Value} pallets from the workbook comments; review before approval.");
+
+                            var referenceSource = transportPo ?? cratePo ?? StableEmailReference(request.MessageId);
+                            var customerPo = $"{referenceSource}/{movement.Site}";
+                            var reference = BuildReference(referenceSource, $"{collectionDepot}-{movement.Site}");
+                            var naturalKey = WorkbookNaturalKey(
+                                request,
+                                "ALDI",
+                                movement.Site,
+                                collectionDepot,
+                                collectionDate.Value,
+                                $"{referenceSource}|{collectionReference}");
+                            var payload = BuildPayload(
+                                request,
+                                reference,
+                                customerPo,
+                                "ALDI",
+                                collectionDate.Value,
+                                deliveryDate,
+                                movement.Pallets,
+                                movement.Site,
+                                collectionDepot,
+                                null,
+                                null,
+                                attachment.Name,
+                                reader.Name,
+                                rowIndex + 1,
+                                "NWF confirmed ALDI collection workbook",
+                                rowWarnings,
+                                "ALDI");
+
+                            var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                            root["transportPo"] = transportPo;
+                            root["cratePo"] = cratePo;
+                            root["collectionReference"] = collectionReference;
+                            root["jobType"] = "NWF confirmed ALDI tray collection";
+                            root["intakeNaturalKey"] = naturalKey;
+                            root["intakeProfile"] = "NWF_CONFIRMED_ALDI_COLLECTION_WORKBOOK";
+                            payload = JsonSerializer.SerializeToElement(root);
+
+                            orders.Add(new ParsedEmailOrder(
+                                $"nwf-aldi-collection-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(movement.Site)}",
+                                naturalKey,
+                                payload,
+                                rowWarnings));
+                        }
+                    }
+                }
+                while (reader.NextResult());
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                globalWarnings.Add($"Attachment '{attachment.Name}' could not be parsed by the NWF confirmed ALDI collection parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    private static DateOnly? ExtractNwfConfirmedCollectionDate(MailboxEmailIntakeRequest request)
+    {
+        var match = NwfConfirmedCollectionDateRegex.Match($"{request.Subject}\n{request.BodyText}");
+        if (!match.Success)
+            return null;
+
+        var day = int.Parse(match.Groups["day"].Value, CultureInfo.InvariantCulture);
+        var month = int.Parse(match.Groups["month"].Value, CultureInfo.InvariantCulture);
+        var yearText = match.Groups["year"].Value;
+        var year = string.IsNullOrWhiteSpace(yearText)
+            ? (request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).Year
+            : yearText.Length == 2
+                ? 2000 + int.Parse(yearText, CultureInfo.InvariantCulture)
+                : int.Parse(yearText, CultureInfo.InvariantCulture);
+        try { return new DateOnly(year, month, day); }
+        catch (ArgumentOutOfRangeException) { return null; }
+    }
+
+    private static List<(string Site, int Pallets)> ParseNwfCollectionSplits(string comments)
+    {
+        return NwfSiteThenQuantityRegex.Matches(comments)
+            .Concat(NwfQuantityThenSiteRegex.Matches(comments))
+            .Select(match => (
+                Site: match.Groups["site"].Value.Trim(),
+                Pallets: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture)))
+            .GroupBy(item => item.Site, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
     }
 
     private static EmailIntakeParseResult? TryParseSouthboundLoadPlan(MailboxEmailIntakeRequest request)
