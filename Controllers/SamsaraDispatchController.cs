@@ -1353,17 +1353,7 @@ public sealed class SamsaraDispatchController(
 
     private static ResolvedStopLocation ResolveLocation(LoadStop stop, IReadOnlyList<Site> sites)
     {
-        var stopKeys = new[]
-        {
-            CleanStopName(stop.Name),
-            stop.Address
-        }.Where(value => !string.IsNullOrWhiteSpace(value))
-         .Select(Normalise)
-         .Where(value => value.Length > 0)
-         .ToHashSet();
-
-        var matches = sites.Where(site => SiteKeys(site).Any(stopKeys.Contains)).Take(2).ToList();
-        var matchedSite = matches.Count == 1 ? matches[0] : null;
+        var matchedSite = SamsaraStopSiteMatcher.FindSite(stop, sites);
 
         if (stop.Latitude is not null && stop.Longitude is not null)
             return new ResolvedStopLocation(
@@ -1391,21 +1381,6 @@ public sealed class SamsaraDispatchController(
 
         if (Guid.TryParseExact(value, "N", out var compact)) return compact;
         return Guid.TryParse(value, out var regular) ? regular : null;
-    }
-
-    private static IEnumerable<string> SiteKeys(Site site)
-    {
-        foreach (var value in new[] { site.Name, site.DriverTextName, site.ExternalCode, site.CollectionAddress })
-        {
-            var key = Normalise(value);
-            if (key.Length > 0) yield return key;
-        }
-
-        foreach (var alias in (site.Aliases ?? string.Empty).Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var key = Normalise(alias);
-            if (key.Length > 0) yield return key;
-        }
     }
 
     private static string CleanStopName(string value) =>

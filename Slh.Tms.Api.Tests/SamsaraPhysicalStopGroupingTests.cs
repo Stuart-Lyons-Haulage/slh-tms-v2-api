@@ -1,3 +1,4 @@
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -5,6 +6,25 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class SamsaraPhysicalStopGroupingTests
 {
+    [Fact]
+    public void Compound_delivery_name_resolves_the_physical_destination_site()
+    {
+        var site = new Site
+        {
+            ExternalCode = "SITE152",
+            Name = "Aldi-Atherstone",
+            DriverTextName = "Aldi-Atherstone",
+            CollectionAddress = "Holly Lane, Atherstone, CV9 2SQ",
+            Latitude = 52.58607m,
+            Longitude = -1.55878m
+        };
+        var stop = new LoadStop { Name = "Deliver · SUMMERBERRY · Aldi-Atherstone" };
+
+        var matched = SamsaraStopSiteMatcher.FindSite(stop, [site]);
+
+        Assert.Same(site, matched);
+    }
+
     [Fact]
     public void Groups_adjacent_jobs_at_same_physical_site_but_preserves_collection_and_delivery_phases()
     {
