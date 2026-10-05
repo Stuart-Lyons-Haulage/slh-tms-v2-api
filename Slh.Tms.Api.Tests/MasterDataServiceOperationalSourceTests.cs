@@ -62,7 +62,7 @@ public sealed class MasterDataServiceOperationalSourceTests
         db.MarketContacts.Add(contact);
         await db.SaveChangesAsync();
 
-        var controller = new LookupsController(db, NullLogger<LookupsController>.Instance)
+        var controller = new LookupsController(db, NullLogger<LookupsController>.Instance, new SiteAddressPropagationService(db))
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
         };
