@@ -47,6 +47,8 @@ public sealed class SamsaraPhysicalStopGroupingTests
         Assert.Equal(6, groups.Count);
         Assert.Equal(2, groups[4].Members.Count);
         Assert.Equal(2, groups[5].Members.Count);
+        Assert.Equal(candidates[4].StopId, groups[4].Representative.StopId);
+        Assert.Equal(candidates[6].StopId, groups[5].Representative.StopId);
         Assert.All(groups.Take(4), group => Assert.True(group.Representative.IsCollection));
         Assert.All(groups.Skip(4), group => Assert.False(group.Representative.IsCollection));
     }

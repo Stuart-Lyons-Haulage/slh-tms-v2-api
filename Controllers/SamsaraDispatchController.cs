@@ -1007,9 +1007,14 @@ public sealed class SamsaraDispatchController(
                     if (tmsStopId is null || string.IsNullOrWhiteSpace(remoteStop.Id)) continue;
 
                     var group = physicalStops.FirstOrDefault(item => item.Representative.StopId == tmsStopId.Value);
-                    foreach (var member in group?.Members ?? [])
+                    // A physical Samsara stop can represent several local LoadStop rows.
+                    // IntegrationMappings deliberately permits only one active mapping for
+                    // a provider/external key/type, so persist the canonical representative
+                    // rather than attempting to insert the same Samsara stop once per job.
+                    if (group is not null)
                     {
-                        await SaveMappingAsync("LoadStop", member.StopId, remoteStop.Id, member.Name, ct);
+                        var representative = group.Representative;
+                        await SaveMappingAsync("LoadStop", representative.StopId, remoteStop.Id, representative.Name, ct);
                     }
                 }
             }
