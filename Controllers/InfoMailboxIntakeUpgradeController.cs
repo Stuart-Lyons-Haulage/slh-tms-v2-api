@@ -48,7 +48,7 @@ public sealed class InfoMailboxIntakeUpgradeController(
 
     private async Task UpgradeStoredEvidenceAsync(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        var evidenceKey = SourceEvidenceKey(request.MessageId);
+        var evidenceKey = SourceEvidenceKeyBuilder.For(request.MessageId, request.InternetMessageId);
         var evidence = await db.StagedImports
             .SingleOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
         if (evidence is null) return;
@@ -271,14 +271,6 @@ public sealed class InfoMailboxIntakeUpgradeController(
         if (node is null) return 0;
         try { return node.GetValue<long>(); }
         catch { return long.TryParse(node.ToString(), out var value) ? value : 0; }
-    }
-
-    private static string SourceEvidenceKey(string messageId)
-    {
-        var compact = new string(messageId.Where(char.IsLetterOrDigit).ToArray());
-        if (compact.Length > 96) compact = compact[^96..];
-        var key = $"email-evidence:{compact}";
-        return key.Length <= 200 ? key : key[..200];
     }
 
     internal sealed record EvidenceUpgradeResult(string PayloadJson, bool Changed, bool CleanBodyApplied, int AttachmentCopiesAdded);

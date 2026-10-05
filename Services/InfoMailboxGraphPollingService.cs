@@ -175,7 +175,7 @@ public sealed class InfoMailboxGraphPollingService(
         {
             ct.ThrowIfCancellationRequested();
 
-            var evidenceKey = SourceEvidenceKey(message.Id);
+            var evidenceKey = SourceEvidenceKeyBuilder.For(message.Id, message.InternetMessageId);
             var linkedUrls = ExtractSupportedDocumentLinks(message.BodyHtml, message.BodyPreview);
             var existingEvidence = linkedUrls.Count == 0
                 ? null
@@ -592,14 +592,6 @@ public sealed class InfoMailboxGraphPollingService(
         value.TryGetInt64(out var parsed)
             ? parsed
             : null;
-
-    private static string SourceEvidenceKey(string messageId)
-    {
-        var compact = new string(messageId.Where(char.IsLetterOrDigit).ToArray());
-        if (compact.Length > 96) compact = compact[^96..];
-        var key = $"email-evidence:{compact}";
-        return key.Length <= 200 ? key : key[..200];
-    }
 
     internal static bool IsCustomerDomain(string? senderAddress, IReadOnlySet<string> domains)
     {

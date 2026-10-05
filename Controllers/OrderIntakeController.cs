@@ -167,14 +167,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             var orderPayload = orderDocument.RootElement;
             var evidenceKey = ReadText(orderPayload, "sourceEvidenceKey");
             var messageId = ReadText(orderPayload, "sourceMessageId") ?? ReadText(orderPayload, "sourceEmailMessageId");
+            var internetMessageId = ReadText(orderPayload, "sourceInternetMessageId");
             if (string.IsNullOrWhiteSpace(evidenceKey) && !string.IsNullOrWhiteSpace(messageId))
-                evidenceKey = SourceEvidenceKey(messageId);
+                evidenceKey = SourceEvidenceKeyBuilder.For(messageId, internetMessageId);
 
             if (!string.IsNullOrWhiteSpace(evidenceKey))
             {
                 var evidence = await db.StagedImports.AsNoTracking()
                     .SingleOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
-                if (evidence is not null)
+                if (evidence is not null && EvidenceMatchesOrder(evidence.PayloadJson, messageId, internetMessageId))
                     return Content(evidence.PayloadJson, "application/json");
             }
 
@@ -311,6 +312,17 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             operationalSignal.IgnoredReason?.Contains("Operational request", StringComparison.OrdinalIgnoreCase) == true)
             return operationalSignal;
 
+        // Keep the automatic mailbox lane deliberately small. Markets and other
+        // ad-hoc sources remain fully supported through the standard order template
+        // or manual admin entry, but must not be claimed by a bespoke parser merely
+        // because an email happens to contain a date and pallet quantity. Evidence
+        // is retained by Intake() before this gate so a planner can still recover it.
+        if (!IsApprovedAutomaticSource(request))
+            return new EmailIntakeParseResult(
+                [],
+                [],
+                "Source is outside the approved automatic parser lane; use the SLH Standard Order Template or manual entry. Source evidence retained.");
+
         // Info mailbox intake is deliberately parser-led. A sender/domain mapping,
         // retailer name or generic "looks like an order" heuristic must never create
         // a staging order. If none of the verified formats below recognise the
@@ -375,18 +387,37 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private static bool IsVerifiedGenericIntakeSource(MailboxEmailIntakeRequest request)
     {
-        var sender = request.SenderAddress ?? string.Empty;
-        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
-            string.Join("\n", (request.Attachments ?? []).Select(item => item.Name)));
-        return sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase)
-            || sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)
-            || sender.EndsWith("@doubleh.co.uk", StringComparison.OrdinalIgnoreCase)
-            || sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase)
-            || sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase)
-            || sender.EndsWith("@hillsplants.com", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Barfoots", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Summer Berry", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Double H", StringComparison.OrdinalIgnoreCase);
+        return IsApprovedAutomaticSource(request);
+    }
+
+    internal static bool IsApprovedAutomaticSource(MailboxEmailIntakeRequest request)
+    {
+        var source = string.Join("\n", request.SenderAddress, request.Subject, request.BodyText, request.BodyHtml,
+            string.Join("\n", (request.Attachments ?? []).Select(item => item.Name)))
+            .ToUpperInvariant();
+
+        // A Barfoots market workbook is explicitly outside the automatic lane even
+        // though Barfoots Waitrose/Aldi inputs remain approved.
+        if (source.Contains("MARKET", StringComparison.Ordinal) ||
+            source.Contains("COVENT GARDEN", StringComparison.Ordinal) ||
+            source.Contains("SPITALFIELDS", StringComparison.Ordinal) ||
+            source.Contains("WHOLESALE MARKET", StringComparison.Ordinal))
+            return false;
+
+        return source.Contains("WAITROSE", StringComparison.Ordinal)
+            || source.Contains("ALDI", StringComparison.Ordinal)
+            || source.Contains("MORRISONS", StringComparison.Ordinal)
+            || source.Contains("NWF", StringComparison.Ordinal)
+            || source.Contains("NATURES WAY", StringComparison.Ordinal)
+            || source.Contains("NATURE'S WAY", StringComparison.Ordinal)
+            || source.Contains("IFCO", StringComparison.Ordinal)
+            || source.Contains("SAINSBURY", StringComparison.Ordinal)
+            || source.Contains("CROSSPOINT", StringComparison.Ordinal)
+            || source.Contains("PCC", StringComparison.Ordinal)
+            || source.Contains("SUMMER BERRY", StringComparison.Ordinal)
+            || source.Contains("SUMMERBERRY", StringComparison.Ordinal)
+            || source.Contains("BARFOOTS", StringComparison.Ordinal)
+            || source.Contains("BAREFOOTS", StringComparison.Ordinal);
     }
 
     private static bool IsSimplifiedIntakeSource(MailboxEmailIntakeRequest request)
@@ -992,13 +1023,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private static string SourceEvidenceKey(string messageId)
     {
-        var key = $"email-evidence:{CompactKey(messageId)}";
-        return key.Length <= 200 ? key : key[..200];
+        return SourceEvidenceKeyBuilder.Legacy(messageId);
     }
 
     private async Task EnsureSourceEmailEvidence(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        var evidenceKey = SourceEvidenceKey(request.MessageId);
+        var evidenceKey = SourceEvidenceKeyBuilder.For(request.MessageId, request.InternetMessageId);
         var exists = await db.StagedImports.AsNoTracking()
             .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
         if (exists) return;
@@ -1111,7 +1141,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                         request.MessageId,
                         request.Subject,
                         request.ReceivedAtUtc,
-                        sourceEvidenceKey = SourceEvidenceKey(request.MessageId),
+                        sourceEvidenceKey = SourceEvidenceKeyBuilder.For(request.MessageId, request.InternetMessageId),
                         update = request.BodyText
                     }),
                     Note = $"Operational mailbox update linked: {request.Subject}",
@@ -1157,7 +1187,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         root["sourceMessageId"] = request.MessageId;
         root["sourceInternetMessageId"] = request.InternetMessageId;
         root["sourceConversationId"] = request.ConversationId;
-        root["sourceEvidenceKey"] = SourceEvidenceKey(request.MessageId);
+        root["sourceEvidenceKey"] = SourceEvidenceKeyBuilder.For(request.MessageId, request.InternetMessageId);
         root["sourceEmailWebLink"] = request.WebLink;
         root["sourceWebLink"] = request.WebLink;
         root["sourceSubject"] = request.Subject;
@@ -1189,5 +1219,24 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         root["importSource"] = "PowerAutomate/InfoMailbox";
         root["reviewStatus"] = "Pending Review";
         return JsonSerializer.SerializeToElement(root);
+    }
+
+    private static bool EvidenceMatchesOrder(string evidenceJson, string? messageId, string? internetMessageId)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(evidenceJson);
+            var root = document.RootElement;
+            var evidenceMessageId = ReadText(root, "messageId");
+            var evidenceInternetMessageId = ReadText(root, "internetMessageId");
+            return string.IsNullOrWhiteSpace(messageId) ||
+                   (string.Equals(evidenceMessageId, messageId, StringComparison.Ordinal) &&
+                    (string.IsNullOrWhiteSpace(internetMessageId) ||
+                     string.Equals(evidenceInternetMessageId, internetMessageId, StringComparison.Ordinal)));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 }

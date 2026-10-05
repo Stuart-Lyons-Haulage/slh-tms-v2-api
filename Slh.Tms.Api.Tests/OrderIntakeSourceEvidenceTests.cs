@@ -51,4 +51,21 @@ public sealed class OrderIntakeSourceEvidenceTests
 
         Assert.Contains("Please collect 2 pallets from Sefter.", enriched.GetProperty("sourceBodyText").GetString());
     }
+
+    [Fact]
+    public void EnrichSourceEvidence_SeparatesMessagesWhenGraphIdIsReused()
+    {
+        var payload = JsonSerializer.SerializeToElement(new { customerCode = "WAITROSE" });
+        var first = new MailboxEmailIntakeRequest(
+            "reused-graph-id", "<first@barfoots.co.uk>", "info@lyonshaulage.com", "orders@example.com", "Orders",
+            "Barfoots booking", DateTimeOffset.Parse("2026-10-04T06:50:21Z"), "Please see attached.", null, null, []);
+        var second = first with { InternetMessageId = "<second@thegreenhousesussex.co.uk>", Subject = "Monday ALDI" };
+
+        var firstEvidence = OrderIntakeController.EnrichSourceEvidence(payload, first);
+        var secondEvidence = OrderIntakeController.EnrichSourceEvidence(payload, second);
+
+        Assert.NotEqual(
+            firstEvidence.GetProperty("sourceEvidenceKey").GetString(),
+            secondEvidence.GetProperty("sourceEvidenceKey").GetString());
+    }
 }

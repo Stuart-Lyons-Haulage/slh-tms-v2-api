@@ -149,7 +149,7 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999002| REF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var responseBody = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"ignored\":true", responseBody);
-        Assert.Contains("No verified order format matched", responseBody);
+        Assert.Contains("outside the approved automatic parser lane", responseBody);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
