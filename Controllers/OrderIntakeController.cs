@@ -349,7 +349,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 ?? nwfParser.TryParse(request)
                 ?? sainsburyParser.TryParse(request)
                 ?? specialistParser.TryParse(request)
-                ?? (IsVerifiedGenericIntakeSource(request)
+                ?? (IsVerifiedRetainedBodyFormat(request)
                     ? new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct))
                     : null)
                 ?? new EmailIntakeParseResult(
@@ -398,9 +398,25 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return enriched with { Orders = ordersToStage };
     }
 
-    private static bool IsVerifiedGenericIntakeSource(MailboxEmailIntakeRequest request)
+    private static bool IsVerifiedRetainedBodyFormat(MailboxEmailIntakeRequest request)
     {
-        return IsApprovedAutomaticSource(request);
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        var body = string.Join("\n", request.BodyText, request.BodyHtml);
+
+        var barfootsWaitroseWave = sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) &&
+                                   subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) &&
+                                   body.Contains("WAVE", StringComparison.OrdinalIgnoreCase) &&
+                                   (body.Contains("from Sefter", StringComparison.OrdinalIgnoreCase) ||
+                                    body.Contains("from Leythorne", StringComparison.OrdinalIgnoreCase)) &&
+                                   Regex.IsMatch(body, @"\b\d{1,3}\s*(?:pallets?|plts?)\b", RegexOptions.IgnoreCase);
+
+        var summerBerryCoop = sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase) &&
+                              string.Join("\n", subject, body).Contains("COOP", StringComparison.OrdinalIgnoreCase) &&
+                              body.Contains("Total Pallets", StringComparison.OrdinalIgnoreCase) &&
+                              body.Contains("Collect from", StringComparison.OrdinalIgnoreCase);
+
+        return barfootsWaitroseWave || summerBerryCoop;
     }
 
     internal static bool IsInternalSender(string? senderAddress)

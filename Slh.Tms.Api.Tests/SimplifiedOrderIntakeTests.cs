@@ -157,6 +157,32 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999002| REF
         Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId)));
     }
 
+    [Fact]
+    public async Task Approved_source_words_do_not_enable_generic_standalone_parsing()
+    {
+        var messageId = $"verified-no-generic-fallback-{Guid.NewGuid():N}";
+        var response = await Post(new
+        {
+            messageId,
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "orders@example.test",
+            senderName = "Unverified format",
+            subject = "Waitrose booking for 06/10/2026",
+            receivedAtUtc = "2026-10-05T12:00:00Z",
+            bodyText = "Please collect 12 pallets from Selsey and deliver to Aylesford on 06/10/2026. PO 12345."
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"ignored\":true", responseBody);
+        Assert.Contains("No verified order format matched", responseBody);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
+        Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId)));
+    }
+
     [Theory]
     [InlineData("PackagingPlanner@nwfltd.co.uk", "NWF transfer - Barnham to Drayton SUN 20/09", "@D_Drayton Logistics - please receive on arrival = INTO000173010\n20/09/2026 | 25FPPCOLTOV2 | V1 | 35,840 | 2plts = All stock", "Barnham", "Drayton", 2)]
     [InlineData("gerone@lyonshaulage.com", "Merston to Drayton transfers for collections - 20-09-2026", "Please could you transfer pallets from Merston to Drayton:\n10 Aldi-Cardiff", "Merston", "Drayton", null)]
