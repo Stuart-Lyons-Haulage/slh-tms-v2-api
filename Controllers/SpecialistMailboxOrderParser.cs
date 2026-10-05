@@ -889,9 +889,9 @@ public sealed class SpecialistMailboxOrderParser
         // point. Keep it in the site identity rather than leaving it as a generic
         // customer label or collapsing both rows onto one Barfoots site.
         if (Regex.IsMatch(cleaned, @"\bSefter\s+North\b|\bNorth\b", RegexOptions.IgnoreCase))
-            return "Barfoots North";
+            return "Sefter North";
         if (Regex.IsMatch(cleaned, @"\bSefter\s+South\b|\bSouth\b", RegexOptions.IgnoreCase))
-            return "Barfoots South";
+            return "Sefter South";
         return cleaned;
     }
 

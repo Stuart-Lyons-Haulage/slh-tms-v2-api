@@ -47,6 +47,49 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Barfoots_sefter_work_is_grouped_by_physical_site_and_temperature()
+    {
+        var date = new DateOnly(2026, 10, 9);
+        var northReference = ($"BAR-N-{Guid.NewGuid():N}")[..20];
+        var southReference = ($"BAR-S-{Guid.NewGuid():N}")[..20];
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.TransportOrders.AddRange(
+                new TransportOrder { Reference = northReference, CustomerCode = "BARFOOTS", CollectionDate = date, DeliveryDate = date, Pallets = 10, SellerName = "Sefter North (Barfoots)", StallNumber = "Aldi Chelmsford" },
+                new TransportOrder { Reference = southReference, CustomerCode = "BARFOOTS", CollectionDate = date, DeliveryDate = date, Pallets = 3, SellerName = "Barfoots South", StallNumber = "Aldi Chelmsford" });
+            db.StagedImports.AddRange(
+                new StagedImport
+                {
+                    EntityType = "order", IdempotencyKey = $"bar-n-{Guid.NewGuid():N}", Status = StagingStatus.Promoted,
+                    PayloadJson = JsonSerializer.Serialize(new { poNumber = northReference, customerCode = "BARFOOTS", collectionDate = date.ToString("yyyy-MM-dd"), deliveryDate = date.ToString("yyyy-MM-dd"), collectionSite = "Sefter North (Barfoots)", deliverySite = "Aldi Chelmsford", temperatureRequirement = "+10℃", pallets = 10 })
+                },
+                new StagedImport
+                {
+                    EntityType = "order", IdempotencyKey = $"bar-s-{Guid.NewGuid():N}", Status = StagingStatus.Promoted,
+                    PayloadJson = JsonSerializer.Serialize(new { poNumber = southReference, customerCode = "BARFOOTS", collectionDate = date.ToString("yyyy-MM-dd"), deliveryDate = date.ToString("yyyy-MM-dd"), collectionSite = "Barfoots South", deliverySite = "Aldi Chelmsford", temperatureRequirement = "+3℃", pallets = 3 })
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Read");
+        using var response = JsonDocument.Parse(await (await client.GetAsync($"/api/v1/planning-control/pallets?date={date:yyyy-MM-dd}")).Content.ReadAsStringAsync());
+        var rows = response.RootElement.GetProperty("orders").EnumerateArray()
+            .Where(x => x.GetProperty("reference").GetString() is var reference && (reference == northReference || reference == southReference))
+            .ToArray();
+
+        Assert.Equal(2, rows.Length);
+        var north = Assert.Single(rows.Where(x => x.GetProperty("reference").GetString() == northReference));
+        Assert.Equal("Sefter North", north.GetProperty("collection").GetString());
+        Assert.Equal("Sefter North +10°C", north.GetProperty("planningGroup").GetString());
+        Assert.Equal(10, north.GetProperty("orderedPallets").GetInt32());
+        var south = Assert.Single(rows.Where(x => x.GetProperty("reference").GetString() == southReference));
+        Assert.Equal("Sefter South", south.GetProperty("collection").GetString());
+        Assert.Equal("Sefter South +3°C", south.GetProperty("planningGroup").GetString());
+        Assert.Equal(3, south.GetProperty("orderedPallets").GetInt32());
+    }
+
+    [Fact]
     public async Task Pending_review_order_payload_does_not_enrich_planner_orders()
     {
         var date = new DateOnly(2026, 8, 24);

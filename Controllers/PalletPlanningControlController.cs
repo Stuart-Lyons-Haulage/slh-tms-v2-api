@@ -64,7 +64,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var outstanding = Math.Max(ordered - planned, 0);
             var overplanned = Math.Max(planned - ordered, 0);
             var collection = Collection(detail, order);
-            var group = collection;
+            var group = PlanningGroup(detail, order);
             var destination = Destination(detail, order);
             var planningWindow = ResolvePlanningWindow(detail, order, collection, destination);
             var planningSection = PlanningSection(planningWindow.PlanningWindow);
@@ -600,13 +600,29 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         var collection = Collection(detail, order);
         var temperature = detail?.Temperature;
         if (string.IsNullOrWhiteSpace(temperature) || collection.Contains("°", StringComparison.OrdinalIgnoreCase) || collection.Contains("temp", StringComparison.OrdinalIgnoreCase)) return collection;
-        var clean = temperature.Trim().Replace("degrees", "°", StringComparison.OrdinalIgnoreCase);
+        var clean = temperature.Trim()
+            .Replace("℃", "°C", StringComparison.Ordinal)
+            .Replace("degrees", "°", StringComparison.OrdinalIgnoreCase);
         if (!clean.Contains("°") && decimal.TryParse(new string(clean.Where(c => char.IsDigit(c) || c is '-' or '.').ToArray()), out var number)) clean = $"{number:0.#}°C";
-        return $"{collection} ({clean})";
+        return $"{collection} {clean}";
     }
 
-    private static string Collection(OrderDetail? detail, TransportOrder order) =>
-        !string.IsNullOrWhiteSpace(detail?.Collection) ? detail.Collection! : !string.IsNullOrWhiteSpace(order.SellerName) ? order.SellerName! : "Collection not mapped";
+    private static string Collection(OrderDetail? detail, TransportOrder order)
+    {
+        var collection = !string.IsNullOrWhiteSpace(detail?.Collection)
+            ? detail.Collection!
+            : !string.IsNullOrWhiteSpace(order.SellerName)
+                ? order.SellerName!
+                : "Collection not mapped";
+
+        if (collection.Contains("Sefter North", StringComparison.OrdinalIgnoreCase) ||
+            collection.Contains("Barfoots North", StringComparison.OrdinalIgnoreCase))
+            return "Sefter North";
+        if (collection.Contains("Sefter South", StringComparison.OrdinalIgnoreCase) ||
+            collection.Contains("Barfoots South", StringComparison.OrdinalIgnoreCase))
+            return "Sefter South";
+        return collection;
+    }
 
     private static string Destination(OrderDetail? detail, TransportOrder order)
     {
