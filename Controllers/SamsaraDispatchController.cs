@@ -137,8 +137,75 @@ public sealed class SamsaraDispatchController(
             .Where(item => item.Progress is not null)
             .ToDictionary(item => item.StopId);
 
-        var rows = mappings
+        var connected = false;
+        string? connectionMessage = null;
+        if (samsara.IsConfigured)
+        {
+            try
+            {
+                connected = await samsara.CheckConnectivityAsync(ct);
+                connectionMessage = connected ? "Samsara EU API connected." : "Samsara is configured but did not pass the connection check.";
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara dispatch connectivity probe failed.");
+                connectionMessage = $"Samsara is configured but not reachable: {exception.GetBaseException().Message}";
+            }
+        }
+        else
+        {
+            connectionMessage = $"Samsara runtime settings are incomplete: {string.Join(", ", samsara.MissingSettings)}.";
+        }
+
+        // A local mapping is an audit record, not proof that the remote route still
+        // exists. Verify mapped routes when Samsara is available so deleted or
+        // rejected routes become eligible for a safe retry. Keep the provider calls
+        // bounded and preserve the local view if an individual check is unavailable.
+        var verifiedMappings = mappings;
+        var staleRouteCount = 0;
+        if (connected && mappings.Count > 0)
+        {
+            using var routeVerificationGate = new SemaphoreSlim(4, 4);
+            var verification = await Task.WhenAll(mappings
+                .GroupBy(item => new { item.TmsEntityType, item.TmsEntityId })
+                .Select(async group =>
+                {
+                    var mapping = group.First();
+                    var load = byId.GetValueOrDefault(mapping.TmsEntityId);
+                    var suffix = mapping.TmsEntityType == "LoadRelay"
+                        ? "delivery"
+                        : load?.RelayPlan is { Enabled: true } ? "collection" : null;
+                    await routeVerificationGate.WaitAsync(ct);
+                    try
+                    {
+                        var route = await samsara.GetRouteByRunIdAsync(mapping.TmsEntityId, ct, suffix);
+                        return (mapping.TmsEntityType, mapping.TmsEntityId, Exists: route is not null);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        logger.LogWarning(exception, "Samsara route verification failed for {EntityType} {EntityId}.", mapping.TmsEntityType, mapping.TmsEntityId);
+                        return (mapping.TmsEntityType, mapping.TmsEntityId, Exists: true);
+                    }
+                    finally
+                    {
+                        routeVerificationGate.Release();
+                    }
+                }));
+
+            var verificationByKey = verification.ToDictionary(item => (item.TmsEntityType, item.TmsEntityId));
+            verifiedMappings = mappings
+                .Where(item => !verificationByKey.TryGetValue((item.TmsEntityType, item.TmsEntityId), out var state) || state.Exists)
+                .ToList();
+            staleRouteCount = verification.Count(item => !item.Exists);
+        }
+
+        var rows = verifiedMappings
             .GroupBy(item => item.TmsEntityId)
+            .Where(group =>
+            {
+                var load = byId.GetValueOrDefault(group.Key);
+                return load?.RelayPlan is not { Enabled: true } || group.Any(item => item.TmsEntityType == "Load");
+            })
             .Select(group =>
             {
                 var item = group.FirstOrDefault(value => value.TmsEntityType == "Load") ?? group.First();
@@ -171,32 +238,14 @@ public sealed class SamsaraDispatchController(
             .OrderBy(item => item.reference)
             .ToList();
 
-        var connected = false;
-        string? connectionMessage = null;
-        if (samsara.IsConfigured)
-        {
-            try
-            {
-                connected = await samsara.CheckConnectivityAsync(ct);
-                connectionMessage = connected ? "Samsara EU API connected." : "Samsara is configured but did not pass the connection check.";
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogWarning(exception, "Samsara dispatch connectivity probe failed.");
-                connectionMessage = $"Samsara is configured but not reachable: {exception.GetBaseException().Message}";
-            }
-        }
-        else
-        {
-            connectionMessage = $"Samsara runtime settings are incomplete: {string.Join(", ", samsara.MissingSettings)}.";
-        }
-
         return Ok(new
         {
             planningDate = date,
             configured = samsara.IsConfigured,
             connected,
             connectionMessage,
+            remoteVerification = connected,
+            staleRouteCount,
             planningAuthority = "SLH TMS",
             routeProgressSyncEnabled = options.EnableRouteProgressSync,
             runs = rows
