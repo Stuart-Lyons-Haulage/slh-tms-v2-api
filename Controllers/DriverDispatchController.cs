@@ -48,12 +48,6 @@ public sealed class DriverDispatchController(
             .ThenByDescending(load => load.CreatedAtUtc)
             .ToListAsync(ct);
 
-        var activityStart = planningDate.AddDays(-28);
-        var recentActivity = await db.Loads.AsNoTracking()
-            .Where(load => load.DriverId != null && load.PlanningDate >= activityStart && load.PlanningDate < planningDate && ExecutedStatuses.Contains(load.Status))
-            .Select(load => new { DriverId = load.DriverId!.Value, load.PlanningDate })
-            .ToListAsync(ct);
-
         var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
         var relevantDriverIds = loads.Concat(history)
             .Where(load => load.DriverId is not null)
@@ -72,61 +66,18 @@ public sealed class DriverDispatchController(
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         var sage = await sageTask;
 
-        var previousWeekStart = weekStart.AddDays(-7);
-        var previousWeekEnd = weekStart.AddDays(-1);
-        var previousWeekDriverIds = recentActivity
-            .Where(item => item.PlanningDate >= previousWeekStart && item.PlanningDate <= previousWeekEnd)
-            .Select(item => item.DriverId)
-            .ToHashSet();
-        var regularRecentDriverIds = recentActivity
-            .GroupBy(item => item.DriverId)
-            .Where(group => group.Select(item => item.PlanningDate).Distinct().Count() >= 3)
-            .Select(group => group.Key)
-            .ToHashSet();
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
         var selectedDrivers = driverCandidates.Where(driver =>
-        {
-            var employeeKey = Normalise(driver.EmployeeNumber);
-            var sageDriver = sage.Available && sage.ActiveDriverEmployeeNumbers.Contains(employeeKey);
-            var persistedCasual = driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true ||
-                                  driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
-            var persistedAgency = PersistedAgency(driver);
-            var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
-                                        previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
-
-            // A current TMS allocation is operational truth for Dispatch visibility.
-            // Sage HR still supplies leave/availability, but a roster mismatch must never hide
-            // a driver who is already allocated to today's plan.
-            if (currentDayDriverIds.Contains(driver.Id)) return true;
-            if (DriverPopulationRules.IsSubcontractor(driver)) return true;
-            if (persistedAgency) return operationallyRelevant;
-            if (sage.Available) return sageDriver;
-            return persistedCasual || PersistedEmployee(driver) || operationallyRelevant;
-        }).ToList();
+            currentDayDriverIds.Contains(driver.Id) ||
+            DriverPopulationRules.IsDriver(driver) ||
+            DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
 
         await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
 
-        // Re-apply the rule after enrichment because AgencyName/Coding are audited detail fields rather
-        // than physical Driver columns. Sage HR's Drivers team / Driver position is the employed driver gate.
-        selectedDrivers = selectedDrivers.Where(driver =>
-        {
-            var employeeKey = Normalise(driver.EmployeeNumber);
-            var sageDriver = sage.Available && sage.ActiveDriverEmployeeNumbers.Contains(employeeKey);
-            var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
-                                        previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
-            if (currentDayDriverIds.Contains(driver.Id)) return true;
-            if (DriverPopulationRules.IsSubcontractor(driver)) return true;
-            if (IsAgency(driver)) return operationallyRelevant;
-            if (sage.Available) return sageDriver;
-
-            // If Sage HR is temporarily unavailable, fail conservatively to genuine driver evidence
-            // rather than falling back to every active row in dbo.Drivers.
-            return CanonicalType(driver) == "Casual" ||
-                   IsOperationalDriverGroup(driver.DriverGroup) ||
-                   !string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
-                   operationallyRelevant;
-        }).OrderBy(driver => driver.DisplayName).ToList();
+        // Detail enrichment supplies agency name, coding and skills, but does not
+        // change the Master Data employment classification.
+        selectedDrivers = selectedDrivers.OrderBy(driver => driver.DisplayName).ToList();
 
         // Start the bounded Tacho history read before the remaining planning enrichment so its
         // network latency overlaps with the local database/assistant work below.
@@ -215,7 +166,7 @@ public sealed class DriverDispatchController(
                 driver.Id,
                 driver.EmployeeNumber,
                 driver.DisplayName,
-                CanonicalType(driver),
+                DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup),
                 driver.DriverGroup,
                 driver.Skills,
                 driver.Coding,
@@ -598,13 +549,7 @@ public sealed class DriverDispatchController(
             if (clean.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return clean[prefix.Length..].Trim();
         return clean;
     }
-    private static string CanonicalType(Driver driver) => DriverPopulationRules.IsSubcontractor(driver) ? "Subcontractor" : IsAgency(driver) ? "Agency" : driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true ? "Casual" : "Employed";
     private static bool IsAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup, driver.AgencyName }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true) || string.Equals(driver.Coding?.Trim(), "4", StringComparison.OrdinalIgnoreCase);
-    private static bool PersistedAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true);
-    private static bool PersistedEmployee(Driver driver) => driver.DriverType?.Contains("employ", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
-    private static bool IsOperationalDriverGroup(string? value) =>
-        value?.Contains("driver", StringComparison.OrdinalIgnoreCase) == true ||
-        value?.Contains("tramp", StringComparison.OrdinalIgnoreCase) == true;
     private static int TypeOrder(string type) => type == "Employed" ? 0 : type == "Casual" ? 1 : type == "Agency" ? 2 : type == "Subcontractor" ? 3 : 4;
     private static string? CanonicalRequestedType(string? value)
     {

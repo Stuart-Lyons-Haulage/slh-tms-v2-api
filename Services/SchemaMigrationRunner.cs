@@ -238,7 +238,8 @@ public static class SchemaMigrationRunner
         "082_Barfoots_Physical_North_South_Sites.sql",
         "083_Site_Samsara_Identity.sql",
         "084_Canonical_Summer_Berry_Customer.sql",
-        "085_Fleetio_Trailer_Status.sql"
+        "085_Fleetio_Trailer_Status.sql",
+        "086_Driver_Availability_Windows.sql"
     ];
 
     internal const string HistoryTableSql = """

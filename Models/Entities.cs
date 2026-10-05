@@ -104,6 +104,25 @@ public sealed class Driver
     public DateTimeOffset? LastTachoSyncUtc { get; set; }
     public bool Active { get; set; } = true;
 }
+
+public sealed class DriverAvailabilityWindow
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid DriverId { get; set; }
+    public Driver? Driver { get; set; }
+    public DateTimeOffset AvailableFromUtc { get; set; }
+    public DateTimeOffset AvailableUntilUtc { get; set; }
+    public bool Confirmed { get; set; }
+    public bool LongTermPlacement { get; set; }
+    public DateOnly? PlacementEndDate { get; set; }
+    [MaxLength(80)] public string? UsualDays { get; set; }
+    [MaxLength(500)] public string? Notes { get; set; }
+    [MaxLength(160)] public string? BookingReference { get; set; }
+    [MaxLength(160)] public required string CreatedBy { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    [MaxLength(160)] public required string UpdatedBy { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
 public sealed class Trailer
 {
     public Guid Id { get; set; } = Guid.NewGuid();

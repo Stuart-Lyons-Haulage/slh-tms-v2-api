@@ -240,16 +240,11 @@ public static class DriverDispatchVisibilityStore
 
     internal static string EmploymentType(Driver driver, SageRoster roster, bool rosteredAgency = false)
     {
-        var employeeNumber = Normalise(driver.EmployeeNumber);
-        if (roster.Available && employeeNumber.Length > 0 && roster.EmployeeNumbers.Contains(employeeNumber))
-            return "Employed";
-        if (rosteredAgency) return "Agency";
-        if (DriverPopulationRules.IsSubcontractor(driver)) return "Subcontractor";
-        var token = Normalise($"{driver.DriverType} {driver.DriverGroup} {driver.AgencyName}");
-        if (token.Contains("CASUAL", StringComparison.Ordinal) || token.Contains("ZEROHOUR", StringComparison.Ordinal)) return "Casual";
-        // Do not call a local Driver Master row Employed when Sage HR is the employment authority.
-        // Keep it visible for reconciliation rather than silently promoting it.
-        return "Unmatched";
+        // Driver Master is the classification authority. SageHR and the availability
+        // roster are validation/availability evidence only and must never reclassify.
+        _ = roster;
+        _ = rosteredAgency;
+        return DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup);
     }
 
     private static async Task<SageRoster> ReadSageRosterAsync(TmsDbContext db, SageHrClient sageHr, ILogger logger, CancellationToken ct)

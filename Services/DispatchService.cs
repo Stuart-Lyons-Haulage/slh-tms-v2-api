@@ -11,6 +11,7 @@ namespace Slh.Tms.Api.Services;
 public sealed class DispatchService(
     TmsDbContext db,
     TachoMasterClient tachoMaster,
+    SageHrClient sageHr,
     DispatchOptions options,
     ILogger<DispatchService> logger)
 {
@@ -31,6 +32,8 @@ public sealed class DispatchService(
         var liveStatuses = await ReadLiveStatusesAsync(ct);
         var history = await ReadRecentHistoryAsync(planningDate, ct);
         var signOffTracking = await ReadTachoSignOffTrackingAsync(duties, ct);
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger);
+        var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
 
@@ -74,7 +77,10 @@ public sealed class DispatchService(
             var offContract = IsHalfTramper(profile.EmploymentType) &&
                               profile.ContractedDays.Count > 0 &&
                               !profile.ContractedDays.Contains(planningDate.DayOfWeek);
-            var blockedReason = onHoliday ? "Annual leave" : offContract ? "Not contracted tomorrow" : null;
+            availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability);
+            var blockedReason = sharedAvailability is { Dispatchable: false }
+                ? string.Join(" · ", sharedAvailability.BlockReasons)
+                : onHoliday ? "Annual leave" : offContract ? "Not contracted tomorrow" : null;
             var needsReturn = DispatchReturnRules.NeedsReturn(day, latitude, options.NorthernLatitudeThreshold);
             var suggestion = blockedReason is null
                 ? ChooseSuggestion(driver.Id, skills, needsReturn, latitude, longitude, runProfiles)
@@ -84,7 +90,7 @@ public sealed class DispatchService(
                 driver.Id,
                 profile.DriverCode ?? driver.EmployeeNumber,
                 driver.DisplayName,
-                CanonicalEmploymentType(profile.EmploymentType, driver),
+                sharedAvailability?.EmploymentType ?? DriverAvailabilityService.CanonicalEmploymentType(profile.EmploymentType ?? driver.DriverType, driver.DriverGroup),
                 skills,
                 profile.HolidayDates,
                 profile.ContractedDays,
@@ -143,6 +149,8 @@ public sealed class DispatchService(
         // Do not parallelise EF-backed reads on the scoped TmsDbContext.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
         var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
+        var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var referenceDate = request.PlanningDate > today ? today : request.PlanningDate;
 
@@ -160,16 +168,22 @@ public sealed class DispatchService(
             var dailyLimitHours = DispatchTachoRules.DailyDrivingLimitMinutes(driver, driverDuties) / 60m;
             var availableFrom = DispatchTachoRules.AvailableFrom(shiftEnd, rest);
 
-            string? breach = null;
-            if (useReducedRest && rest.Hours != 9)
-                breach = "Reduced 9h daily rest is not available; the statutory reduced-rest allowance is exhausted or cannot be evidenced.";
-            else if (profile.HolidayDates.Contains(request.PlanningDate)) breach = "Annual leave";
-            else if (IsHalfTramper(profile.EmploymentType) && profile.ContractedDays.Count > 0 && !profile.ContractedDays.Contains(request.PlanningDate.DayOfWeek))
-                breach = "Not contracted tomorrow";
-            else if (!breakCompliant) breach = "Break compliance breach — required Tacho break is not evidenced.";
-            else if (weeklyWorking >= 60m) breach = "WTD breach — 60-hour weekly limit already reached.";
-            else if (request.PlanningDate <= today && dailyDriving >= dailyLimitHours) breach = "Daily driving limit already reached.";
-            else if (shiftEnd is null) breach = "No completed TachoMaster duty is available to anchor the legal rest calculation.";
+            availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability);
+            string? breach = sharedAvailability is { Dispatchable: false }
+                ? string.Join(" · ", sharedAvailability.BlockReasons)
+                : null;
+            if (breach is null)
+            {
+                if (useReducedRest && rest.Hours != 9)
+                    breach = "Reduced 9h daily rest is not available; the statutory reduced-rest allowance is exhausted or cannot be evidenced.";
+                else if (profile.HolidayDates.Contains(request.PlanningDate)) breach = "Annual leave";
+                else if (IsHalfTramper(profile.EmploymentType) && profile.ContractedDays.Count > 0 && !profile.ContractedDays.Contains(request.PlanningDate.DayOfWeek))
+                    breach = "Not contracted tomorrow";
+                else if (!breakCompliant) breach = "Break compliance breach — required Tacho break is not evidenced.";
+                else if (weeklyWorking >= 60m) breach = "WTD breach — 60-hour weekly limit already reached.";
+                else if (request.PlanningDate <= today && dailyDriving >= dailyLimitHours) breach = "Daily driving limit already reached.";
+                else if (shiftEnd is null) breach = "No completed TachoMaster duty is available to anchor the legal rest calculation.";
+            }
 
             result.Add(new DispatchAvailableTimeDto(
                 driver.Id,
@@ -211,6 +225,8 @@ public sealed class DispatchService(
         // caused the live HTTP 500 seen when Dispatch attempted a single-row lock.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
         var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
+        var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);
         var vehicleById = await db.Vehicles.AsNoTracking()
             .Where(vehicle => vehicle.Active && vehicleIds.Contains(vehicle.Id))
@@ -234,6 +250,18 @@ public sealed class DispatchService(
             {
                 failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId, "Run is not available on the requested planning date."));
                 continue;
+            }
+            if (!availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability) || !sharedAvailability.Dispatchable)
+            {
+                var reason = sharedAvailability is null ? "No shared Driver Availability decision is available." : string.Join(" · ", sharedAvailability.BlockReasons);
+                failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId, $"{driver.DisplayName} is not dispatchable: {reason}"));
+            }
+            else if (sharedAvailability.EmploymentType is "Agency" or "Casual" &&
+                     (sharedAvailability.AvailableFromUtc is null || sharedAvailability.AvailableUntilUtc is null ||
+                      allocation.PlannedStartTime < sharedAvailability.AvailableFromUtc || allocation.PlannedStartTime >= sharedAvailability.AvailableUntilUtc))
+            {
+                failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId,
+                    $"{driver.DisplayName}'s confirmed availability window does not cover the planned start time."));
             }
             if (!vehicleById.ContainsKey(allocation.VehicleId))
                 failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId, "Vehicle is not active or could not be found."));
@@ -752,20 +780,6 @@ public sealed class DispatchService(
             if (span > 0) return Math.Round(span, 2);
         }
         return estimatedDrivingHours > 0 ? Math.Round(estimatedDrivingHours + Math.Max(1m, stops.Count * 0.5m), 2) : 0m;
-    }
-
-    private static string CanonicalEmploymentType(string? value, Driver driver)
-    {
-        var token = Normalise(value);
-        if (token == "HALFTRAMPER" || token == "HALFTRAMP") return "HalfTramper";
-        if (token == "AGENCYDAY" || token == "DAYAGENCY") return "AgencyDay";
-        if (token == "AGENCYLONG" || token == "LONGAGENCY") return "AgencyLong";
-        if (token == "EMPLOYED") return "Employed";
-
-        var fallback = Normalise(driver.DriverType);
-        if (fallback.Contains("HALFTRAMP", StringComparison.Ordinal)) return "HalfTramper";
-        if (fallback.Contains("AGENCY", StringComparison.Ordinal) || fallback.Contains("SUBCONTRACT", StringComparison.Ordinal)) return "AgencyLong";
-        return "Employed";
     }
 
     private static bool IsHalfTramper(string? value) => Normalise(value).Contains("HALFTRAMP", StringComparison.Ordinal);

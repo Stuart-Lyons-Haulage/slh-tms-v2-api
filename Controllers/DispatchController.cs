@@ -16,12 +16,13 @@ public sealed class DispatchController : ControllerBase
     public DispatchController(
         TmsDbContext db,
         TachoMasterClient tachoMaster,
+        SageHrClient sageHr,
         IConfiguration configuration,
         ILogger<DispatchService> logger)
     {
         var options = new DispatchOptions();
         configuration.GetSection("Dispatch").Bind(options);
-        dispatch = new DispatchService(db, tachoMaster, options, logger);
+        dispatch = new DispatchService(db, tachoMaster, sageHr, options, logger);
     }
 
     [HttpGet("drivers")]

@@ -19,6 +19,7 @@ public sealed record DriverDispatchAgencyRosterEntry(
 public static class DriverDispatchAgencyRosterStore
 {
     private const string EntityType = "driverdispatchagencyroster";
+    private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public static DateOnly WeekStart(DateOnly date)
@@ -100,7 +101,33 @@ public static class DriverDispatchAgencyRosterStore
         row.ReviewedAtUtc = DateTimeOffset.UtcNow;
         row.ReviewedBy = actor;
         row.ReviewNote = $"Agency driver available {entry.FromDate:dd/MM/yyyy} to {entry.ThroughDate:dd/MM/yyyy} for the Wednesday-Tuesday planning week.";
+
+        var bookingReference = $"legacy-roster:{weekStart:yyyy-MM-dd}";
+        var availability = await db.DriverAvailabilityWindows.SingleOrDefaultAsync(item => item.DriverId == driver.Id && item.BookingReference == bookingReference, ct);
+        if (availability is null)
+        {
+            availability = new DriverAvailabilityWindow
+            {
+                DriverId = driver.Id,
+                CreatedBy = actor,
+                UpdatedBy = actor
+            };
+            db.DriverAvailabilityWindows.Add(availability);
+        }
+        availability.AvailableFromUtc = ToUtc(fromDate.ToDateTime(TimeOnly.MinValue));
+        availability.AvailableUntilUtc = ToUtc(throughDate.AddDays(1).ToDateTime(TimeOnly.MinValue));
+        availability.Confirmed = true;
+        availability.LongTermPlacement = false;
+        availability.PlacementEndDate = null;
+        availability.UsualDays = null;
+        availability.Notes = "Created from the existing Driver Dispatch weekly agency roster.";
+        availability.BookingReference = bookingReference;
+        availability.UpdatedBy = actor;
+        availability.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
         return entry;
     }
+
+    private static DateTimeOffset ToUtc(DateTime local) =>
+        new(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), London), TimeSpan.Zero);
 }
