@@ -115,7 +115,9 @@ public sealed class DispatchService(
                 suggestion.DistanceMiles,
                 suggestion.IsBackload,
                 suggestion.DeadheadReductionMiles,
-                blockedReason ?? suggestion.Message));
+                blockedReason ?? suggestion.Message,
+                suggestion.Score,
+                suggestion.Reasons));
         }
 
         return rows
@@ -466,7 +468,9 @@ public sealed class DispatchService(
                 backload.Distance,
                 true,
                 reduction,
-                $"Backload candidate{reductionText}");
+                $"Backload candidate{reductionText}",
+                ScoreSuggestion(backload.Profile, backload.Distance, skills, needsReturn, true, driverId),
+                SuggestionReasons(backload.Profile, backload.Distance, skills, needsReturn, true, reduction));
         }
 
         var closest = eligible.Where(item => item.Distance is not null).OrderBy(item => item.Distance).ThenBy(item => item.Profile.Dto.Reference).FirstOrDefault();
@@ -477,12 +481,44 @@ public sealed class DispatchService(
                 closest.Distance,
                 closest.Profile.Dto.IsBackload,
                 null,
-                $"This driver is {closest.Distance:0.#}mi from {closest.Profile.Dto.CollectionPoint.Name} — good fit for {closest.Profile.Dto.Reference}");
+                $"This driver is {closest.Distance:0.#}mi from {closest.Profile.Dto.CollectionPoint.Name} — good fit for {closest.Profile.Dto.Reference}",
+                ScoreSuggestion(closest.Profile, closest.Distance, skills, needsReturn, closest.Profile.Dto.IsBackload, driverId),
+                SuggestionReasons(closest.Profile, closest.Distance, skills, needsReturn, closest.Profile.Dto.IsBackload, null));
 
         var first = eligible.OrderBy(item => item.Profile.Dto.Reference).FirstOrDefault();
         return first is null
             ? DispatchSuggestion.None
-            : new DispatchSuggestion(first.Profile.Dto.RunId, first.Profile.Dto.Reference, null, first.Profile.Dto.IsBackload, null, "Compatible run available; live distance is not currently available.");
+            : new DispatchSuggestion(first.Profile.Dto.RunId, first.Profile.Dto.Reference, null, first.Profile.Dto.IsBackload, null, "Compatible run available; live distance is not currently available.",
+                ScoreSuggestion(first.Profile, null, skills, needsReturn, first.Profile.Dto.IsBackload, driverId),
+                SuggestionReasons(first.Profile, null, skills, needsReturn, first.Profile.Dto.IsBackload, null));
+    }
+
+    private static int ScoreSuggestion(RunProfile profile, decimal? distanceMiles, DispatchSkill heldSkills, bool needsReturn, bool isBackload, Guid driverId)
+    {
+        var score = distanceMiles is decimal distance
+            ? Math.Clamp((int)Math.Round(45m - distance * 0.65m), 0, 45)
+            : 12;
+        if (profile.Dto.RequiredSkills == DispatchSkill.None) score += 15;
+        else if (DispatchSkillRules.HasAll(heldSkills, profile.Dto.RequiredSkills)) score += 25;
+        if (needsReturn && isBackload) score += 25;
+        else if (!needsReturn && !isBackload) score += 10;
+        if (profile.Load.DriverId == driverId) score += 10;
+        return Math.Clamp(score, 0, 100);
+    }
+
+    private static IReadOnlyList<string> SuggestionReasons(RunProfile profile, decimal? distanceMiles, DispatchSkill heldSkills, bool needsReturn, bool isBackload, decimal? deadheadReductionMiles)
+    {
+        var reasons = new List<string>();
+        if (distanceMiles is decimal distance) reasons.Add($"{distance:0.#}mi to first collection");
+        else reasons.Add("Live distance unavailable; location fallback used");
+        if (profile.Dto.RequiredSkills == DispatchSkill.None) reasons.Add("No specialist skills required");
+        else reasons.Add($"Skills matched: {string.Join(", ", DispatchSkillRules.Names(profile.Dto.RequiredSkills))}");
+        if (needsReturn && isBackload)
+            reasons.Add(deadheadReductionMiles is decimal saved && saved > 0 ? $"Return/backload fit; saves about {saved:0.#}mi deadhead" : "Return/backload fit");
+        else if (!needsReturn && !isBackload)
+            reasons.Add("Normal work matched by collection proximity");
+        if (profile.Load.DriverId is not null) reasons.Add("Already allocated to this driver");
+        return reasons;
     }
 
     private async Task<Dictionary<Guid, DriverMasterProfile>> ReadDriverMasterProfilesAsync(IReadOnlyCollection<Driver> drivers, CancellationToken ct)
@@ -826,7 +862,9 @@ public sealed class DispatchService(
         decimal? DistanceMiles,
         bool IsBackload,
         decimal? DeadheadReductionMiles,
-        string? Message)
+        string? Message,
+        int? Score = null,
+        IReadOnlyList<string>? Reasons = null)
     {
         public static DispatchSuggestion None { get; } = new(null, null, null, false, null, null);
     }

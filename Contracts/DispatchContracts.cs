@@ -59,7 +59,9 @@ public sealed record DispatchDriverDto(
     decimal? DistanceToSuggestedCollectionMiles,
     bool BackloadCandidate,
     decimal? DeadheadReductionMiles,
-    string? Suggestion);
+    string? Suggestion,
+    int? SuggestionScore = null,
+    IReadOnlyList<string>? SuggestionReasons = null);
 
 public sealed record DispatchRunDto(
     Guid RunId,
