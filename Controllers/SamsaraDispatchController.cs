@@ -754,7 +754,7 @@ public sealed class SamsaraDispatchController(
         {
             var dispatchState = await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct);
             dispatchState.TryGetValue(load.Id, out var state);
-            var orderedStops = load.Stops.OrderBy(stop => stop.Sequence).ToList();
+            var orderedStops = OperationalStopOrdering.Order(load.Stops);
             if (driver is null)
                 return BadRequest(new { message = "Allocate a driver before sending the run to Samsara." });
             var available = (await dispatch.GetAvailableTimesAsync(
@@ -813,7 +813,7 @@ public sealed class SamsaraDispatchController(
                     index,
                     ResolveLocation(stop, sites)))
                 .ToList();
-            var physicalStops = SamsaraPhysicalStopGrouping.GroupAdjacent(resolvedStops.Select(item =>
+            var physicalStops = SamsaraPhysicalStopGrouping.GroupCollectionFirst(resolvedStops.Select(item =>
                 new SamsaraPhysicalStopCandidate(
                     item.Stop.Id,
                     item.Stop.Name,

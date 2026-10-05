@@ -43,6 +43,24 @@ public static class SamsaraPhysicalStopGrouping
         return groups;
     }
 
+    /// <summary>
+    /// Projects the common multi-collection pattern into the physical journey
+    /// used by Samsara: each collection remains visible, while repeated deliveries
+    /// to the same physical destination are represented by one final stop with all
+    /// source jobs retained in its notes.
+    /// </summary>
+    public static List<SamsaraPhysicalStopGroup> GroupCollectionFirst(IEnumerable<SamsaraPhysicalStopCandidate> candidates)
+    {
+        var ordered = candidates.ToList();
+        var collections = GroupAdjacent(ordered.Where(item => item.IsCollection));
+        var deliveries = ordered
+            .Where(item => !item.IsCollection)
+            .GroupBy(Key, StringComparer.Ordinal)
+            .Select(group => new SamsaraPhysicalStopGroup(group.ToList()));
+
+        return collections.Concat(deliveries).ToList();
+    }
+
     private static string Key(SamsaraPhysicalStopCandidate candidate)
     {
         var phase = candidate.IsCollection ? "collection" : "delivery";

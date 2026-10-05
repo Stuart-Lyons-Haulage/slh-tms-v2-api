@@ -67,6 +67,28 @@ public sealed class SamsaraPhysicalStopGroupingTests
         Assert.Equal(3, groups.Count);
     }
 
+    [Fact]
+    public void Collection_first_projection_merges_repeated_final_delivery_site()
+    {
+        var deliverySite = Guid.NewGuid();
+        var candidates = new[]
+        {
+            Candidate("Collect · Farm A", true, Guid.NewGuid()),
+            Candidate("Deliver · Aldi", false, deliverySite, Guid.NewGuid()),
+            Candidate("Collect · Farm B", true, Guid.NewGuid()),
+            Candidate("Deliver · Aldi", false, deliverySite, Guid.NewGuid()),
+            Candidate("Collect · Farm C", true, Guid.NewGuid()),
+            Candidate("Deliver · Aldi", false, deliverySite, Guid.NewGuid()),
+        };
+
+        var groups = SamsaraPhysicalStopGrouping.GroupCollectionFirst(candidates);
+
+        Assert.Equal(4, groups.Count);
+        Assert.Equal(3, groups.Count(group => group.Representative.IsCollection));
+        Assert.False(groups[^1].Representative.IsCollection);
+        Assert.Equal(3, groups[^1].Members.Count);
+    }
+
     private static SamsaraPhysicalStopCandidate Candidate(string name, bool collection, Guid siteId, Guid? orderId = null) =>
         new(Guid.NewGuid(), name, siteId, $"{name} address", 50, -1, null, collection, orderId, null);
 }
