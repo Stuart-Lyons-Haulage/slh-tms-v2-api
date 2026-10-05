@@ -38,7 +38,7 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
     }
 
     [Fact]
-    public async Task Active_subcontractor_is_visible_in_Driver_Dispatch_without_Sage_or_Tacho_identity()
+    public async Task Active_subcontractor_is_visible_as_unknown_for_Master_Data_review_without_Sage_or_Tacho_identity()
     {
         var name = $"Bannisters Test {Guid.NewGuid():N}";
         using (var scope = factory.Services.CreateScope())
@@ -60,7 +60,7 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         var driver = payload.GetProperty("drivers").EnumerateArray().Single(item => item.GetProperty("displayName").GetString() == name);
-        Assert.Equal("Subcontractor", driver.GetProperty("driverType").GetString());
+        Assert.Equal("Unknown", driver.GetProperty("driverType").GetString());
         Assert.Equal("Bannisters", driver.GetProperty("driverGroup").GetString());
     }
 
