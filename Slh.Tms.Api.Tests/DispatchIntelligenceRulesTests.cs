@@ -144,6 +144,18 @@ public sealed class DispatchIntelligenceRulesTests
     }
 
     [Fact]
+    public void Rebase_planned_start_moves_stale_start_to_current_legal_start()
+    {
+        var legalStart = DateTimeOffset.Parse("2026-10-05T08:50:00Z");
+
+        Assert.Equal(legalStart, DispatchTachoRules.RebasePlannedStart(
+            DateTimeOffset.Parse("2026-10-05T08:49:59Z"), legalStart));
+        Assert.Equal(legalStart, DispatchTachoRules.RebasePlannedStart(legalStart, legalStart));
+        Assert.Equal(DateTimeOffset.Parse("2026-10-05T09:00:00Z"), DispatchTachoRules.RebasePlannedStart(
+            DateTimeOffset.Parse("2026-10-05T09:00:00Z"), legalStart));
+    }
+
+    [Fact]
     public void No_completed_tacho_duty_has_no_legal_start_to_persist_or_dispatch()
     {
         var driver = TestDriver();

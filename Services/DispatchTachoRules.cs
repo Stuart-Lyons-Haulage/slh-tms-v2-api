@@ -79,6 +79,11 @@ public static class DispatchTachoRules
     public static DateTimeOffset? AvailableFrom(DateTimeOffset? shiftEndTimeUtc, DispatchRestRequirement requirement) =>
         shiftEndTimeUtc?.AddHours(requirement.Hours);
 
+    public static DateTimeOffset RebasePlannedStart(DateTimeOffset? plannedStartUtc, DateTimeOffset legalStartUtc) =>
+        plannedStartUtc is DateTimeOffset planned && planned >= legalStartUtc
+            ? planned
+            : legalStartUtc;
+
     public static DateTimeOffset? LatestShiftEndUtc(Driver driver, IEnumerable<TachoDriverDutyStatus> source) =>
         Matching(driver, source)
             .Where(duty => duty.DutyEndUtc is not null)

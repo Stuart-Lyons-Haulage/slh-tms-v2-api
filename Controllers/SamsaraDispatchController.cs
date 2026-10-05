@@ -713,16 +713,19 @@ public sealed class SamsaraDispatchController(
             var firstScheduled = state?.DriverId == driver.Id && state.PlannedStartUtc is DateTimeOffset persistedStart
                 ? persistedStart
                 : available.AvailableFrom.Value;
-            if (firstScheduled < available.AvailableFrom)
-                return BadRequest(new { message = $"The run cannot be sent to Samsara before the TachoMaster legal start {available.AvailableFrom:O}." });
-            if (state?.DriverId != driver.Id || state.PlannedStartUtc is null)
+            var legalStart = available.AvailableFrom.Value;
+            var rebasedStart = DispatchTachoRules.RebasePlannedStart(firstScheduled, legalStart);
+            if (state?.DriverId != driver.Id || state.PlannedStartUtc is null || rebasedStart != state.PlannedStartUtc)
             {
                 state = await DriverDispatchStateStore.SetPlannedStartAsync(
-                    db, load.Id, firstScheduled, User.Identity?.Name, ct,
-                    available.RequiredRestPeriod == 9 ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
+                    db, load.Id, rebasedStart, User.Identity?.Name, ct,
+                    rebasedStart != firstScheduled
+                        ? "Rebased on resend to TachoMaster legal start"
+                        : available.RequiredRestPeriod == 9 ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
                     driver.Id,
                     state?.UseReducedDailyRest == true);
             }
+            firstScheduled = rebasedStart;
 
             var firstPlannedStopTime = orderedStops[0].PlannedArrivalUtc;
             if (firstPlannedStopTime is DateTimeOffset firstStopTime && firstStopTime < firstScheduled)

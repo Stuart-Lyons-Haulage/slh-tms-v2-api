@@ -60,9 +60,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
                 return Conflict(new { code = "tacho_start_unavailable", message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
             if (!string.IsNullOrWhiteSpace(available.BreachDetail))
                 return Conflict(new { code = "tacho_dispatch_blocked", message = available.BreachDetail });
-            if (plannedStart is null) plannedStart = available.AvailableFrom;
-            if (plannedStart < available.AvailableFrom)
-                return Conflict(new { code = "tacho_start_too_early", message = $"The run cannot start before {available.AvailableFrom:O}; TachoMaster requires {available.RequiredRestPeriod}h daily rest." });
+            plannedStart = DispatchTachoRules.RebasePlannedStart(plannedStart, available.AvailableFrom.Value);
         }
         if (request.VehicleId is Guid requestedVehicleId && await HasResourceOverlap(requestedVehicleId, null, load, plannedStart, ct))
             return Conflict(new { code = "vehicle_in_use", message = "The selected vehicle is already committed to an overlapping run. Choose another vehicle or a start time after the previous run ends." });
