@@ -43,7 +43,9 @@ public static class TimesheetEvidenceRules
         decimal? lastLatitude,
         decimal? lastLongitude,
         IEnumerable<DepotPoint> depots,
-        bool sameVehicle)
+        bool sameVehicle,
+        IEnumerable<LorryParkEvidence>? lorryParks = null,
+        IEnumerable<string>? vehicleAliases = null)
     {
         if (dutyEndUtc is null || nextDutyStartUtc is null || nextDutyStartUtc <= dutyEndUtc)
             return new("No Night Out", null, "No consecutive completed duties were available.");
@@ -57,6 +59,18 @@ public static class TimesheetEvidenceRules
         // a long weekend absence even when the final RoadTech point is away from depot.
         if (restMinutes > 24 * 60)
             return new("No Night Out", restMinutes, "The rest interval exceeded 24 hours and is treated as full/weekly rest, not a night out.");
+
+        var aliases = (vehicleAliases ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var lorryParkAtDutyEnd = sameVehicle && lorryParks is not null && lorryParks.Any(park =>
+            (aliases.Count == 0 || aliases.Contains(Normalise(park.VehicleIdentifier))) &&
+            park.EnteredAtUtc <= dutyEndUtc.Value.AddMinutes(30) &&
+            park.LastInsideAtUtc >= dutyEndUtc.Value.AddMinutes(-90));
+        if (lorryParkAtDutyEnd)
+        {
+            return restMinutes >= 11 * 60
+                ? new("Confirmed Night Out - Regular Rest", restMinutes, "RoadTech confirmed the vehicle entered a recognised lorry-park geofence near duty end and remained away from the depot through a completed 11-hour rest interval.")
+                : new("Confirmed Night Out - Reduced Rest", restMinutes, "RoadTech confirmed the vehicle entered a recognised lorry-park geofence near duty end and remained away from the depot through a completed reduced rest interval.");
+        }
 
         if (lastMovementUtc is null || lastLatitude is null || lastLongitude is null)
             return new("Possible Night Out", restMinutes, "The duty gap is long enough, but the final away-from-depot location is incomplete.");
@@ -91,4 +105,5 @@ public static class TimesheetEvidenceRules
 
 public sealed record MovementWindow(DateTimeOffset? FirstUtc, DateTimeOffset? LastUtc, IReadOnlyList<string> VehicleIdentifiers);
 public sealed record DepotPoint(decimal Latitude, decimal Longitude, int RadiusMetres = 500);
+public sealed record LorryParkEvidence(string VehicleIdentifier, DateTimeOffset EnteredAtUtc, DateTimeOffset LastInsideAtUtc, string GeofenceName);
 public sealed record NightOutAssessment(string Status, int? RestMinutes, string Reason);

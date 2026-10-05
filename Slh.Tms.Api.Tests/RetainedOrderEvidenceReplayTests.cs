@@ -74,7 +74,8 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         var request = JsonSerializer.Serialize(new
         {
             receivedFromUtc = "2026-09-15T00:00:00Z",
-            minimumPlanningDate = "2026-09-18",
+            minimumPlanningDate = "2026-09-19",
+            maximumPlanningDate = "2026-09-19",
             refreshUnamendedPending = true,
             maxMessages = 50
         });

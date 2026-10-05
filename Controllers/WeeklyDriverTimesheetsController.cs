@@ -268,6 +268,29 @@ public sealed class WeeklyDriverTimesheetsController(
             logger.LogWarning(ex, "Depot geofences were unavailable for timesheet night-out inference; uncertain events remain possible night outs.");
         }
 
+        IReadOnlyList<LorryParkEvidence> lorryParkEvidence = [];
+        try
+        {
+            var evidenceFrom = StartOfUkDay(from).AddDays(-1);
+            var evidenceTo = StartOfUkDay(to.AddDays(2));
+            lorryParkEvidence = await db.GeofenceVisits.AsNoTracking()
+                .Join(db.SiteGeofences.AsNoTracking().Where(fence => fence.Active &&
+                    (EF.Functions.Like(fence.Category ?? "", "%lorry%park%") ||
+                     EF.Functions.Like(fence.Name, "%lorry park%") ||
+                     EF.Functions.Like(fence.Name, "%truck stop%") ||
+                     EF.Functions.Like(fence.Name, "%truckstop%"))),
+                    visit => visit.GeofenceId,
+                    fence => fence.Id,
+                    (visit, fence) => new { visit, fence })
+                .Where(item => item.visit.EnteredAtUtc < evidenceTo && item.visit.LastInsideAtUtc >= evidenceFrom)
+                .Select(item => new LorryParkEvidence(item.visit.VehicleIdentifier, item.visit.EnteredAtUtc, item.visit.LastInsideAtUtc, item.fence.Name))
+                .ToListAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Lorry-park geofence evidence was unavailable for timesheet night-out inference; tracker/depot evidence remains in use.");
+        }
+
         var driverRows = new List<object>();
         var unmatchedTachoDutyCount = 0;
         var unmatchedTachoDuties = new List<object>();
@@ -446,7 +469,7 @@ public sealed class WeeklyDriverTimesheetsController(
                 var nextDuty = allDriverDuties.FirstOrDefault(item => tachoEnd is not null && item.DutyStartUtc > tachoEnd.Value);
                 var lastMovementEvent = movement.LastOrDefault();
                 var sameVehicle = nextDuty is not null && string.Equals(Normalise(nextDuty.VehicleCode), Normalise(duties.LastOrDefault()?.VehicleCode), StringComparison.OrdinalIgnoreCase);
-                var nightOut = TimesheetEvidenceRules.AssessNightOut(tachoEnd, nextDuty?.DutyStartUtc, lastMovementEvent?.EventTimeUtc, lastMovementEvent?.Latitude, lastMovementEvent?.Longitude, depotPoints, sameVehicle);
+                var nightOut = TimesheetEvidenceRules.AssessNightOut(tachoEnd, nextDuty?.DutyStartUtc, lastMovementEvent?.EventTimeUtc, lastMovementEvent?.Latitude, lastMovementEvent?.Longitude, depotPoints, sameVehicle, lorryParkEvidence, trackingKeys);
                 if (nightOut.Status == "Possible Night Out") reviewReasons.Add(nightOut.Reason);
                 var reviewKey = ReviewKey(driver.Id, day, tachoStart);
                 manualReviews.TryGetValue(reviewKey, out var manualReview);

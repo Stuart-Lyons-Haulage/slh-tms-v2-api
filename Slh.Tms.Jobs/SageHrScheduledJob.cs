@@ -15,9 +15,9 @@ public sealed class SageHrScheduledJob(
     {
         var zone = LondonTimeZone();
         var localNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, zone);
-        if (localNow.TimeOfDay < new TimeSpan(5, 30, 0))
+        if (localNow.TimeOfDay < new TimeSpan(5, 0, 0))
         {
-            logger.LogInformation("SageHrScheduledJobNotDue LocalNow={LocalNow} DueLocalTime=05:30", localNow);
+            logger.LogInformation("SageHrScheduledJobNotDue LocalNow={LocalNow} DueLocalTime=05:00", localNow);
             return new JobExecutionResult(true, "Sage HR sync is not due yet for the current Europe/London date.");
         }
 

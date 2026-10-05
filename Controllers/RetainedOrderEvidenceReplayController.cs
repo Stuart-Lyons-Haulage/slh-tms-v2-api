@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http.Timeouts;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
@@ -17,6 +18,7 @@ public sealed class RetainedOrderEvidenceReplayController(
     ILogger<OrderIntakeController> intakeLogger) : ControllerBase
 {
     [HttpPost("replay-retained-evidence"), Authorize(Policy = "TmsApprove")]
+    [DisableRequestTimeout]
     public async Task<IActionResult> Replay(
         [FromBody] RetainedOrderEvidenceReplayRequest request,
         CancellationToken ct)
@@ -461,26 +463,21 @@ public sealed class RetainedOrderEvidenceReplayController(
 
     private static bool IsOnOrAfter(JsonElement payload, DateOnly minimumPlanningDate)
     {
-        var collection = Date(payload, "collectionDate");
-        var delivery = Date(payload, "deliveryDate");
-
-        DateOnly? planningDate = collection is DateOnly c && delivery is DateOnly d && c < d
-            ? c
-            : collection ?? delivery;
-
-        return planningDate is DateOnly value && value >= minimumPlanningDate;
+        return OperationalDates(payload).Any(value => value >= minimumPlanningDate);
     }
 
     private static bool IsOnOrBefore(JsonElement payload, DateOnly maximumPlanningDate)
     {
+        return OperationalDates(payload).Any(value => value <= maximumPlanningDate);
+    }
+
+    private static IEnumerable<DateOnly> OperationalDates(JsonElement payload)
+    {
         var collection = Date(payload, "collectionDate");
+        if (collection is DateOnly collectionDate) yield return collectionDate;
+
         var delivery = Date(payload, "deliveryDate");
-
-        DateOnly? planningDate = collection is DateOnly c && delivery is DateOnly d && c < d
-            ? c
-            : collection ?? delivery;
-
-        return planningDate is DateOnly value && value <= maximumPlanningDate;
+        if (delivery is DateOnly deliveryDate && deliveryDate != collection) yield return deliveryDate;
     }
 
     private static DateOnly? Date(JsonElement root, string name) =>

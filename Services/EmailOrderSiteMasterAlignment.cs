@@ -48,7 +48,7 @@ public static class EmailOrderSiteMasterAlignment
         var rawDepot = FirstText(root, "depot", "depotName", "marketName");
 
         var collection = resolver.Resolve(rawCollection);
-        var delivery = resolver.Resolve(rawDelivery);
+        var delivery = ResolveDelivery(root, rawDelivery, rawDepot, resolver);
         var depot = resolver.Resolve(rawDepot);
         var evidence = new JsonArray();
         var marketInternalDestination = IsMarketDepot(rawDepot)
@@ -129,6 +129,37 @@ public static class EmailOrderSiteMasterAlignment
             || key == "SPIT"
             || key.Contains("WESTERN", StringComparison.Ordinal)
             || key.Contains("SENDER", StringComparison.Ordinal);
+    }
+
+    private static PlannerSourceSiteResolution ResolveDelivery(
+        JsonObject root,
+        string? rawDelivery,
+        string? rawDepot,
+        PlannerSourceMasterDataResolver resolver)
+    {
+        if (!string.IsNullOrWhiteSpace(rawDelivery) && IsWaitroseContext(root, rawDepot))
+        {
+            // Waitrose workbook/PDF rows often contain only the locality (for example
+            // "Aylesford"), while Site Master also contains other physical Aylesford
+            // sites. Use the explicit retailer context to disambiguate without changing
+            // the original source value retained in sourceStallNumber.
+            var contextual = resolver.Resolve($"Waitrose {rawDelivery.Trim()}");
+            if (contextual.SiteMatched) return contextual;
+        }
+
+        return resolver.Resolve(rawDelivery);
+    }
+
+    private static bool IsWaitroseContext(JsonObject root, string? rawDepot)
+    {
+        var values = new[]
+        {
+            rawDepot,
+            FirstText(root, "retailerCode", "retailer", "marketName"),
+            FirstText(root, "sourceSubject", "sourceBodyText")
+        };
+
+        return values.Any(value => Normalize(value).Contains("WAITROSE", StringComparison.Ordinal));
     }
 
     private static string Normalize(string? value) => new((value ?? string.Empty)

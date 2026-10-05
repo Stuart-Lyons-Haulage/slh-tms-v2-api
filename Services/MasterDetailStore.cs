@@ -254,8 +254,10 @@ public static class MasterDetailStore
         {
             var linkedFences = await db.SiteGeofences.AsNoTracking()
                 .Where(fence => fence.Active && fence.SiteId.HasValue && unresolvedSiteIds.Contains(fence.SiteId.Value))
-                .OrderByDescending(fence => fence.UpdatedAtUtc)
                 .ToListAsync(ct);
+            linkedFences = linkedFences
+                .OrderByDescending(fence => fence.UpdatedAtUtc)
+                .ToList();
             foreach (var site in sites.Where(site => unresolvedSiteIds.Contains(site.Id)))
             {
                 var fence = linkedFences.FirstOrDefault(item => item.SiteId == site.Id);

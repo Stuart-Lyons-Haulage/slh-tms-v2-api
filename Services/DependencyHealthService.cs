@@ -57,10 +57,13 @@ public sealed class DependencyHealthService(
         var fleetioMappingUtc = await SafeTimestamp(async () => await db.IntegrationMappings.AsNoTracking()
             .Where(item => item.Provider == "Fleetio" && item.Active)
             .MaxAsync(item => (DateTimeOffset?)item.UpdatedAtUtc, ct), "Fleetio mappings", ct);
-        var fleetioVehicleUtc = await SafeTimestamp(async () => await db.Vehicles.AsNoTracking()
+        // Vehicle.FleetioLastSyncedUtc is a runtime enrichment field and is not
+        // persisted. Trailer sync timestamps are persisted, while mappings cover
+        // vehicle identity updates; do not query the unmapped vehicle property.
+        var fleetioTrailerUtc = await SafeTimestamp(async () => await db.Trailers.AsNoTracking()
             .Where(item => item.Active && item.FleetioLastSyncedUtc != null)
-            .MaxAsync(item => item.FleetioLastSyncedUtc, ct), "Fleetio vehicles", ct);
-        var fleetioUtc = Latest(fleetioMappingUtc, fleetioVehicleUtc);
+            .MaxAsync(item => (DateTimeOffset?)item.FleetioLastSyncedUtc, ct), "Fleetio trailers", ct);
+        var fleetioUtc = Latest(fleetioMappingUtc, fleetioTrailerUtc);
         var tachoAuditUtc = await SafeTimestamp(async () => await db.StagedImports.AsNoTracking()
             .Where(item => item.Status == StagingStatus.Promoted &&
                 (item.EntityType == "tachodrivermastersync" || item.EntityType == "tachomastersync" || item.EntityType == "tachodriverprofile"))

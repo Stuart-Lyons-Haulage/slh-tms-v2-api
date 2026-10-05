@@ -63,7 +63,6 @@ public sealed class SchemaResourceTests
 
         var expectedTail = new[]
         {
-            "037_Driver_Tacho_Identity.sql",
             "038_Driver_Tacho_Identity_Repair.sql",
             "039_Canonical_Relational_Planning.sql",
             "040_Audit_Outbox.sql",
@@ -99,7 +98,8 @@ public sealed class SchemaResourceTests
             "081_Booking_Allocation_Unmatch.sql",
             "082_Barfoots_Physical_North_South_Sites.sql",
             "083_Site_Samsara_Identity.sql",
-            "084_Canonical_Summer_Berry_Customer.sql"
+            "084_Canonical_Summer_Berry_Customer.sql",
+            "085_Fleetio_Trailer_Status.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }

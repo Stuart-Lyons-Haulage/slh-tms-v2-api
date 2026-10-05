@@ -159,4 +159,52 @@ public sealed class EmailOrderSiteMasterAlignmentTests : IClassFixture<CustomWeb
         Assert.Equal(market.Id.ToString(), root.GetProperty("deliverySiteId").GetString());
         Assert.Equal(market.Id.ToString(), root.GetProperty("depotSiteId").GetString());
     }
+
+    [Fact]
+    public async Task Waitrose_locality_uses_retailer_context_when_other_site_shares_locality()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var locality = $"Aylesford {suffix}";
+        var waitrose = new Site
+        {
+            Id = Guid.NewGuid(),
+            ExternalCode = $"WR-{suffix}",
+            Name = $"Waitrose {locality}",
+            DriverTextName = $"Waitrose {locality}",
+            Active = true
+        };
+        var other = new Site
+        {
+            Id = Guid.NewGuid(),
+            ExternalCode = $"WF-{suffix}",
+            Name = $"Watts Farm ({locality})",
+            DriverTextName = $"Watts Farm ({locality})",
+            Active = true
+        };
+        db.Sites.AddRange(waitrose, other);
+        await db.SaveChangesAsync();
+
+        var payload = JsonSerializer.SerializeToElement(new
+        {
+            poNumber = $"WAITROSE-{suffix}",
+            customerCode = "WEALMOOR",
+            retailerCode = "WAITROSE",
+            marketName = "WAITROSE",
+            stallNumber = locality
+        });
+        var parsed = new EmailIntakeParseResult(
+            [new ParsedEmailOrder($"waitrose-{suffix}", $"waitrose-{suffix}", payload, [])],
+            [],
+            null);
+
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, CancellationToken.None);
+        var root = aligned.Orders.Single().Payload;
+
+        Assert.Equal(waitrose.DriverTextName, root.GetProperty("stallNumber").GetString());
+        Assert.Equal(locality, root.GetProperty("sourceStallNumber").GetString());
+        Assert.Equal(waitrose.Id.ToString(), root.GetProperty("deliverySiteId").GetString());
+        Assert.True(root.GetProperty("masterDataAligned").GetBoolean());
+    }
 }

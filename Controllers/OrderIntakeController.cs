@@ -307,9 +307,11 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // allowing Intake() to link them to the existing staged order as evidence.
         // The generic parser is used here only for its explicit operational-message
         // classification; any generic orders it may infer are deliberately ignored.
+        var nwfTransfer = IsNwfTransferSource(request);
         var operationalSignal = new EmailOrderIntakeService().Parse(request);
         if (operationalSignal.Orders.Count == 0 &&
-            operationalSignal.IgnoredReason?.Contains("Operational request", StringComparison.OrdinalIgnoreCase) == true)
+            operationalSignal.IgnoredReason?.Contains("Operational request", StringComparison.OrdinalIgnoreCase) == true &&
+            !nwfTransfer)
             return operationalSignal;
 
         // Outbound SLH messages can contain customer names, dates and quantities
@@ -317,7 +319,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // not new customer orders. Keep the evidence via Intake(), but stop before
         // any approved-source or specialist parser can turn the quoted content into
         // a staging order.
-        if (IsInternalSender(request.SenderAddress))
+        if (IsInternalSender(request.SenderAddress) && !nwfTransfer)
             return new EmailIntakeParseResult(
                 [],
                 [],

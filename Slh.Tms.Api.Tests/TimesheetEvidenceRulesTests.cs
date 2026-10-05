@@ -59,6 +59,25 @@ public sealed class TimesheetEvidenceRulesTests
     }
 
     [Fact]
+    public void Lorry_park_geofence_near_duty_end_confirms_night_out_when_vehicle_matches()
+    {
+        var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");
+        var result = TimesheetEvidenceRules.AssessNightOut(
+            end,
+            end.AddHours(11),
+            end.AddMinutes(-5),
+            53.8m,
+            -1.2m,
+            Array.Empty<DepotPoint>(),
+            true,
+            new[] { new LorryParkEvidence("FN69AHY", end.AddMinutes(-20), end.AddMinutes(10), "Example Lorry Park") },
+            new[] { "FN69AHY" });
+
+        Assert.Equal("Confirmed Night Out - Regular Rest", result.Status);
+        Assert.Contains("lorry-park geofence", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Incomplete_evidence_is_possible_night_out_not_auto_payable()
     {
         var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");

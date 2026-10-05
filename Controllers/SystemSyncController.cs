@@ -39,7 +39,7 @@ public sealed class SystemSyncController(
             {
                 roadTech = "tracking live every minute · history every 5 minutes · tacho every 20 minutes",
                 fleetio = "every hour",
-                sageHr = "05:30 Europe/London daily"
+                sageHr = "05:00 and 14:00 Europe/London daily"
             },
             providers
         });
