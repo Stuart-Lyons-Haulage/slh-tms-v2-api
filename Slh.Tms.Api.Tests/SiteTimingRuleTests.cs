@@ -32,4 +32,48 @@ public sealed class SiteTimingRuleTests
         Assert.Equal(new DateTimeOffset(2026, 9, 10, 22, 0, 0, TimeSpan.Zero), collectionWindow.Start);
         Assert.Equal(new DateTimeOffset(2026, 9, 10, 5, 0, 0, TimeSpan.Zero), deliveryWindow.End);
     }
+
+    [Fact]
+    public void Previous_run_finish_uses_the_later_of_planned_finish_and_master_deadline()
+    {
+        var collection = new Site { ExternalCode = "NWF-Mer", Name = "NWF - Merston" };
+        var delivery = new Site { ExternalCode = "MOR07", Name = "Morrisons-Wakefield" };
+        var run = new Load
+        {
+            Reference = "PREVIOUS-01",
+            PlanningDate = new DateOnly(2026, 9, 10),
+            Stops =
+            [
+                new LoadStop { Sequence = 1, Name = "Collect · NWF - Merston", PlannedArrivalUtc = DateTimeOffset.Parse("2026-09-10T04:00:00Z") },
+                new LoadStop { Sequence = 2, Name = "Deliver · Morrisons-Wakefield", PlannedArrivalUtc = DateTimeOffset.Parse("2026-09-10T16:00:00Z") }
+            ]
+        };
+        var rule = new SiteTimingRule("NWF-Mer-Morrisons-Wakefield", "Std", null, null, null, "18:00");
+
+        var finish = PlannerStartTimingRules.PreviousRunFinish(run, [rule], [collection, delivery]);
+
+        Assert.Equal(DateTimeOffset.Parse("2026-09-10T17:00:00Z"), finish);
+    }
+
+    [Fact]
+    public void Previous_run_finish_does_not_replace_a_later_planned_finish()
+    {
+        var collection = new Site { ExternalCode = "NWF-Mer", Name = "NWF - Merston" };
+        var delivery = new Site { ExternalCode = "MOR07", Name = "Morrisons-Wakefield" };
+        var run = new Load
+        {
+            Reference = "PREVIOUS-02",
+            PlanningDate = new DateOnly(2026, 9, 10),
+            Stops =
+            [
+                new LoadStop { Sequence = 1, Name = "Collect · NWF - Merston", PlannedArrivalUtc = DateTimeOffset.Parse("2026-09-10T04:00:00Z") },
+                new LoadStop { Sequence = 2, Name = "Deliver · Morrisons-Wakefield", PlannedArrivalUtc = DateTimeOffset.Parse("2026-09-10T20:00:00Z") }
+            ]
+        };
+        var rule = new SiteTimingRule("NWF-Mer-Morrisons-Wakefield", "Std", null, null, null, "18:00");
+
+        var finish = PlannerStartTimingRules.PreviousRunFinish(run, [rule], [collection, delivery]);
+
+        Assert.Equal(DateTimeOffset.Parse("2026-09-10T20:00:00Z"), finish);
+    }
 }

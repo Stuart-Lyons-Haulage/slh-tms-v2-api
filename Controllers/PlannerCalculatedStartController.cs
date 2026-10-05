@@ -18,6 +18,7 @@ public sealed class PlannerCalculatedStartController(
     DotTrackingClient trackingClient,
     AzureMapsRouteClient maps,
     DriverWeeklyRestComplianceService weeklyRest,
+    SiteTimingRuleStore timingRuleStore,
     ILogger<PlannerCalculatedStartController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
@@ -45,6 +46,7 @@ public sealed class PlannerCalculatedStartController(
         var dispatchState = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
         var duties = await ReadDutiesAsync(date, ct);
         var live = await ReadLivePositionsAsync(ct);
+        var timingRules = await timingRuleStore.ReadAsync(ct);
         var history = driverIds.Count == 0 ? [] : await db.Loads.AsNoTracking().Include(load => load.Stops)
             .Where(load => load.DriverId != null && driverIds.Contains(load.DriverId.Value) && load.PlanningDate < date && load.Status != LoadStatus.Cancelled)
             .OrderByDescending(load => load.PlanningDate).ThenByDescending(load => load.CreatedAtUtc)
@@ -54,7 +56,7 @@ public sealed class PlannerCalculatedStartController(
         var rows = new List<PlannerStartSuggestion>();
         foreach (var load in loads)
         {
-            var suggestion = await SuggestAsync(load, driverById, vehicleById, sites, lyons, duties, live, history, dispatchState.GetValueOrDefault(load.Id), ct);
+            var suggestion = await SuggestAsync(load, driverById, vehicleById, sites, lyons, duties, live, history, timingRules, dispatchState.GetValueOrDefault(load.Id), ct);
             rows.Add(suggestion);
         }
 
@@ -74,11 +76,12 @@ public sealed class PlannerCalculatedStartController(
         var sites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct);
         try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); } catch { }
         var duties = await ReadDutiesAsync(date, ct);
+        var timingRules = await timingRuleStore.ReadAsync(ct);
         var live = await ReadLivePositionsAsync(ct);
         var history = await db.Loads.AsNoTracking().Include(item => item.Stops)
             .Where(item => item.DriverId == load.DriverId && item.PlanningDate < date && item.Status != LoadStatus.Cancelled)
             .OrderByDescending(item => item.PlanningDate).ThenByDescending(item => item.CreatedAtUtc).Take(30).ToListAsync(ct);
-        var suggestion = await SuggestAsync(load, drivers.ToDictionary(x => x.Id), vehicles.ToDictionary(x => x.Id), sites, FindLyonsSite(sites), duties, live, history, null, ct);
+        var suggestion = await SuggestAsync(load, drivers.ToDictionary(x => x.Id), vehicles.ToDictionary(x => x.Id), sites, FindLyonsSite(sites), duties, live, history, timingRules, null, ct);
         if (suggestion.SuggestedStartUtc is null) return BadRequest(new { message = suggestion.Explanation });
 
         var actor = User.Identity?.Name ?? "TMS planner";
@@ -95,13 +98,16 @@ public sealed class PlannerCalculatedStartController(
         IReadOnlyList<TachoDriverDutyStatus> duties,
         IReadOnlyDictionary<string, DotTelemetryRecord> live,
         IReadOnlyList<Load> history,
+        IReadOnlyList<SiteTimingRule> timingRules,
         DriverDispatchState? existing,
         CancellationToken ct)
     {
         var firstCollection = OperationalStopOrdering.Order(load.Stops).FirstOrDefault(stop => stop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase))
             ?? OperationalStopOrdering.Order(load.Stops).FirstOrDefault();
         var firstSite = firstCollection is null ? null : ResolveSite(sites, firstCollection.Name);
-        var latestOnSite = SiteCutoff(firstSite);
+        var latestOnSite = FormatLocalTime(PlannerStartTimingRules.LatestCollection(load, firstCollection, timingRules, sites)) ?? SiteCutoff(firstSite);
+        var previousRun = history.FirstOrDefault(item => item.DriverId == load.DriverId);
+        var previousFinish = PlannerStartTimingRules.PreviousRunFinish(previousRun, timingRules, sites);
         if (load.DriverId is not Guid driverId || !drivers.TryGetValue(driverId, out var driver))
             return PlannerStartSuggestion.Empty(load, firstCollection, existing, latestOnSite, "Allocate a driver to calculate the legal start.");
 
@@ -109,20 +115,30 @@ public sealed class PlannerCalculatedStartController(
         var latestDuty = matched.LastOrDefault();
         var lastCompleted = matched.Where(duty => duty.DutyEndUtc is not null).OrderBy(duty => duty.DutyEndUtc).LastOrDefault();
         if (latestDuty is not null && latestDuty.DutyEndUtc is null)
-            return await BuildFromActiveDuty(load, driver, latestDuty, vehicles, live, history, firstCollection, firstSite, existing, latestOnSite, ct);
+            return await BuildFromActiveDuty(load, driver, latestDuty, vehicles, live, history, firstCollection, firstSite, existing, latestOnSite, previousFinish, ct);
         if (lastCompleted?.DutyEndUtc is not DateTimeOffset dutyEnd)
-            return PlannerStartSuggestion.Empty(load, firstCollection, existing, latestOnSite, "No completed TachoMaster duty was found. Enter the start manually until Tacho history is available.");
+        {
+            if (previousFinish is not DateTimeOffset priorFinish)
+                return PlannerStartSuggestion.Empty(load, firstCollection, existing, latestOnSite, "No completed TachoMaster duty or previous-run master timing was found. Enter the start manually until timing evidence is available.");
+
+            var fallbackStart = priorFinish.AddHours(11);
+            var fallbackExplanation = $"Previous run/master deadline provides a conservative finish of {Local(priorFinish):dd/MM HH:mm}; 11h regular daily rest gives the earliest start {Local(fallbackStart):dd/MM HH:mm}. Recalculate when TachoMaster duty history is available.";
+            return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
+                fallbackStart, fallbackStart, WalkaroundMinutes, null, null, null, CleanStop(firstCollection?.Name), latestOnSite, "Previous run/master timing", fallbackExplanation);
+        }
 
         // SLH planning policy always bases tomorrow's planned start on a full 11-hour regular
         // daily rest. Reduced daily rest can remain legal/compliance evidence, but it is never
         // used by Calculate Starts to bring the next planned duty forward.
         var dailyRestHours = 11;
         var restComplete = dutyEnd.AddHours(dailyRestHours);
+        restComplete = PlannerStartTimingRules.Max(restComplete, previousFinish?.AddHours(11));
         var weekly = await weeklyRest.EvaluateAsync(driver, load.PlanningDate, restComplete, ct);
         if (string.Equals(weekly.Status, "Overdue", StringComparison.OrdinalIgnoreCase))
         {
             dailyRestHours = 45;
             restComplete = dutyEnd.AddHours(dailyRestHours);
+            restComplete = PlannerStartTimingRules.Max(restComplete, previousFinish?.AddHours(11));
         }
 
         var origin = OriginFromSite(lyons, "Stuart Lyons Haulage", "Fresh duty after legal rest");
@@ -134,7 +150,11 @@ public sealed class PlannerCalculatedStartController(
 
         var travel = await TravelAsync(origin, firstCollection, firstSite, ct);
         DateTimeOffset? firstEta = travel.Minutes is null ? null : restComplete.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
-        var explanation = $"Tacho rest complete {Local(restComplete):HH:mm} · planning policy uses minimum 11h regular daily rest · 10 min walkaround · {origin.Label} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}.";
+        var previousEvidence = previousFinish is DateTimeOffset priorRunFinish
+            ? $" · previous run/master finish floor {Local(priorRunFinish):dd/MM HH:mm}"
+            : string.Empty;
+        var cutoffEvidence = latestOnSite is not null ? $" · master collection cut-off {latestOnSite}" : string.Empty;
+        var explanation = $"Tacho rest complete {Local(restComplete):HH:mm} · planning policy uses minimum 11h regular daily rest · 10 min walkaround · {origin.Label} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}{previousEvidence}{cutoffEvidence}.";
 
         return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
             restComplete, restComplete, WalkaroundMinutes, origin.Label, travel.Minutes, firstEta, CleanStop(firstCollection?.Name), latestOnSite,
@@ -152,6 +172,7 @@ public sealed class PlannerCalculatedStartController(
         Site? firstSite,
         DriverDispatchState? existing,
         string? latestOnSite,
+        DateTimeOffset? previousFinish,
         CancellationToken ct)
     {
         var origin = default(Origin);
@@ -193,7 +214,7 @@ public sealed class PlannerCalculatedStartController(
                     null, null, WalkaroundMinutes, origin.Label, travel.Minutes, null, CleanStop(firstCollection?.Name), latestOnSite, "Active duty",
                     "TachoMaster shows an open duty but no working time remaining this week. Re-plan before dispatch.");
 
-            var start = now;
+            var start = PlannerStartTimingRules.Max(now, previousFinish);
             DateTimeOffset? firstEta = travel.Minutes is null ? null : start.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
             var drive = latestDuty.DriveAvailableTodayMinutes is int driveMinutes ? $" · {driveMinutes / 60d:0.0}h drive remaining" : string.Empty;
             var vehicleEvidence = allocatedVehicle is null ? string.Empty : $" · Fleetio vehicle {allocatedVehicle.Registration} available";
@@ -210,6 +231,7 @@ public sealed class PlannerCalculatedStartController(
             var assumedDutyEnd = latestDuty.DutyStartUtc.AddHours(13);
             if (assumedDutyEnd < now) assumedDutyEnd = now;
             var assumedStart = assumedDutyEnd.AddHours(11);
+            assumedStart = PlannerStartTimingRules.Max(assumedStart, previousFinish?.AddHours(11));
             var planningFloor = PlanningFloorUtc(load.PlanningDate);
             if (assumedStart < planningFloor) assumedStart = planningFloor;
             DateTimeOffset? firstEta = travel.Minutes is null ? null : assumedStart.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
@@ -314,6 +336,8 @@ public sealed class PlannerCalculatedStartController(
         }
         return null;
     }
+
+    private static string? FormatLocalTime(DateTimeOffset? value) => value is null ? null : Local(value.Value).ToString("HH:mm");
 
     private static bool IsVor(Vehicle vehicle) => vehicle.FleetioVor == true ||
         (vehicle.FleetioStatus?.Contains("VOR", StringComparison.OrdinalIgnoreCase) ?? false) ||
