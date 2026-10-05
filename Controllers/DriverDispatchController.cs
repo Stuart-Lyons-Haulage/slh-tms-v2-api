@@ -280,6 +280,7 @@ public sealed class DriverDispatchController(
                 load.TotalPalletSpaces,
                 load.CapacityType,
                 load.PlannerNotes,
+                relayPlan = load.RelayPlan,
                 southbound = IsSouthbound(load),
                 plannedStartUtc = dispatchStates.GetValueOrDefault(load.Id)?.PlannedStartUtc,
                 stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop => new

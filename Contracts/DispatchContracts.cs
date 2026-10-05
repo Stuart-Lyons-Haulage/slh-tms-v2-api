@@ -20,6 +20,16 @@ public sealed record DispatchCollectionPointDto(
     decimal? Latitude,
     decimal? Longitude);
 
+public sealed record DispatchRelayDto(
+    bool Enabled,
+    string? HandoverSite,
+    Guid? HandoverSiteId,
+    int? HandoverAfterStopSequence,
+    DateTimeOffset? PlannedHandoverUtc,
+    Guid? DeliveryDriverId,
+    Guid? DeliveryVehicleId,
+    Guid? DeliveryTrailerId);
+
 public sealed record DispatchTachoDataDto(
     int CurrentDutyDay,
     DateTimeOffset? ShiftEndTimeUtc,
@@ -72,7 +82,8 @@ public sealed record DispatchRunDto(
     bool RequiresRefrigerated,
     bool IsBackload,
     bool IsOvernightMarket,
-    bool IsSouthbound);
+    bool IsSouthbound,
+    DispatchRelayDto? Relay = null);
 
 public sealed record DispatchAvailableTimesRequest(
     DateOnly PlanningDate,

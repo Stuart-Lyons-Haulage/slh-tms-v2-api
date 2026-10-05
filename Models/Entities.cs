@@ -466,6 +466,11 @@ public sealed class Load
     public Guid? VehicleId { get; set; }
     public Guid? DriverId { get; set; }
     public Guid? TrailerId { get; set; }
+    // Relay details are stored in the audited planning-register JSON. Keeping this
+    // property out of the relational schema preserves compatibility with existing
+    // local/production databases while allowing Dispatch and Samsara to use the
+    // same structured handover information.
+    [NotMapped] public LoadRelayPlan? RelayPlan { get; set; }
     [NotMapped] public decimal? RevenueAmount { get; set; }
     [NotMapped] public decimal? FuelSurchargeAmount { get; set; }
     [NotMapped] public decimal? EstimatedCostAmount { get; set; }
@@ -485,6 +490,20 @@ public sealed class Load
         : null;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public List<LoadStop> Stops { get; set; } = [];
+}
+
+public sealed class LoadRelayPlan
+{
+    public bool Enabled { get; set; }
+    [MaxLength(200)] public string? HandoverSite { get; set; }
+    public Guid? HandoverSiteId { get; set; }
+    public int? HandoverAfterStopSequence { get; set; }
+    public DateTimeOffset? PlannedHandoverUtc { get; set; }
+    public Guid? DeliveryDriverId { get; set; }
+    public Guid? DeliveryVehicleId { get; set; }
+    public Guid? DeliveryTrailerId { get; set; }
+    public DateTimeOffset? UpdatedAtUtc { get; set; }
+    [MaxLength(200)] public string? UpdatedBy { get; set; }
 }
 public sealed class LoadStop
 {

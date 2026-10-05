@@ -417,7 +417,18 @@ public sealed class DispatchService(
                     refrigerated,
                     backload,
                     market,
-                    southbound),
+                    southbound,
+                    load.RelayPlan is { Enabled: true } relay
+                        ? new DispatchRelayDto(
+                            true,
+                            relay.HandoverSite,
+                            relay.HandoverSiteId,
+                            relay.HandoverAfterStopSequence,
+                            relay.PlannedHandoverUtc,
+                            relay.DeliveryDriverId,
+                            relay.DeliveryVehicleId,
+                            relay.DeliveryTrailerId)
+                        : null),
                 last?.Latitude,
                 last?.Longitude,
                 estimatedDuty,

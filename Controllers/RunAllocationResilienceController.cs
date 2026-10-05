@@ -140,6 +140,49 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         return Ok(load);
     }
 
+    [HttpPut("{id:guid}/relay"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateRelay(Guid id, RunRelayRequest request, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        if (!request.Enabled)
+        {
+            load.RelayPlan = null;
+            await SaveCoreLoadAsync(load, register, ct);
+            return Ok(load);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.HandoverSite))
+            return BadRequest(new { message = "Enter the trailer handover location." });
+        if (request.HandoverAfterStopSequence is int split && (split < 1 || split >= load.Stops.Count))
+            return BadRequest(new { message = "The handover must be between two planned stops." });
+        if (request.HandoverSiteId is Guid siteId && !await db.Sites.AsNoTracking().AnyAsync(x => x.Id == siteId && x.Active, ct))
+            return BadRequest(new { message = "The selected handover site is not active in Site Master." });
+        if (request.DeliveryDriverId is Guid driverId && !await db.Drivers.AsNoTracking().AnyAsync(x => x.Id == driverId && x.Active, ct))
+            return BadRequest(new { message = "The delivery driver is not active." });
+        if (request.DeliveryVehicleId is Guid vehicleId && !await db.Vehicles.AsNoTracking().AnyAsync(x => x.Id == vehicleId && x.Active, ct))
+            return BadRequest(new { message = "The delivery vehicle is not active." });
+        if (request.DeliveryTrailerId is Guid trailerId && !await db.Trailers.AsNoTracking().AnyAsync(x => x.Id == trailerId && x.Active, ct))
+            return BadRequest(new { message = "The delivery trailer is not active." });
+
+        load.RelayPlan = new LoadRelayPlan
+        {
+            Enabled = true,
+            HandoverSite = Clip(request.HandoverSite, 200),
+            HandoverSiteId = request.HandoverSiteId,
+            HandoverAfterStopSequence = request.HandoverAfterStopSequence,
+            PlannedHandoverUtc = request.PlannedHandoverUtc,
+            DeliveryDriverId = request.DeliveryDriverId,
+            DeliveryVehicleId = request.DeliveryVehicleId,
+            DeliveryTrailerId = request.DeliveryTrailerId,
+            UpdatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedBy = User.Identity?.Name
+        };
+        await SaveCoreLoadAsync(load, register, ct);
+        return Ok(load);
+    }
+
     [HttpPut("{id:guid}/status"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateStatus(Guid id, RunStatusRequest request, CancellationToken ct)
     {
@@ -357,5 +400,6 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
 
 public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId, DateTimeOffset? PlannedStartUtc = null, bool UseReducedDailyRest = false);
 public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
+public sealed record RunRelayRequest(bool Enabled, string? HandoverSite, Guid? HandoverSiteId, int? HandoverAfterStopSequence, DateTimeOffset? PlannedHandoverUtc, Guid? DeliveryDriverId = null, Guid? DeliveryVehicleId = null, Guid? DeliveryTrailerId = null);
 public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc, string? PlannerNote);
 public sealed record RunStatusRequest(string Status);

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -104,7 +105,7 @@ public sealed class SamsaraDispatchController(
             : await db.IntegrationMappings.AsNoTracking()
                 .Where(item => item.Active &&
                                item.Provider == "Samsara" &&
-                               item.TmsEntityType == "Load" &&
+                               (item.TmsEntityType == "Load" || item.TmsEntityType == "LoadRelay") &&
                                ids.Contains(item.TmsEntityId))
                 .OrderByDescending(item => item.UpdatedAtUtc)
                 .ToListAsync(ct);
@@ -138,9 +139,10 @@ public sealed class SamsaraDispatchController(
 
         var rows = mappings
             .GroupBy(item => item.TmsEntityId)
-            .Select(group => group.First())
-            .Select(item =>
+            .Select(group =>
             {
+                var item = group.FirstOrDefault(value => value.TmsEntityType == "Load") ?? group.First();
+                var delivery = group.FirstOrDefault(value => value.TmsEntityType == "LoadRelay");
                 var load = byId.GetValueOrDefault(item.TmsEntityId);
                 var latest = load?.Stops
                     .Where(stop => progressByStop.ContainsKey(stop.Id))
@@ -158,7 +160,8 @@ public sealed class SamsaraDispatchController(
                     runId = item.TmsEntityId,
                     reference = load?.Reference,
                     routeId = item.ExternalKey,
-                    exportedAtUtc = item.UpdatedAtUtc,
+                    deliveryRouteId = delivery?.ExternalKey,
+                    exportedAtUtc = group.Max(value => value.UpdatedAtUtc),
                     executionState = latest?.Envelope.Progress?.State,
                     executionOperation = latest?.Envelope.Progress?.Operation,
                     executionUpdatedAtUtc = latest?.Envelope.Progress?.OccurredAtUtc ?? latest?.Envelope.UpdatedAtUtc,
@@ -968,6 +971,9 @@ public sealed class SamsaraDispatchController(
                 });
             }
 
+            if (load.RelayPlan is { Enabled: true } relay)
+                return await DispatchRelayAsync(load, relay, vehicle, driver, trailer, state, orderedStops, samsaraStops, sites, ct);
+
             // Mapping pre-sync normally means these are local lookups only. Keep them
             // sequential because EF Core does not permit concurrent operations on one DbContext.
             var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
@@ -1061,6 +1067,138 @@ public sealed class SamsaraDispatchController(
         }
     }
 
+    private async Task<IActionResult> DispatchRelayAsync(
+        Load load,
+        LoadRelayPlan relay,
+        Vehicle collectionVehicle,
+        Driver collectionDriver,
+        Trailer? collectionTrailer,
+        DriverDispatchState? collectionState,
+        IReadOnlyList<LoadStop> orderedStops,
+        IReadOnlyList<SamsaraRouteStopRequest> routeStops,
+        IReadOnlyList<Site> sites,
+        CancellationToken ct)
+    {
+        if (relay.DeliveryDriverId is not Guid deliveryDriverId ||
+            relay.DeliveryVehicleId is not Guid deliveryVehicleId ||
+            relay.DeliveryTrailerId is not Guid deliveryTrailerId)
+            return BadRequest(new { message = "Relay runs require a delivery driver, delivery vehicle and replacement trailer before Samsara export." });
+
+        var deliveryDriver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == deliveryDriverId && item.Active, ct);
+        var deliveryVehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == deliveryVehicleId && item.Active, ct);
+        var deliveryTrailer = await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == deliveryTrailerId && item.Active, ct);
+        if (deliveryDriver is null || deliveryVehicle is null || deliveryTrailer is null)
+            return BadRequest(new { message = "The relay delivery resources must all be active Master Data records." });
+
+        var available = (await dispatch.GetAvailableTimesAsync(new DispatchAvailableTimesRequest(load.PlanningDate, [deliveryDriver.Id]), ct)).Single();
+        if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
+            return BadRequest(new { message = available.BreachDetail ?? "A legal TachoMaster start cannot be calculated for the delivery driver." });
+
+        var handoverSite = relay.HandoverSiteId is Guid handoverSiteId
+            ? sites.FirstOrDefault(site => site.Id == handoverSiteId)
+            : sites.FirstOrDefault(site => SameSite(site, relay.HandoverSite));
+        if (handoverSite is null || handoverSite.Latitude is null || handoverSite.Longitude is null)
+            return BadRequest(new { message = $"The relay handover site '{relay.HandoverSite}' must be an active Site Master location with coordinates." });
+
+        var split = relay.HandoverAfterStopSequence is int requestedSplit
+            ? requestedSplit
+            : Math.Max(1, routeStops.Count - 1);
+        split = Math.Clamp(split, 1, routeStops.Count - 1);
+        var handoverTime = relay.PlannedHandoverUtc
+            ?? routeStops[Math.Min(split - 1, routeStops.Count - 1)].ScheduledDepartureTime
+            ?? routeStops[split].ScheduledArrivalTime;
+        if (handoverTime is DateTimeOffset plannedHandover && plannedHandover < available.AvailableFrom.Value)
+            return BadRequest(new { message = $"The planned relay handover is before {deliveryDriver.DisplayName}'s legal Tacho start." });
+
+        var handoverId = StableRelayGuid(load.Id, "handover");
+        var handoverStop = new SamsaraRouteStopRequest(
+            handoverId,
+            split + 1,
+            handoverSite.DriverTextName ?? handoverSite.Name,
+            null,
+            handoverSite.CollectionAddress ?? handoverSite.Name,
+            (double)handoverSite.Latitude.Value,
+            (double)handoverSite.Longitude.Value,
+            handoverSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters,
+            handoverTime,
+            handoverTime,
+            $"Trailer swap / relay handover. Collection driver: {collectionDriver.DisplayName}. Delivery driver: {deliveryDriver.DisplayName}. Trailer: {collectionTrailer?.TrailerNumber ?? "not allocated"} → {deliveryTrailer.TrailerNumber}.");
+
+        var collectionStops = routeStops.Take(split).Append(handoverStop).Select((stop, index) => stop with { SequenceNumber = index + 1 }).ToList();
+        var deliveryStops = new[] { handoverStop }.Concat(routeStops.Skip(split)).Select((stop, index) => stop with { SequenceNumber = index + 1 }).ToList();
+        var collectionSamsaraDriverId = await ResolveDriverIdAsync(collectionDriver, ct);
+        var deliverySamsaraDriverId = await ResolveDriverIdAsync(deliveryDriver, ct);
+        var collectionNotes = RelayNotes(load, collectionDriver, collectionVehicle, collectionTrailer, deliveryDriver, deliveryVehicle, deliveryTrailer, "collection", collectionState?.PlannedStartUtc);
+        var deliveryNotes = RelayNotes(load, deliveryDriver, deliveryVehicle, deliveryTrailer, collectionDriver, collectionVehicle, collectionTrailer, "delivery", handoverTime ?? available.AvailableFrom);
+
+        var collectionResult = await samsara.UpsertRouteAsync(new SamsaraRouteRequest(
+            load.Id,
+            $"{SamsaraRouteName(load)} · Collection",
+            collectionNotes,
+            collectionSamsaraDriverId,
+            string.IsNullOrWhiteSpace(collectionSamsaraDriverId) ? await ResolveVehicleIdAsync(collectionVehicle, ct) : null,
+            collectionStops,
+            "collection"), ct);
+        var deliveryResult = await samsara.UpsertRouteAsync(new SamsaraRouteRequest(
+            load.Id,
+            $"{SamsaraRouteName(load)} · Delivery",
+            deliveryNotes,
+            deliverySamsaraDriverId,
+            string.IsNullOrWhiteSpace(deliverySamsaraDriverId) ? await ResolveVehicleIdAsync(deliveryVehicle, ct) : null,
+            deliveryStops,
+            "delivery"), ct);
+
+        await DeactivateMappingsAsync(load.Id, ct, orderedStops.Select(stop => stop.Id).ToList());
+        await SaveMappingAsync("Load", load.Id, collectionResult.RouteId ?? collectionResult.ExternalId, $"{load.Reference} · Collection leg", ct);
+        await SaveMappingAsync("LoadRelay", load.Id, deliveryResult.RouteId ?? deliveryResult.ExternalId, $"{load.Reference} · Delivery leg", ct);
+
+        return Ok(new
+        {
+            success = true,
+            runId = load.Id,
+            reference = load.Reference,
+            relay = true,
+            handoverSite = handoverSite.DriverTextName ?? handoverSite.Name,
+            collectionRouteId = collectionResult.RouteId,
+            deliveryRouteId = deliveryResult.RouteId,
+            collectionDriver = collectionDriver.DisplayName,
+            deliveryDriver = deliveryDriver.DisplayName,
+            collectionTrailer = collectionTrailer?.TrailerNumber,
+            deliveryTrailer = deliveryTrailer.TrailerNumber,
+            stopCount = collectionStops.Count + deliveryStops.Count - 2,
+            message = $"{load.Reference} exported to Samsara as linked collection and delivery routes with a trailer handover at {handoverSite.DriverTextName ?? handoverSite.Name}."
+        });
+    }
+
+    private static string RelayNotes(Load load, Driver legDriver, Vehicle legVehicle, Trailer? legTrailer, Driver otherDriver, Vehicle otherVehicle, Trailer? otherTrailer, string leg, DateTimeOffset? start) =>
+        string.Join("\n", new[]
+        {
+            $"SLH TMS run {load.Reference} · relay {leg} leg",
+            $"Planning date: {load.PlanningDate:yyyy-MM-dd}",
+            $"Driver: {legDriver.DisplayName}",
+            $"Vehicle: {legVehicle.Registration}",
+            legTrailer is null ? null : $"Trailer: {legTrailer.TrailerNumber}",
+            $"Relay counterpart: {otherDriver.DisplayName} / {otherVehicle.Registration}{(otherTrailer is null ? string.Empty : $" / {otherTrailer.TrailerNumber}")}",
+            start is null ? null : $"Leg start / planned handover: {start:O}",
+            string.IsNullOrWhiteSpace(load.PlannerNotes) ? null : $"Planner: {load.PlannerNotes}"
+        }.Where(line => !string.IsNullOrWhiteSpace(line)));
+
+    private static bool SameSite(Site site, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var target = NormaliseRelaySite(value);
+        return new[] { site.Name, site.DriverTextName, site.ExternalCode }
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Any(item => NormaliseRelaySite(item) == target);
+    }
+
+    private static string NormaliseRelaySite(string? value) => new string((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static Guid StableRelayGuid(Guid runId, string suffix)
+    {
+        var bytes = MD5.HashData(Encoding.UTF8.GetBytes($"slh-relay:{runId:N}:{suffix}"));
+        return new Guid(bytes);
+    }
+
     [HttpDelete("dispatch/{runId:guid}")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> CancelDispatch(Guid runId, CancellationToken ct)
@@ -1074,14 +1212,20 @@ public sealed class SamsaraDispatchController(
 
         try
         {
-            var deleted = await samsara.DeleteRouteByRunIdAsync(runId, ct);
+            var load = await FindLoadAsync(runId, ct);
+            var deleted = await samsara.DeleteRouteByRunIdAsync(runId, ct, load?.RelayPlan?.Enabled == true ? "collection" : null);
+            var deliveryDeleted = false;
+            if (load?.RelayPlan?.Enabled == true)
+                deliveryDeleted = await samsara.DeleteRouteByRunIdAsync(runId, ct, "delivery");
             await DeactivateMappingsAsync(runId, ct);
 
             return Ok(new
             {
                 success = true,
                 runId,
-                deleted,
+                deleted = deleted || deliveryDeleted,
+                collectionDeleted = deleted,
+                deliveryDeleted,
                 message = deleted
                     ? "The Samsara route was deleted and its TMS mappings were deactivated."
                     : "No Samsara route existed; any local Samsara mappings were deactivated."

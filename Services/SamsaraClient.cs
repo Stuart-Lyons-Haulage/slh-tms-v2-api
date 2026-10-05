@@ -79,10 +79,10 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return new SamsaraAssetUpsertResult(created?.Id, externalId, true, false, created);
     }
 
-    public async Task<SamsaraRouteSnapshot?> GetRouteByRunIdAsync(Guid runId, CancellationToken ct)
+    public async Task<SamsaraRouteSnapshot?> GetRouteByRunIdAsync(Guid runId, CancellationToken ct, string? externalKeySuffix = null)
     {
         EnsureConfigured();
-        var external = ExternalRouteId(runId);
+        var external = ExternalRouteId(runId, externalKeySuffix);
         using var request = CreateRequest(HttpMethod.Get, $"fleet/routes/{Uri.EscapeDataString(external)}");
         using var response = await httpClient.SendAsync(request, ct);
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
@@ -94,8 +94,8 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     public async Task<SamsaraRouteUpsertResult> UpsertRouteAsync(SamsaraRouteRequest route, CancellationToken ct)
     {
         EnsureConfigured();
-        var external = ExternalRouteId(route.RunId);
-        var existing = await GetRouteByRunIdAsync(route.RunId, ct);
+        var external = ExternalRouteId(route.RunId, route.ExternalKeySuffix);
+        var existing = await GetRouteByRunIdAsync(route.RunId, ct, route.ExternalKeySuffix);
         var payload = RoutePayload(route, existing);
 
         if (existing is not null)
@@ -121,10 +121,10 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return new SamsaraRouteUpsertResult(created?.Id, external, true, false, created);
     }
 
-    public async Task<bool> DeleteRouteByRunIdAsync(Guid runId, CancellationToken ct)
+    public async Task<bool> DeleteRouteByRunIdAsync(Guid runId, CancellationToken ct, string? externalKeySuffix = null)
     {
         EnsureConfigured();
-        using var request = CreateRequest(HttpMethod.Delete, $"fleet/routes/{Uri.EscapeDataString(ExternalRouteId(runId))}");
+        using var request = CreateRequest(HttpMethod.Delete, $"fleet/routes/{Uri.EscapeDataString(ExternalRouteId(runId, externalKeySuffix))}");
         using var response = await httpClient.SendAsync(request, ct);
         if (response.StatusCode == HttpStatusCode.NotFound) return false;
         var body = await response.Content.ReadAsStringAsync(ct);
@@ -303,7 +303,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     {
         var externalIds = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [options.ExternalIdKey] = route.RunId.ToString("N")
+            [options.ExternalIdKey] = RouteExternalValue(route.RunId, route.ExternalKeySuffix)
         };
 
         var stops = route.Stops.Select(stop =>
@@ -404,7 +404,8 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return body;
     }
 
-    private string ExternalRouteId(Guid runId) => $"{options.ExternalIdKey}:{runId:N}";
+    private string ExternalRouteId(Guid runId, string? suffix = null) => $"{options.ExternalIdKey}:{RouteExternalValue(runId, suffix)}";
+    private static string RouteExternalValue(Guid runId, string? suffix) => string.IsNullOrWhiteSpace(suffix) ? runId.ToString("N") : $"{runId:N}:{suffix.Trim()}";
     private string ExternalSiteId(Guid siteId) => $"{options.SiteExternalIdKey}:{siteId:N}";
     private string ExternalSiteId(string siteReference) => $"{options.SiteExternalIdKey}:{siteReference}";
 
@@ -653,7 +654,8 @@ public sealed record SamsaraRouteRequest(
     string? Notes,
     string? DriverId,
     string? VehicleId,
-    IReadOnlyList<SamsaraRouteStopRequest> Stops);
+    IReadOnlyList<SamsaraRouteStopRequest> Stops,
+    string? ExternalKeySuffix = null);
 
 public sealed record SamsaraRouteSnapshot(
     string? Id,
