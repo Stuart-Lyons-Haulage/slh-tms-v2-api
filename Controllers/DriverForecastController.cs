@@ -33,16 +33,42 @@ public sealed class DriverForecastController(
         for (var date = from; date <= to; date = date.AddDays(1))
         {
             var staffing = await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger);
+            var demand = await ReadSuggestedDemandAsync(date, ct);
             byDate.TryGetValue(date, out var input);
             var required = (input?.DayRequired ?? 0) + (input?.NightRequired ?? 0);
             result.Add(new DriverForecastDay(date, input?.DayRequired ?? 0, input?.NightRequired ?? 0,
                 input?.Notes, input?.OpsNotes, input?.AgencyRequested ?? 0, input?.AgencyConfirmed ?? 0,
                 staffing.Summary.AvailableDrivers, staffing.Summary.EmployedAvailable,
                 staffing.Summary.AgencyConfirmed, staffing.Summary.CasualConfirmed,
-                required - staffing.Summary.AvailableDrivers));
+                required - staffing.Summary.AvailableDrivers, demand.DayRequired, demand.NightRequired,
+                demand.PlannedRunCount, demand.TotalRequired - staffing.Summary.AvailableDrivers));
         }
         return Ok(result);
     }
+
+    private async Task<SuggestedDemand> ReadSuggestedDemandAsync(DateOnly date, CancellationToken ct)
+    {
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, date, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .ToList();
+        var day = 0;
+        var night = 0;
+        foreach (var load in loads)
+        {
+            var firstStop = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault();
+            var localStart = firstStop?.PlannedArrivalUtc is { } planned
+                ? TimeZoneInfo.ConvertTime(planned, LondonTimeZone)
+                : (DateTimeOffset?)null;
+            var isNight = localStart?.TimeOfDay >= TimeSpan.FromHours(15)
+                || (localStart is null && (load.Reference.Contains("PM", StringComparison.OrdinalIgnoreCase)
+                    || load.Reference.Contains("NIGHT", StringComparison.OrdinalIgnoreCase)));
+            if (isNight) night++; else day++;
+        }
+        return new SuggestedDemand(day, night, loads.Count);
+    }
+
+    private static readonly TimeZoneInfo LondonTimeZone =
+        TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
 
     [HttpPut("{date}"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Put(DateOnly date, DriverForecastWriteRequest request, CancellationToken ct)
@@ -80,5 +106,9 @@ public sealed class DriverForecastController(
 }
 
 public sealed record DriverForecastWriteRequest(int DayRequired, int NightRequired, int AgencyRequested, int AgencyConfirmed, string? Notes, string? OpsNotes);
-public sealed record DriverForecastDay(DateOnly Date, int DayRequired, int NightRequired, string? Notes, string? OpsNotes, int AgencyRequested, int AgencyConfirmed, int AvailableDrivers, int EmployedAvailable, int AgencyAvailable, int CasualAvailable, int Shortfall);
+public sealed record DriverForecastDay(DateOnly Date, int DayRequired, int NightRequired, string? Notes, string? OpsNotes, int AgencyRequested, int AgencyConfirmed, int AvailableDrivers, int EmployedAvailable, int AgencyAvailable, int CasualAvailable, int Shortfall, int SuggestedDayRequired, int SuggestedNightRequired, int PlannedRunCount, int SuggestedShortfall);
 internal sealed record DriverForecastInput(DateOnly Date, int DayRequired, int NightRequired, string? Notes, string? OpsNotes, int AgencyRequested, int AgencyConfirmed);
+internal sealed record SuggestedDemand(int DayRequired, int NightRequired, int PlannedRunCount)
+{
+    public int TotalRequired => DayRequired + NightRequired;
+}
