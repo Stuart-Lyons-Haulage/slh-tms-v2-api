@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration, MasterAssignmentComplianceService compliance) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration, MasterAssignmentComplianceService compliance, PlanningStopTimingService stopTiming) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -85,6 +85,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 PlannedArrivalUtc = stop.PlannedArrivalUtc
             }).ToList()
         };
+        await stopTiming.ApplyMissingTimesAsync(load, ct);
 
         try
         {
@@ -242,6 +243,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             PlannedArrivalUtc = stop.PlannedArrivalUtc,
             PlannerNote = Clip(stop.PlannerNote, 1000)
         }).ToList();
+        await stopTiming.ApplyMissingTimesAsync(load, ct);
         await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }

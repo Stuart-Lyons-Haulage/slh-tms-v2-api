@@ -436,9 +436,11 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) deliveryDate = parsedDelivery;
             DateTimeOffset? deliveryWindowStartUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
+            else if (deliveryDate is DateOnly deliveryDay && LocalPayloadDateTime(payload, "deliveryRequestedTime", deliveryDay) is DateTimeOffset requestedDelivery && !string.Equals(Text(payload, "deliveryTimeConstraint"), "Not later than", StringComparison.OrdinalIgnoreCase)) deliveryWindowStartUtc = requestedDelivery;
             else deliveryWindowStartUtc = masterDeliveryWindow.Start;
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
+            else if (deliveryDate is DateOnly deliveryDayForEnd && LocalPayloadDateTime(payload, "deliveryRequestedTime", deliveryDayForEnd) is DateTimeOffset requestedDeliveryEnd) deliveryWindowEndUtc = requestedDeliveryEnd;
             else deliveryWindowEndUtc = masterDeliveryWindow.End;
             Guid? sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
             order = new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber"), 200), DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions"), 1000), MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink"), 1000) };
@@ -452,7 +454,9 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             existing.CollectionDate = collectionDate;
             if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) existing.DeliveryDate = parsedDelivery;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) existing.DeliveryWindowStartUtc = parsedWindowStart;
+            else if (existing.DeliveryDate is DateOnly existingDeliveryDay && LocalPayloadDateTime(payload, "deliveryRequestedTime", existingDeliveryDay) is DateTimeOffset requestedDelivery && !string.Equals(Text(payload, "deliveryTimeConstraint"), "Not later than", StringComparison.OrdinalIgnoreCase)) existing.DeliveryWindowStartUtc = requestedDelivery;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) existing.DeliveryWindowEndUtc = parsedWindowEnd;
+            else if (existing.DeliveryDate is DateOnly existingDeliveryDayForEnd && LocalPayloadDateTime(payload, "deliveryRequestedTime", existingDeliveryDayForEnd) is DateTimeOffset requestedDeliveryEnd) existing.DeliveryWindowEndUtc = requestedDeliveryEnd;
             existing.Pallets = IntOrNull(payload, "pallets") ?? existing.Pallets;
             existing.SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName") ?? existing.SellerName, 200);
             existing.MarketName = Clip(Text(payload, "marketName") ?? existing.MarketName, 80);
@@ -550,8 +554,11 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
                 DeliverySite = Clip(deliverySite, 200),
                 CollectionDate = lineCollectionDate,
                 DeliveryDate = lineDeliveryDate,
-                CollectionTimeFrom = TimeOnlyOrNull(line, "collectionTimeFrom") ?? TimeOnlyOrNull(payload, "collectionTimeFrom"),
-                CollectionTimeTo = TimeOnlyOrNull(line, "collectionTimeTo") ?? TimeOnlyOrNull(payload, "collectionTimeTo"),
+                CollectionTimeFrom = TimeOnlyOrNull(line, "collectionTimeFrom") ?? TimeOnlyOrNull(payload, "collectionTimeFrom")
+                    ?? TimeOnlyOrNull(line, "availableTime") ?? TimeOnlyOrNull(payload, "availableTime")
+                    ?? TimeOnlyOrNull(line, "requestedTime") ?? TimeOnlyOrNull(payload, "requestedTime"),
+                CollectionTimeTo = TimeOnlyOrNull(line, "collectionTimeTo") ?? TimeOnlyOrNull(payload, "collectionTimeTo")
+                    ?? TimeOnlyOrNull(line, "availableTime") ?? TimeOnlyOrNull(payload, "availableTime"),
                 PalletType = Clip(Text(line, "palletType") ?? Text(payload, "palletType"), 40),
                 Pallets = pallets,
                 TemperatureRequirement = Clip(Text(line, "temperatureRequirement") ?? Text(line, "temperature") ?? Text(payload, "temperatureRequirement") ?? Text(payload, "temperature"), 80),
@@ -601,6 +608,14 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
     private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
     private static DateOnly? DateOnlyOrNull(JsonElement payload, string name) => DateOnly.TryParse(Text(payload, name), out var value) ? value : null;
     private static TimeOnly? TimeOnlyOrNull(JsonElement payload, string name) => TimeOnly.TryParse(Text(payload, name), out var value) ? value : null;
+    private static DateTimeOffset? LocalPayloadDateTime(JsonElement payload, string name, DateOnly date)
+    {
+        var time = TimeOnlyOrNull(payload, name);
+        if (time is null) return null;
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        var local = DateTime.SpecifyKind(date.ToDateTime(time.Value), DateTimeKind.Unspecified);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(local, zone), TimeSpan.Zero);
+    }
     private static string CanonicalMarket(string value)
     {
         var normal = NormaliseKey(value);

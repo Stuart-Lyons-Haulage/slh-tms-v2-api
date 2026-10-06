@@ -13,7 +13,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/planning-control")]
 [Authorize]
-public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<PalletPlanningControlController> logger) : ControllerBase
+public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<PalletPlanningControlController> logger, PlanningStopTimingService stopTiming) : ControllerBase
 {
     private const string AllocationType = "planningpalletallocation";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
@@ -381,9 +381,13 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             {
                 var existingStops = await db.LoadStops.AsNoTracking().Where(x => x.LoadId == load.Id).OrderBy(x => x.Sequence).ToListAsync(ct);
                 var sequence = existingStops.Count == 0 ? 1 : existingStops.Max(x => x.Sequence) + 1;
+                var additions = new List<LoadStop>();
                 if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !existingStops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
-                    db.LoadStops.Add(new LoadStop { LoadId = load.Id, Sequence = sequence++, Name = $"Collect · {collection}" });
-                db.LoadStops.Add(new LoadStop { LoadId = load.Id, OrderId = order.Id, Sequence = sequence, Name = $"Deliver · {order.CustomerCode} · {destination}", PlannerNote = detail?.LineNote ?? $"Ref: {order.Reference}" });
+                    additions.Add(new LoadStop { LoadId = load.Id, Sequence = sequence++, Name = $"Collect · {collection}" });
+                additions.Add(new LoadStop { LoadId = load.Id, OrderId = order.Id, Sequence = sequence, Name = $"Deliver · {order.CustomerCode} · {destination}", PlannerNote = detail?.LineNote ?? $"Ref: {order.Reference}" });
+                db.LoadStops.AddRange(additions);
+                load.Stops = [.. existingStops, .. additions];
+                await stopTiming.ApplyMissingTimesAsync(load, ct);
                 await db.SaveChangesAsync(ct);
                 return;
             }
@@ -395,6 +399,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !registered.Stops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
             registered.Stops.Add(new LoadStop { LoadId = registered.Id, Sequence = registered.Stops.Count + 1, Name = $"Collect · {collection}" });
         registered.Stops.Add(new LoadStop { LoadId = registered.Id, OrderId = order.Id, Sequence = registered.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}", PlannerNote = detail?.LineNote ?? $"Ref: {order.Reference}" });
+        await stopTiming.ApplyMissingTimesAsync(registered, ct);
         await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
     }
 

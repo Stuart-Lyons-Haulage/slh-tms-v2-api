@@ -16,7 +16,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/planning-control/runs")]
 [Authorize]
-public sealed class PlannerAutosaveController(TmsDbContext db) : ControllerBase
+public sealed class PlannerAutosaveController(TmsDbContext db, PlanningStopTimingService stopTiming) : ControllerBase
 {
     [HttpPut("{id:guid}/stops")]
     [Authorize(Policy = "TmsWrite")]
@@ -60,16 +60,17 @@ public sealed class PlannerAutosaveController(TmsDbContext db) : ControllerBase
             PlannedArrivalUtc = stop.PlannedArrivalUtc,
             PlannerNote = string.IsNullOrWhiteSpace(stop.PlannerNote) ? null : stop.PlannerNote.Trim()[..Math.Min(stop.PlannerNote.Trim().Length, 1000)]
         }).ToList();
+        var previousStops = load.Stops;
+        load.Stops = nextStops;
+        await stopTiming.ApplyMissingTimesAsync(load, ct);
 
         if (registerBacked)
         {
-            load.Stops = nextStops;
             await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         }
         else
         {
-            db.LoadStops.RemoveRange(load.Stops);
-            load.Stops = nextStops;
+            db.LoadStops.RemoveRange(previousStops);
             await db.SaveChangesAsync(ct);
         }
 
