@@ -18,6 +18,18 @@ public sealed class DispatchLockRegressionTests
         Assert.Contains("var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);", source);
     }
 
+    [Fact]
+    public void Dispatch_driver_feed_blocks_exhausted_tachograph_capacity()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "Services", "DispatchService.cs"));
+
+        Assert.Contains("TachoAvailabilityBlockReason", source);
+        Assert.Contains("Tacho driving time exhausted", source);
+        Assert.Contains("Tacho working time exhausted", source);
+        Assert.Contains("WTD limit reached", source);
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

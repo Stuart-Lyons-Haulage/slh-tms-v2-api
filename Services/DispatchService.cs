@@ -78,9 +78,12 @@ public sealed class DispatchService(
                               profile.ContractedDays.Count > 0 &&
                               !profile.ContractedDays.Contains(planningDate.DayOfWeek);
             availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability);
+            var tachoBlockReason = planningDate <= today
+                ? TachoAvailabilityBlockReason(driveAvailable ?? 0, workAvailable ?? 0, weeklyWorking, dailyDriving, dailyDrivingLimit)
+                : null;
             var blockedReason = sharedAvailability is { Dispatchable: false }
                 ? string.Join(" · ", sharedAvailability.BlockReasons)
-                : onHoliday ? "Annual leave" : offContract ? "Not contracted tomorrow" : null;
+                : onHoliday ? "Annual leave" : offContract ? "Not contracted tomorrow" : tachoBlockReason;
             var needsReturn = DispatchReturnRules.NeedsReturn(day, latitude, options.NorthernLatitudeThreshold);
             var suggestion = blockedReason is null
                 ? ChooseSuggestion(driver.Id, skills, needsReturn, latitude, longitude, runProfiles)
@@ -855,6 +858,15 @@ public sealed class DispatchService(
         foreach (var prefix in new[] { "Collect · ", "Collect - ", "Deliver · ", "Deliver - " })
             if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return text[prefix.Length..].Trim();
         return text;
+    }
+
+    private static string? TachoAvailabilityBlockReason(int driveAvailable, int workAvailable, decimal weeklyWorking, decimal dailyDriving, int dailyDrivingLimitMinutes)
+    {
+        if (driveAvailable <= 0) return "Tacho driving time exhausted";
+        if (workAvailable <= 0) return "Tacho working time exhausted";
+        if (weeklyWorking >= 60m) return "WTD limit reached";
+        if (dailyDrivingLimitMinutes > 0 && dailyDriving >= dailyDrivingLimitMinutes / 60m) return "Daily driving limit reached";
+        return null;
     }
 
     private static DateOnly LondonDate(DateTimeOffset value) => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, London).DateTime);
