@@ -60,11 +60,16 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
         return Ok(loads.Select(load =>
         {
             var finalStop = load.Stops.OrderBy(stop => stop.Sequence).LastOrDefault();
+            var firstTimedStop = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault(stop => stop.PlannedArrivalUtc is not null);
+            var lastTimedStop = load.Stops.OrderByDescending(stop => stop.Sequence).FirstOrDefault(stop => stop.PlannedArrivalUtc is not null);
+            var shiftLengthMinutes = firstTimedStop?.PlannedArrivalUtc is DateTimeOffset shiftStart && lastTimedStop?.PlannedArrivalUtc is DateTimeOffset shiftEnd && shiftEnd >= shiftStart
+                ? (int)Math.Round((shiftEnd - shiftStart).TotalMinutes)
+                : (int?)null;
             return new DriverAssignmentResponse(load.Id, load.PlanningDate, RunDisplayLabel.For(load), load.Status.ToString(),
                 load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) ? new AssignmentDriver(driver.Id, driver.DisplayName, driver.EmployeeNumber) : null,
                 load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) ? new AssignmentVehicle(vehicle.Id, vehicle.Registration, vehicle.FleetNumber) : null,
                 load.TrailerId is Guid trailerId && trailers.TryGetValue(trailerId, out var trailer) ? trailer.TrailerNumber : null,
-                load.Stops.Count, finalStop?.Name, finalStop?.Latitude, finalStop?.Longitude);
+                load.Stops.Count, finalStop?.Name, shiftLengthMinutes, finalStop?.Latitude, finalStop?.Longitude);
         }));
     }
 
@@ -172,5 +177,5 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
 
 public sealed record AssignmentDriver(Guid Id, string DisplayName, string EmployeeNumber);
 public sealed record AssignmentVehicle(Guid Id, string Registration, string? FleetNumber);
-public sealed record DriverAssignmentResponse(Guid LoadId, DateOnly PlanningDate, string LoadReference, string Status, AssignmentDriver? Driver, AssignmentVehicle? Vehicle, string? TrailerNumber, int StopCount, string? FinalStop, decimal? FinalLatitude, decimal? FinalLongitude);
+public sealed record DriverAssignmentResponse(Guid LoadId, DateOnly PlanningDate, string LoadReference, string Status, AssignmentDriver? Driver, AssignmentVehicle? Vehicle, string? TrailerNumber, int StopCount, string? FinalStop, int? ShiftLengthMinutes, decimal? FinalLatitude, decimal? FinalLongitude);
 public sealed record ReturnLoadSuggestion(Guid DriverId, string DriverName, string EmployeeNumber, int ConsecutiveDays, string PreviousLoadReference, DateOnly PreviousPlanningDate, string? LastLocation, decimal? Latitude, decimal? Longitude, Guid? SuggestedLoadId, string? SuggestedLoadReference, int Priority, string Reason);

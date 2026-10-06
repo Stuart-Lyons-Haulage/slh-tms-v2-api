@@ -70,6 +70,7 @@ public sealed class TvAssignmentsController(TmsDbContext db, IConfiguration conf
                         : null,
                     load.Stops.Count,
                     finalStop?.Name,
+                    null,
                     finalStop?.Latitude,
                     finalStop?.Longitude);
             })
