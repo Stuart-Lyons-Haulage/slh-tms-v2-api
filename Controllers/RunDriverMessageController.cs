@@ -11,7 +11,6 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/loads"), Authorize]
 public sealed class RunDriverMessageController(
     TmsDbContext db,
-    DriverSmsDispatchService sms,
     TachoMasterClient tachoMaster,
     DriverWeeklyRestComplianceService weeklyRestCompliance) : ControllerBase
 {
@@ -49,81 +48,6 @@ public sealed class RunDriverMessageController(
         return Ok(readiness with { StructuralReadiness = structural });
     }
 
-    [HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> Send(Guid id, RunDriverMessageRequest request, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(request.Message)) return BadRequest(new { message = "The driver message is empty." });
-        if (request.Message.Length > 5000) return BadRequest(new { message = "The driver message is too long." });
-
-        // Allocation writes deliberately target the Planning Register when a resilient copy exists.
-        // Prefer that copy here too, otherwise a stale dbo.Loads row can make Dispatch believe a
-        // successfully allocated run has no driver/vehicle.
-        Load? load = null;
-        var register = false;
-        try
-        {
-            load = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
-            register = load is not null;
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        if (load is null)
-        {
-            try
-            {
-                load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
-            }
-            catch (Exception exception) when (IsSchemaUnavailable(exception))
-            {
-                db.ChangeTracker.Clear();
-            }
-        }
-        if (load is null) return NotFound(new { message = "The run could not be found." });
-        if (load.DriverId is null || load.VehicleId is null) return BadRequest(new { message = "Allocate both a driver and vehicle before sending the driver text." });
-
-        var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
-        if (driver is null) return BadRequest(new { message = "The allocated driver could not be found." });
-        if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest(new { message = "The assigned driver has no approved mobile number." });
-
-        if (request.Dispatch)
-        {
-            if (request.RouteDrivingMinutes is not int routeDrivingMinutes || routeDrivingMinutes <= 0)
-                return BadRequest(new { message = "The route must be calculated before dispatch so TachoMaster can check the driver's remaining hours." });
-            var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
-            if (vehicle is null) return BadRequest(new { message = "The allocated vehicle could not be found." });
-
-            var structural = await new PreDispatchSafetyService(db).EvaluateAsync(id, ct);
-            if (structural.Classification == "Blocked")
-                return BadRequest(new { message = StructuralExplanation(structural), structural });
-            if (structural.Classification == "Unverified" && !request.AcknowledgeUnverified)
-                return BadRequest(new { message = "Pre-dispatch evidence is incomplete. Review and acknowledge the warnings before dispatch.", structural });
-
-            var readiness = await AssessReadiness(load, driver, vehicle, routeDrivingMinutes, actualDispatch: true, ct);
-            if (!readiness.CanDispatch && readiness.Status == "Unverified" && request.AcknowledgeUnverified)
-                readiness = Acknowledged(readiness);
-            readiness = readiness with { StructuralReadiness = readiness.Status.StartsWith("Unverified", StringComparison.OrdinalIgnoreCase) ? WithUnverifiedWarning(structural, readiness.Explanation) : structural };
-            if (!readiness.CanDispatch) return BadRequest(new { message = readiness.Explanation, readiness });
-        }
-
-        var receipt = await sms.SendAsync(driver.MobileNumber, request.Message.Trim(), ct);
-        if (request.Dispatch && load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
-
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
-        else await db.SaveChangesAsync(ct);
-
-        await RecordMessageEvent(load, request, receipt.Provider, receipt.MobileSuffix, receipt.MessageId, ct);
-
-        return Accepted(new
-        {
-            receipt.MessageId,
-            receipt.MobileSuffix,
-            receipt.Provider,
-            load.Status
-        });
-    }
 
     private async Task RecordMessageEvent(Load load, RunDriverMessageRequest request, string? provider, string? mobileSuffix, string? messageId, CancellationToken ct)
     {

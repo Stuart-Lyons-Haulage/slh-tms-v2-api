@@ -208,12 +208,6 @@ builder.Services.AddSingleton(tachoMasterOptions);
 var sageHrOptions = new SageHrOptions();
 builder.Configuration.GetSection("Integrations:SageHr").Bind(sageHrOptions);
 builder.Services.AddSingleton(sageHrOptions);
-var azureSmsOptions = new AzureSmsOptions();
-builder.Configuration.GetSection("Integrations:AzureSms").Bind(azureSmsOptions);
-builder.Services.AddSingleton(azureSmsOptions);
-var textBeeOptions = new TextBeeOptions();
-builder.Configuration.GetSection("Integrations:TextBee").Bind(textBeeOptions);
-builder.Services.AddSingleton(textBeeOptions);
 var fleetioOptions = new FleetioOptions();
 builder.Configuration.GetSection("Integrations:Fleetio").Bind(fleetioOptions);
 fleetioOptions.Enabled = ReadBool(builder.Configuration, fleetioOptions.Enabled,
@@ -236,7 +230,6 @@ if (string.Equals(samsaraOptions.BaseUrl.TrimEnd('/'), "https://api.samsara.com"
     samsaraOptions.BaseUrl = "https://api.eu.samsara.com";
 builder.Services.AddSingleton(samsaraOptions);
 builder.Services.AddScoped<SamsaraRouteProgressService>();
-builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<DistributedLeaseManager>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddScoped<TachoDriverMasterSyncService>();
@@ -249,7 +242,6 @@ builder.Services.AddTransient<TachoMasterResponseCacheHandler>();
 builder.Services.AddTransient<DependencyTelemetryHandler>();
 builder.Services.AddTransient<ProviderResilienceHandler>();
 builder.Services.AddScoped<DriverWeeklyRestComplianceService>();
-builder.Services.AddHttpClient<DriverSmsDispatchService>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
 builder.Services.AddHttpClient<SageHrClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
 builder.Services.AddHttpClient<DotTrackingClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()

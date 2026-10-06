@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration, MasterAssignmentComplianceService compliance) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, IConfiguration configuration, MasterAssignmentComplianceService compliance) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -302,59 +302,6 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         });
     }
 
-    [HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> SendDispatchSms(Guid id, CancellationToken ct)
-    {
-        var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: true, ct);
-        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
-        if (load.DriverId is null || load.VehicleId is null) return BadRequest("Allocate both a driver and vehicle before sending a dispatch.");
-        var driver = await db.Drivers.SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
-        var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
-        if (driver is null || vehicle is null) return BadRequest("The allocated driver or vehicle could not be found.");
-        if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest("The assigned driver has no approved mobile number.");
-
-        var orders = await LoadOrdersAsync(load, register, ct);
-        var marketMapLinks = await ResolveMarketMapLinksAsync(orders.Values, ct);
-        var temperature = await SitePlanningProfileStore.ResolveRunTemperaturesAsync(db, orders.Values, ct);
-        if (temperature.HasConflict)
-        {
-            var values = temperature.DistinctTemperatures.Select(SitePlanningProfileStore.FormatTemperature).ToList();
-            return BadRequest(new { message = $"Temperature conflict on run {load.Reference}: {string.Join(" / ", values)}. Resolve the load temperature before sending the driver text.", temperatures = values });
-        }
-        var formattedTemperature = temperature.LoadTemperatureC is null ? null : SitePlanningProfileStore.FormatTemperature(temperature.LoadTemperatureC.Value);
-        var stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop =>
-        {
-            orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
-            var orderTemperature = order is not null && temperature.OrderTemperatures.TryGetValue(order.Id, out var value) && value is not null
-                ? SitePlanningProfileStore.FormatTemperature(value.Value)
-                : null;
-            return string.Join("\n", new[]
-            {
-                $"{stop.Sequence}. {stop.Name}",
-                orderTemperature is null ? null : $"Temperature: {orderTemperature}",
-                order?.MarketName is null ? null : $"Market: {order.MarketName}{(string.IsNullOrWhiteSpace(order.StallNumber) ? string.Empty : $" · Stall {order.StallNumber}")}",
-                order?.SellerName is null ? null : $"Seller: {order.SellerName}",
-                string.IsNullOrWhiteSpace(stop.Address) ? null : $"Address: {stop.Address}",
-                string.IsNullOrWhiteSpace(order?.DriverInstructions) ? null : $"Notes: {order!.DriverInstructions}",
-                string.IsNullOrWhiteSpace(order?.MapLink) ?
-                    (order?.MarketName is not null && marketMapLinks.TryGetValue(MarketKey(order.MarketName), out var marketMap) ? $"Market map (read-only PDF): {marketMap}" : null) :
-                    $"Map: {order.MapLink}"
-            }.Where(line => line is not null));
-        });
-        var message = string.Join("\n\n", new[]
-        {
-            $"SLH run {load.Reference}",
-            $"Driver: {driver.DisplayName}",
-            $"Vehicle: {vehicle.Registration}",
-            formattedTemperature is null ? null : $"LOAD TEMPERATURE: {formattedTemperature}\nSet trailer to {formattedTemperature} before collection",
-            string.Empty,
-            string.Join("\n\n", stops)
-        }.Where(line => line is not null));
-        var receipt = await sms.SendAsync(driver.MobileNumber, message, ct);
-        if (load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
-        await SaveLoadAsync(load, register, ct);
-        return Accepted(new { receipt.MessageId, receipt.MobileSuffix, receipt.Provider, load.Status, loadTemperatureC = temperature.LoadTemperatureC });
-    }
 
     private async Task<Dictionary<string, string>> ResolveMarketMapLinksAsync(IEnumerable<TransportOrder> orders, CancellationToken ct)
     {

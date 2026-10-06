@@ -14,7 +14,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, SamsaraOptions samsara, SamsaraClient samsaraClient, InfoMailboxGraphOptions infoMailboxGraph, InfoMailboxGraphHealthState infoMailboxGraphHealth, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, FleetioOptions fleetio, FleetioClient fleetioClient, SamsaraOptions samsara, SamsaraClient samsaraClient, InfoMailboxGraphOptions infoMailboxGraph, InfoMailboxGraphHealthState infoMailboxGraphHealth, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -37,9 +37,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                 }
             },
             azureMaps = new { configured = !string.IsNullOrWhiteSpace(configuration["Maps:Endpoint"]) },
-            azureSms = new { configured = azureSms.IsConfigured },
-            textBee = new { configured = textBee.IsConfigured, dutyPhoneLabel = textBee.DutyPhoneLabel, missingSettings = textBee.MissingSettings },
-            driverSms = new { configured = sms.IsConfigured, provider = textBee.IsConfigured ? "TextBee" : azureSms.IsConfigured ? "Azure SMS" : "MightyText copy" },
+
             fleetio = new { configured = fleetio.IsConfigured, missingSettings = fleetio.MissingSettings },
             samsara = new { configured = samsaraClient.IsConfigured, missingSettings = samsaraClient.MissingSettings },
             sageHr = new { configured = sageHr.IsConfigured },

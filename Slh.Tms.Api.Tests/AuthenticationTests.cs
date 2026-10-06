@@ -31,12 +31,12 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     {
         var client = _factory.CreateClient();
         var request = new HttpRequestMessage(HttpMethod.Options, "/api/v1/customers");
-        request.Headers.Add("Origin", "https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io");
+        request.Headers.Add("Origin", "https://tms.lyonshaulage.com");
         request.Headers.Add("Access-Control-Request-Method", "GET");
         request.Headers.Add("Access-Control-Request-Headers", "authorization");
         var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
-        Assert.Equal("https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        Assert.Equal("https://tms.lyonshaulage.com", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
     }
 
     [Fact]
