@@ -110,19 +110,6 @@ public static class StartupConfigurationValidator
             Require(configuration, errors, "Integrations:OpenAI:ApiKey", "OpenAI API key");
         }
 
-        if (Enabled(configuration, "Integrations:TextBee:Enabled"))
-        {
-            RequireUrl(configuration, errors, "Integrations:TextBee:BaseUrl", "TextBee base URL");
-            Require(configuration, errors, "Integrations:TextBee:ApiKey", "TextBee API key");
-            Require(configuration, errors, "Integrations:TextBee:DeviceId", "TextBee device ID");
-        }
-
-        if (Enabled(configuration, "Integrations:AzureSms:Enabled"))
-        {
-            Require(configuration, errors, "Integrations:AzureSms:ConnectionString", "Azure SMS connection string");
-            Require(configuration, errors, "Integrations:AzureSms:From", "Azure SMS sender");
-        }
-
         if (Enabled(configuration, "Archive:Enabled"))
             Require(configuration, errors, "Archive:RootPath", "archive root path");
     }
