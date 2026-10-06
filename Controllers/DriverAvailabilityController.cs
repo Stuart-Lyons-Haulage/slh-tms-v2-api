@@ -42,11 +42,21 @@ public sealed class DriverAvailabilityController(TmsDbContext db, SageHrClient s
         var validation = await Validate(request, null, ct);
         if (validation is not null) return validation;
         var actor = User.Identity?.Name ?? "TMS planner";
-        var window = new DriverAvailabilityWindow { Id = Guid.NewGuid(), DriverId = request.DriverId, CreatedBy = actor, UpdatedBy = actor };
+        // Imports are deliberately rerunnable. Treat the same driver/date window
+        // as an update so re-uploading an agency workbook cannot create duplicate
+        // availability records.
+        var window = await db.DriverAvailabilityWindows.SingleOrDefaultAsync(item =>
+            item.DriverId == request.DriverId &&
+            item.AvailableFromUtc == request.AvailableFromUtc.ToUniversalTime() &&
+            item.AvailableUntilUtc == request.AvailableUntilUtc.ToUniversalTime(), ct);
+        var existed = window is not null;
+        window ??= new DriverAvailabilityWindow { Id = Guid.NewGuid(), DriverId = request.DriverId, CreatedBy = actor, UpdatedBy = actor };
         Apply(window, request, actor);
-        db.DriverAvailabilityWindows.Add(window);
-        await AddAudit(window, "DriverAvailabilityCreated", actor, ct);
-        return CreatedAtAction(nameof(Get), new { date = DateOnly.FromDateTime(window.AvailableFromUtc.UtcDateTime) }, window);
+        if (!existed) db.DriverAvailabilityWindows.Add(window);
+        await AddAudit(window, existed ? "DriverAvailabilityUpdated" : "DriverAvailabilityCreated", actor, ct);
+        return existed
+            ? Ok(window)
+            : CreatedAtAction(nameof(Get), new { date = DateOnly.FromDateTime(window.AvailableFromUtc.UtcDateTime) }, window);
     }
 
     [HttpPut("{id:guid}"), Authorize(Policy = "TmsWrite")]
