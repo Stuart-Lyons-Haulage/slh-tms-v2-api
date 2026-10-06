@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration, MasterAssignmentComplianceService compliance) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, IConfiguration configuration, MasterAssignmentComplianceService compliance) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
