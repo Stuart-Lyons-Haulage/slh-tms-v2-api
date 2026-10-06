@@ -11,7 +11,6 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/loads"), Authorize]
 public sealed class RunDriverMessageController(
     TmsDbContext db,
-    DriverSmsDispatchService sms,
     TachoMasterClient tachoMaster,
     DriverWeeklyRestComplianceService weeklyRestCompliance) : ControllerBase
 {
