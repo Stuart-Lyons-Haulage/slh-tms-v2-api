@@ -11,6 +11,8 @@ public static class NwfBookingReservationSync
     public static async Task<Guid?> UpsertAsync(TmsDbContext db, StagedImport staged, JsonElement payload, string? actor, CancellationToken ct, Guid? sourceMovementId = null)
     {
         if (!string.Equals(Text(payload, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase)) return null;
+        var isEquipmentPayload = CrateTrayBookingRules.IsPayload(payload);
+        if (!isEquipmentPayload && !IsCancellation(payload)) return null;
         var jobType = Text(payload, "jobType") ?? "NWF booking";
         var incomingJobType = Text(payload, "jobType");
         var incomingPlannerNotes = Text(payload, "driverInstructions") ?? Text(payload, "plannerNotes");
@@ -74,6 +76,7 @@ public static class NwfBookingReservationSync
                 if (matches.Count == 1) existing = matches[0];
             }
         }
+        if (existing is null && !isEquipmentPayload) return null;
         var units = Decimal(payload, "pallets") ?? Decimal(payload, "palletQty") ?? 0;
         var now = DateTimeOffset.UtcNow;
         var status = IsCancellation(payload)

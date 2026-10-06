@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -19,7 +20,9 @@ public sealed class BookingReservationsController(TmsDbContext db) : ControllerB
         if (!string.IsNullOrWhiteSpace(customerCode)) query = query.Where(row => row.CustomerCode == customerCode);
         if (Enum.TryParse<BookingReservationStatus>(status, true, out var parsedStatus)) query = query.Where(row => row.Status == parsedStatus);
 
-        var reservations = await query.OrderBy(row => row.CollectionDate).ThenBy(row => row.CustomerCode).ThenBy(row => row.CollectionReference).Take(1000).ToListAsync(ct);
+        var reservations = (await query.OrderBy(row => row.CollectionDate).ThenBy(row => row.CustomerCode).ThenBy(row => row.CollectionReference).Take(1000).ToListAsync(ct))
+            .Where(CrateTrayBookingRules.IsReservation)
+            .ToList();
         var ids = reservations.Select(row => row.Id).ToArray();
         var allocationTotals = await db.BookingReservationAllocations.AsNoTracking()
             .Where(row => ids.Contains(row.BookingReservationId) && row.IsActive)
@@ -46,6 +49,8 @@ public sealed class BookingReservationsController(TmsDbContext db) : ControllerB
     public async Task<IActionResult> Create(CreateBookingReservationRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.CustomerCode) || string.IsNullOrWhiteSpace(request.BookingType)) return BadRequest("CustomerCode and BookingType are required.");
+        if (!CrateTrayBookingRules.IsManualReservation(request.BookingType, request.UnitType, request.Composition))
+            return BadRequest("Booking & Capacity is restricted to crate, tray and IFCO equipment movements.");
         if (request.ReservedUnits < 0) return BadRequest("ReservedUnits cannot be negative.");
 
         var key = string.IsNullOrWhiteSpace(request.StableBookingKey)
@@ -138,14 +143,14 @@ public sealed class BookingReservationsController(TmsDbContext db) : ControllerB
     {
         var reservation = await db.BookingReservations.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, ct);
         if (reservation is null) return NotFound();
+        if (!CrateTrayBookingRules.IsReservation(reservation)) return NotFound();
         if (reservation.Status is BookingReservationStatus.Cancelled or BookingReservationStatus.Superseded or BookingReservationStatus.Expired)
             return Conflict("This booking is no longer assignable.");
         var existingOrderIds = await db.BookingReservationAllocations.AsNoTracking()
-            .Where(item => item.BookingReservationId == id && item.IsActive && item.TransportOrderId != null)
+            .Where(item => item.IsActive && item.TransportOrderId != null)
             .Select(item => item.TransportOrderId!.Value).ToListAsync(ct);
         var query = db.TransportOrders.AsNoTracking()
-            .Where(order => order.CustomerCode == reservation.CustomerCode &&
-                order.CollectionDate >= reservation.CollectionDate.AddDays(-1) &&
+            .Where(order => order.CollectionDate >= reservation.CollectionDate.AddDays(-1) &&
                 order.CollectionDate <= reservation.CollectionDate.AddDays(1) &&
                 order.Status != OrderStatus.Draft && order.Status != OrderStatus.Cancelled && order.Status != OrderStatus.Delivered);
         if (existingOrderIds.Count > 0) query = query.Where(order => !existingOrderIds.Contains(order.Id));
@@ -161,13 +166,36 @@ public sealed class BookingReservationsController(TmsDbContext db) : ControllerB
         var referenceByMovement = revisionByMovement.ToDictionary(
             pair => pair.Key,
             pair => sourceReferences.FirstOrDefault(source => source.RevisionId == pair.Value)?.LoadReference);
+        var payloadByMovement = revisionByMovement.Count == 0
+            ? new Dictionary<Guid, JsonElement>()
+            : (await db.OrderRevisions.AsNoTracking()
+                .Where(revision => revisionIds.Contains(revision.Id))
+                .Select(revision => new { revision.Id, revision.PayloadJson })
+                .ToListAsync(ct))
+                .Select(revision =>
+                {
+                    try { using var document = JsonDocument.Parse(revision.PayloadJson); return new { revision.Id, Payload = (JsonElement?)document.RootElement.Clone() }; }
+                    catch (JsonException) { return new { revision.Id, Payload = (JsonElement?)null }; }
+                })
+                .Where(item => item.Payload is not null)
+                .ToDictionary(item => item.Id, item => item.Payload!.Value);
         return Ok(candidates
             .Select(order => new
             {
-                order.Id, order.Reference, order.CustomerCode, order.CollectionDate, order.DeliveryDate, order.Pallets, order.Status, order.SellerName, order.MarketName,
-                collectionReference = order.SourceMovementId is Guid movementId ? referenceByMovement.GetValueOrDefault(movementId) : null
+                Order = order,
+                Payload = order.SourceMovementId is Guid movementId && revisionByMovement.TryGetValue(movementId, out var currentRevisionId) && payloadByMovement.TryGetValue(currentRevisionId, out var orderPayload)
+                    ? (JsonElement?)orderPayload
+                    : null,
+                collectionReference = order.SourceMovementId is Guid referenceMovementId ? referenceByMovement.GetValueOrDefault(referenceMovementId) : null
             })
-            .OrderByDescending(order => !string.IsNullOrWhiteSpace(reservation.CollectionReference) && string.Equals(order.collectionReference, reservation.CollectionReference, StringComparison.OrdinalIgnoreCase))
+            .Where(item => item.Payload is JsonElement payload && CrateTrayBookingRules.MatchScore(reservation, item.Order, payload) > 0)
+            .Select(item => new
+            {
+                item.Order.Id, item.Order.Reference, item.Order.CustomerCode, item.Order.CollectionDate, item.Order.DeliveryDate,
+                item.Order.Pallets, item.Order.Status, item.Order.SellerName, item.Order.MarketName, item.collectionReference,
+                matchScore = CrateTrayBookingRules.MatchScore(reservation, item.Order, item.Payload!.Value)
+            })
+            .OrderByDescending(order => order.matchScore)
             .ThenBy(order => order.CollectionDate).ThenBy(order => order.Reference)
             .ToList());
     }
@@ -181,12 +209,15 @@ public sealed class BookingReservationsController(TmsDbContext db) : ControllerB
         if (order.Status is OrderStatus.Draft or OrderStatus.Cancelled or OrderStatus.Delivered) return Conflict("Only an approved, planned or live order can be matched to a retained booking.");
         var reservation = await db.BookingReservations.SingleOrDefaultAsync(item => item.Id == id, ct);
         if (reservation is null) return NotFound();
+        if (!CrateTrayBookingRules.IsReservation(reservation)) return NotFound();
         if (reservation.Status is BookingReservationStatus.Cancelled or BookingReservationStatus.Superseded or BookingReservationStatus.Expired)
             return Conflict("This booking is no longer assignable.");
-        if (!string.Equals(order.CustomerCode, reservation.CustomerCode, StringComparison.OrdinalIgnoreCase)) return Conflict("The order customer does not match the retained booking.");
         if (order.CollectionDate < reservation.CollectionDate.AddDays(-1) || order.CollectionDate > reservation.CollectionDate.AddDays(1)) return Conflict("The order collection date is outside the retained booking window.");
-        if (await db.BookingReservationAllocations.AnyAsync(item => item.BookingReservationId == id && item.IsActive && item.TransportOrderId == order.Id, ct))
-            return Conflict("This transport order is already matched to the retained booking.");
+        var orderPayload = await CrateTrayBookingRules.CurrentOrderPayloadAsync(db, order, ct);
+        if (orderPayload is not JsonElement payload || CrateTrayBookingRules.MatchScore(reservation, order, payload) == 0)
+            return Conflict("The order does not share a unique crate/tray reference with this retained booking.");
+        if (await db.BookingReservationAllocations.AnyAsync(item => item.IsActive && item.TransportOrderId == order.Id, ct))
+            return Conflict("This transport order is already matched to a retained crate/tray booking.");
         var units = request.Units ?? order.Pallets ?? 0;
         object result;
         try { result = await AllocateInternal(reservation, order.Id, units, order.Reference, request.Note, ct); }

@@ -179,7 +179,7 @@ public sealed class BookingInvoiceTrailTests
             CollectionDate = new DateOnly(2026, 9, 29), CollectionReference = "CRATE-REF-1", ReservedUnits = 8, CompositionJson = "{}"
         };
         var movement = new OrderMovement { CustomerCode = "NWF", StableMovementKey = "NWF|SOURCE-1" };
-        var revision = new OrderRevision { MovementId = movement.Id, StagedImportId = Guid.NewGuid(), RevisionNumber = 1, PayloadJson = "{}" };
+        var revision = new OrderRevision { MovementId = movement.Id, StagedImportId = Guid.NewGuid(), RevisionNumber = 1, PayloadJson = "{\"jobType\":\"NWF crate return\",\"customerPo\":\"CRATE-REF-1\"}" };
         movement.CurrentRevisionId = revision.Id;
         var sourceLine = new OrderSourceLine { RevisionId = revision.Id, SourceRowKey = "row-1", LoadReference = "CRATE-REF-1", PayloadJson = "{}" };
         var order = new TransportOrder { Reference = "NWF-CONFIRMED-1", CustomerCode = "NWF", CollectionDate = reservation.CollectionDate, Pallets = 8, Status = OrderStatus.ReadyToPlan, SourceMovementId = movement.Id };
@@ -247,11 +247,14 @@ public sealed class BookingInvoiceTrailTests
         var reservation = new BookingReservation
         {
             CustomerCode = "NWF", BookingType = "NWF crate dump", StableBookingKey = "NWF|2026-09-29|CRATE-200",
-            CollectionDate = new DateOnly(2026, 9, 29), ReservedUnits = 10, CompositionJson = "{}", Status = BookingReservationStatus.Confirmed
+            CollectionDate = new DateOnly(2026, 9, 29), CollectionReference = "CRATE-200", ReservedUnits = 10,
+            CompositionJson = "{\"jobType\":\"NWF crate return\",\"customerPo\":\"CRATE-200\"}", Status = BookingReservationStatus.Confirmed
         };
-        var order = new TransportOrder { Reference = "NWF-ORDER-200", CustomerCode = "NWF", CollectionDate = new DateOnly(2026, 9, 29), Pallets = 10, Status = OrderStatus.ReadyToPlan };
-        db.BookingReservations.Add(reservation);
-        db.TransportOrders.Add(order);
+        var movement = new OrderMovement { CustomerCode = "NWF", StableMovementKey = "NWF:CRATE-200" };
+        var revision = new OrderRevision { MovementId = movement.Id, StagedImportId = Guid.NewGuid(), RevisionNumber = 1, PayloadJson = "{\"jobType\":\"NWF crate return\",\"customerPo\":\"CRATE-200\"}" };
+        movement.CurrentRevisionId = revision.Id;
+        var order = new TransportOrder { Reference = "NWF-ORDER-200", CustomerCode = "NWF", CollectionDate = new DateOnly(2026, 9, 29), Pallets = 10, Status = OrderStatus.ReadyToPlan, SourceMovementId = movement.Id };
+        db.AddRange(reservation, movement, revision, order);
         await db.SaveChangesAsync();
 
         var controller = new BookingReservationsController(db);
@@ -325,6 +328,76 @@ public sealed class BookingInvoiceTrailTests
         Assert.Contains("MatchedToTransportOrder", json);
         Assert.Contains("PreparedFromCompletedLoad", json);
         Assert.Contains("Driver dispatched", json);
+    }
+
+    [Fact]
+    public async Task Ordinary_nwf_pallet_order_does_not_create_a_booking_reservation()
+    {
+        await using var db = CreateDb();
+        var staged = new StagedImport { EntityType = "order", IdempotencyKey = "nwf-pallet-only", PayloadJson = "{}" };
+        using var payload = JsonDocument.Parse("""
+            {"customerCode":"NWF","jobType":"NWF pallet order","collectionDate":"2026-10-07","pallets":12,"intakeNaturalKey":"NWF-PALLET-ONLY"}
+            """);
+
+        var id = await NwfBookingReservationSync.UpsertAsync(db, staged, payload.RootElement, "planner", CancellationToken.None);
+        await db.SaveChangesAsync();
+
+        Assert.Null(id);
+        Assert.Empty(await db.BookingReservations.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Unique_crate_reference_automatically_matches_cross_customer_tray_order()
+    {
+        await using var db = CreateDb();
+        var reservation = new BookingReservation
+        {
+            CustomerCode = "NWF", BookingType = "Crates", StableBookingKey = "NWF|CRATE|PO00507451",
+            CollectionDate = new DateOnly(2026, 10, 7), CollectionReference = "PO00507451", ReservedUnits = 33,
+            CompositionJson = "{\"jobType\":\"Crates\",\"transportPo\":\"PO00507451\"}", Status = BookingReservationStatus.Confirmed
+        };
+        var order = new TransportOrder
+        {
+            Reference = "PO00507451/BEDFORDSELSEY", CustomerCode = "ALDI", CollectionDate = reservation.CollectionDate,
+            Pallets = 33, Status = OrderStatus.ReadyToPlan, StallNumber = "Bedford"
+        };
+        db.AddRange(reservation, order);
+        await db.SaveChangesAsync();
+        using var payload = JsonDocument.Parse("""
+            {"customerCode":"ALDI","jobType":"NWF confirmed ALDI tray collection","transportPo":"PO00507451","pallets":33}
+            """);
+
+        var allocationId = await CrateTrayBookingMatcher.TryMatchAsync(db, order, payload.RootElement, "intake", CancellationToken.None);
+        await db.SaveChangesAsync();
+
+        Assert.NotNull(allocationId);
+        var allocation = Assert.Single(await db.BookingReservationAllocations.ToListAsync());
+        Assert.Equal(order.Id, allocation.TransportOrderId);
+        Assert.Equal(33, allocation.Units);
+        Assert.Equal(BookingReservationStatus.Assigned, (await db.BookingReservations.SingleAsync()).Status);
+        Assert.Contains("AutomaticallyMatchedToCrateTrayOrder", await db.OperationalHistoryEvents.Select(item => item.EventType).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Ambiguous_crate_reference_stays_unmatched_for_planner_review()
+    {
+        await using var db = CreateDb();
+        var date = new DateOnly(2026, 10, 7);
+        db.BookingReservations.AddRange(
+            new BookingReservation { CustomerCode = "NWF", BookingType = "Crates", StableBookingKey = "CRATE-A", CollectionDate = date, CollectionReference = "PO00507452", ReservedUnits = 20, CompositionJson = "{\"jobType\":\"Crates\",\"transportPo\":\"PO00507452\"}" },
+            new BookingReservation { CustomerCode = "NWF", BookingType = "Trays", StableBookingKey = "CRATE-B", CollectionDate = date, CollectionReference = "PO00507452", ReservedUnits = 20, CompositionJson = "{\"jobType\":\"Trays\",\"transportPo\":\"PO00507452\"}" });
+        var order = new TransportOrder { Reference = "PO00507452/BEDFORDRUNCTON", CustomerCode = "ALDI", CollectionDate = date, Pallets = 20, Status = OrderStatus.ReadyToPlan };
+        db.TransportOrders.Add(order);
+        await db.SaveChangesAsync();
+        using var payload = JsonDocument.Parse("""
+            {"customerCode":"ALDI","jobType":"NWF confirmed ALDI tray collection","transportPo":"PO00507452","pallets":20}
+            """);
+
+        var allocationId = await CrateTrayBookingMatcher.TryMatchAsync(db, order, payload.RootElement, "intake", CancellationToken.None);
+        await db.SaveChangesAsync();
+
+        Assert.Null(allocationId);
+        Assert.Empty(await db.BookingReservationAllocations.ToListAsync());
     }
 
     private static TmsDbContext CreateDb() => new(new DbContextOptionsBuilder<TmsDbContext>()

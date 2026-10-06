@@ -429,6 +429,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
                 .FirstOrDefaultAsync(ct);
         }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)) { return; }
+        TransportOrder order;
         if (existing is null)
         {
             DateOnly? deliveryDate = null;
@@ -440,10 +441,12 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
             else deliveryWindowEndUtc = masterDeliveryWindow.End;
             Guid? sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
-            db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber"), 200), DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions"), 1000), MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink"), 1000) });
+            order = new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber"), 200), DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions"), 1000), MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink"), 1000) };
+            db.TransportOrders.Add(order);
         }
         else
         {
+            order = existing;
             existing.SourceStagedImportId = item.Id;
             existing.SourceMovementId = movement.Id;
             existing.CollectionDate = collectionDate;
@@ -459,6 +462,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             if (existing.Status == OrderStatus.Planned)
                 existing.NeedsReplan = true;
         }
+        await CrateTrayBookingMatcher.TryMatchAsync(db, order, payload, item.ReviewedBy, ct);
     }
 
     private async Task<(OrderMovement Movement, bool PlannerReady)> RecordOrderRevision(StagedImport item, JsonElement payload, string reference, string customerCode, CancellationToken ct)
