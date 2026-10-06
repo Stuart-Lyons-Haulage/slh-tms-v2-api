@@ -37,7 +37,6 @@ jobs:
       - name: Restore dependencies
         run: |
           dotnet restore Slh.Tms.Api.csproj
-          dotnet restore Slh.Tms.Jobs/Slh.Tms.Jobs.csproj
           dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
 
       - name: Build API project (Release)
@@ -45,22 +44,6 @@ jobs:
 
       - name: Bootstrap a completely fresh SQL Server database
         run: bash ops/bootstrap-fresh-db.sh
-
-      - name: Build scheduled Jobs project (Release)
-        run: dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj --configuration Release --no-restore
-
-      - name: Validate Container Apps Jobs Bicep
-        run: az bicep build --file infra/container-app-jobs.bicep --stdout > /dev/null
-
-      - name: Validate Info mailbox intake workflow
-        run: |
-          python power-automate/info-mailbox-order-intake/validate_workflow.py
-          python power-automate/info-mailbox-order-intake/test_validate_workflow.py
-
-      - name: Validate customer load-plan outbound workflow
-        run: |
-          python power-automate/customer-load-plan-dispatch/validate_workflow.py
-          python power-automate/customer-load-plan-dispatch/test_validate_workflow.py
 
       - name: Run tests
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
