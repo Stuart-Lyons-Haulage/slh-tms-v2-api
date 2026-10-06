@@ -23,45 +23,54 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
       - name: Restore
-        run: dotnet restore Slh.Tms.Api.csproj
+        run: dotnet restore Slh.Tms.Api.csproj && dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
+
       - name: Build API
         run: dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
+
       - name: Test API
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
+
       - name: Publish API
         run: dotnet publish Slh.Tms.Api.csproj --configuration Release --no-restore --output ./publish
+
       - name: Package published API
         run: cd publish && zip -r ../api-publish.zip .
+
       - name: Sign in to Azure with GitHub OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
       - name: Deploy ZIP to App Service
         uses: azure/cli@v2
         with:
           inlineScript: |
             az webapp deploy \
-              --resource-group \"$AZURE_RESOURCE_GROUP\" \
-              --name \"$AZURE_WEBAPP_NAME\" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
               --src-path api-publish.zip \
               --type zip \
               --clean true
+
       - name: Verify anonymous health endpoint
         run: |
           for attempt in {1..12}; do
-            response=\$(curl -fsS https://slh-tms-api-prod.azurewebsites.net/api/v1/health || true)
-            if echo \"\$response\" | grep -qi 'healthy'; then
-              echo \"\$response\"
+            response=$(curl -fsS https://slh-tms-api-prod.azurewebsites.net/api/v1/health || true)
+            if echo "$response" | grep -qi 'healthy'; then
+              echo "$response"
               exit 0
             fi
             sleep 10
           done
-          echo \"API health check failed\" >&2
+          echo "API health check failed" >&2
           exit 1
