@@ -476,6 +476,21 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
                 : $"{normalCustomer}:{suppliedMovementKey.Trim().ToUpperInvariant()}",
             240);
         var movement = await db.OrderMovements.SingleOrDefaultAsync(x => x.CustomerCode == normalCustomer && x.StableMovementKey == stableKey, ct);
+        if (movement is null && !string.IsNullOrWhiteSpace(suppliedMovementKey))
+        {
+            // Older intake rows included destination in amendmentMatchKey. Keep
+            // those movements connected when a later amendment uses the corrected
+            // PO-level identity, without merging different customers or POs.
+            var legacyParts = suppliedMovementKey.Trim().ToUpperInvariant().Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (legacyParts.Length >= 2)
+            {
+                var legacyPrefix = $"{normalCustomer}:{legacyParts[0]}|{legacyParts[1]}|";
+                movement = await db.OrderMovements
+                    .Where(x => x.CustomerCode == normalCustomer && x.StableMovementKey.StartsWith(legacyPrefix))
+                    .OrderByDescending(x => x.UpdatedAtUtc)
+                    .FirstOrDefaultAsync(ct);
+            }
+        }
         if (movement is null)
         {
             movement = new OrderMovement { CustomerCode = normalCustomer, StableMovementKey = stableKey };

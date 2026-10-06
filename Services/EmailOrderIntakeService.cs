@@ -1898,7 +1898,9 @@ public sealed class EmailOrderIntakeService
     private static string? BuildAmendmentMatchKey(string customer, string? rawPo, string? destination)
     {
         if (string.IsNullOrWhiteSpace(rawPo)) return null;
-        return $"{NormaliseKey(customer)}|{NormaliseKey(rawPo)}|{NormaliseKey(destination)}";
+        // PO/reference is the stable identity of an order. Destination is mutable
+        // amendment data and must not split one order into multiple movements.
+        return $"{NormaliseKey(customer)}|{NormaliseKey(rawPo)}";
     }
 
     private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? rawPo, string? destination)
