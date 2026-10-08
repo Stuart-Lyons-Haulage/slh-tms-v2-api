@@ -3,7 +3,6 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -39,14 +38,12 @@ public sealed class RunProgressLiveRefreshTests
             ProgressMapping(load.Stops[1].Id, "stop-2", """{"state":"arrived","arrivalTime":"2026-10-08T09:00:00Z","eta":"2026-10-08T09:00:00Z"}"""));
         await db.SaveChangesAsync();
 
-        var controller = new RunProgressController(
-            db,
-            new ConfigurationBuilder().Build())
+        var controller = new RunProgressController(db)
         {
             ControllerContext = new ControllerContext { HttpContext = LyonsContext() }
         };
 
-        var response = Assert.IsType<OkObjectResult>(await controller.Get(null, planningDate, CancellationToken.None));
+        var response = Assert.IsType<OkObjectResult>(await controller.Get(planningDate, CancellationToken.None));
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var record = Assert.Single(document.RootElement.GetProperty("records").EnumerateArray());
 
