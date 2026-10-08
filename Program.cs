@@ -157,6 +157,7 @@ builder.Services.AddScoped<IBetaHgvRouteProvider, AzureMapsHgvRouteProvider>();
 builder.Services.AddScoped<BetaRouteOptimisationEngine>();
 builder.Services.AddScoped<BetaOptimiserService>();
 builder.Services.AddScoped<SiteTimingRuleStore>();
+builder.Services.AddScoped<PlanningStopTimingService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
 builder.Services.AddScoped<IAzureMapsMatrixService, AzureMapsMatrixService>();
 builder.Services.AddScoped<IBackloadMatchingService, BackloadMatchingService>();
