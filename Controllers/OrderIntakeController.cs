@@ -64,6 +64,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
+            // Keep plausible customer order messages visible in Order Review even
+            // when no verified parser profile matched. The immutable Graph evidence
+            // remains the authority, while this low-confidence projection gives the
+            // planner an actionable anomaly instead of silently leaving the message
+            // in the archived evidence store.
+            if (ShouldStageMappingException(request, parsed))
+                return await StageMappingException(request, parsed, ct);
+
             var linked = 0;
             if (parsed.IgnoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase))
             {
@@ -532,12 +540,17 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             string.Join("\n", (request.Attachments ?? []).Select(item => item.Name)))
             .ToUpperInvariant();
 
+        var isVerifiedBarfootsWholesaleWorkbook =
+            (request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) &&
+            (request.Attachments ?? []).Any(item => item.IsInline != true &&
+                (item.Name ?? string.Empty).Contains("Wholesale Booking Spreadsheet", StringComparison.OrdinalIgnoreCase));
+
         // A Barfoots market workbook is explicitly outside the automatic lane even
         // though Barfoots Waitrose/Aldi inputs remain approved.
-        if (source.Contains("MARKET", StringComparison.Ordinal) ||
+        if (!isVerifiedBarfootsWholesaleWorkbook && (source.Contains("MARKET", StringComparison.Ordinal) ||
             source.Contains("COVENT GARDEN", StringComparison.Ordinal) ||
             source.Contains("SPITALFIELDS", StringComparison.Ordinal) ||
-            source.Contains("WHOLESALE MARKET", StringComparison.Ordinal))
+            source.Contains("WHOLESALE MARKET", StringComparison.Ordinal)))
             return false;
 
         return source.Contains("WAITROSE", StringComparison.Ordinal)
