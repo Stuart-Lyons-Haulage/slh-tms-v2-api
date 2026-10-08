@@ -75,13 +75,9 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
     {
         if (!authenticated) return null;
         if (path.Equals("/api/v1/operations/delivery-etas", StringComparison.OrdinalIgnoreCase)
-            || path.Equals("/api/v1/run-progress", StringComparison.OrdinalIgnoreCase)
-            || path.Equals("/api/v1/run-timing", StringComparison.OrdinalIgnoreCase)
-            || path.Equals("/api/v1/tv-display/route-progress", StringComparison.OrdinalIgnoreCase)
-            || path.Equals("/api/v1/tv-display/live-runs", StringComparison.OrdinalIgnoreCase))
-            // These endpoints drive live operational screens. A five-minute cache makes tracking,
-            // dispatch and completion visibly stale even without a planner mutation (tracking is
-            // also updated by background jobs), so keep only a very short coalescing window.
+            || path.Equals("/api/v1/run-progress", StringComparison.OrdinalIgnoreCase))
+            // These endpoints drive live operational screens. A five-minute cache makes dispatch,
+            // job progress and completion visibly stale, so keep only a very short coalescing window.
             return TimeSpan.FromSeconds(10);
 
         if (path.StartsWith("/api/v1/operations-intelligence", StringComparison.OrdinalIgnoreCase)

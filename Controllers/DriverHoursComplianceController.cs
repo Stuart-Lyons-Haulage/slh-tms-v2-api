@@ -102,25 +102,6 @@ public sealed class DriverHoursComplianceController(
             logger.LogWarning(ex, "Tracker evidence unavailable for driver-hours compliance.");
         }
 
-        var baseGeofence = await TryBaseGeofence(ct);
-        List<GeofenceVisit> baseVisits = [];
-        string? geofenceError = null;
-        if (baseGeofence is not null)
-        {
-            try
-            {
-                baseVisits = await db.GeofenceVisits.AsNoTracking()
-                    .Where(x => x.GeofenceId == baseGeofence.Id && x.EnteredAtUtc < trackingEndUtc && (x.ExitedAtUtc == null || x.ExitedAtUtc >= trackingStartUtc))
-                    .OrderBy(x => x.EnteredAtUtc).Take(10000).ToListAsync(ct);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                geofenceError = ex.GetBaseException().Message;
-                db.ChangeTracker.Clear();
-                logger.LogWarning(ex, "Base geofence visits unavailable for night-out confirmation.");
-            }
-        }
-
         var nonEmployedRows = new List<NonEmployedHourRow>();
         var nightRows = new List<NightOutEvidenceRow>();
 
@@ -172,16 +153,10 @@ public sealed class DriverHoursComplianceController(
                 var overnightStart = StartOfDayUtc(day.AddDays(1));
                 var overnightEnd = overnightStart.AddHours(9);
                 var overnightTracking = dayTracking.Where(x => x.EventTimeUtc >= overnightStart && x.EventTimeUtc <= overnightEnd).OrderBy(x => x.EventTimeUtc).ToList();
-                var trackerObservedOvernight = overnightTracking.Count > 0;
-                var baseVisit = baseVisits
-                    .Where(x => vehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && x.EnteredAtUtc < overnightEnd && (x.ExitedAtUtc == null || x.ExitedAtUtc >= overnightStart))
-                    .OrderBy(x => x.EnteredAtUtc)
-                    .FirstOrDefault();
-
-                bool? awayFromBase = baseGeofence is null || geofenceError is not null || !trackerObservedOvernight
-                    ? null
-                    : baseVisit is null;
-                var trackerEvidenceUtc = overnightTracking.LastOrDefault()?.EventTimeUtc ?? baseVisit?.EnteredAtUtc;
+                // Samsara reports progress against dispatched jobs. It does not provide
+                // a TMS-defined depot boundary, so overnight location must remain unknown.
+                bool? awayFromBase = null;
+                var trackerEvidenceUtc = overnightTracking.LastOrDefault()?.EventTimeUtc;
 
                 if (plannerTick || tachoRest || cardOpenAcrossMidnight || awayFromBase == true)
                 {
@@ -197,8 +172,8 @@ public sealed class DriverHoursComplianceController(
                         : "Not yet reconciled";
                     nightRows.Add(new NightOutEvidenceRow(day, driver.Id, driver.DisplayName, employment,
                         dayLoads.Select(x => x.Reference).Distinct().ToArray(), plannerTick, cardOpenAcrossMidnight, tachoRest,
-                        duties.Sum(x => x.RestMinutes), trackerEvidenceUtc, awayFromBase, baseVisit?.EnteredAtUtc,
-                        baseGeofence?.Name, status, sageExpense));
+                        duties.Sum(x => x.RestMinutes), trackerEvidenceUtc, awayFromBase,
+                        status, sageExpense));
                 }
             }
         }
@@ -207,31 +182,15 @@ public sealed class DriverHoursComplianceController(
             weekStart, weekEnd, DateTimeOffset.UtcNow,
             new DriverHoursPolicy("Wednesday", "Tuesday",
                 "The operating week is Wednesday through Tuesday. A PM run remains attached to its commencement day even when delivery continues after midnight.",
-                "A card/open Tacho duty spanning UK midnight is immediate overnight evidence. Overnight rest and tracker/geofence evidence then confirm whether the vehicle remained away from Base. Planner Night out = Yes records intent but is not the sole authority.",
+                "A card/open Tacho duty spanning UK midnight is overnight activity evidence. Samsara job progress does not establish where a vehicle is during its overnight rest. Planner Night out = Yes records intent but is not the sole authority.",
                 "Fleetio pre-use evidence remains valid across midnight while the same driver retains control; a driver/vehicle/trailer handover creates a new check requirement."),
             new DriverHoursSourceStatus(
                 tachoError is null ? "Available" : $"Partial: {tachoError}",
                 trackerError is null ? "Available" : $"Partial: {trackerError}",
-                baseGeofence is null ? "Base geofence not resolved" : geofenceError is null ? $"Base geofence: {baseGeofence.Name}" : $"Partial: {geofenceError}",
+                "Samsara job progress does not confirm overnight depot location.",
                 "Sage HR employee roster is connected; expense-claim API reconciliation is not yet implemented."),
             nightRows.OrderBy(x => x.Date).ThenBy(x => x.DriverName).ToArray(),
             nonEmployedRows.OrderBy(x => x.Date).ThenBy(x => x.DriverName).ToArray());
-    }
-
-    private async Task<SiteGeofence?> TryBaseGeofence(CancellationToken ct)
-    {
-        try
-        {
-            var geofences = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-            return geofences.FirstOrDefault(x => Normalise(x.SiteNumber) is "SLH" or "BASE" or "YARD")
-                ?? geofences.FirstOrDefault(x => Normalise(x.Name).Contains("STUARTLYONS") || Normalise(x.Name).Contains("LYONSHAULAGE") || Normalise(x.Name) == "BASE");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Base geofence lookup unavailable for night-out confirmation.");
-            db.ChangeTracker.Clear();
-            return null;
-        }
     }
 
     internal static DateOnly WednesdayWeekStart(DateOnly date)
@@ -306,7 +265,7 @@ public sealed class DriverHoursComplianceController(
     public sealed record DriverHoursSourceStatus(string TachoMaster, string Tracker, string BaseSite, string SageHrExpenses);
     public sealed record NightOutEvidenceRow(DateOnly Date, Guid DriverId, string DriverName, string EmploymentType, IReadOnlyList<string> Runs,
         bool PlannerTicked, bool CardOpenAcrossMidnight, bool TachoRestEvidence, int TachoRestMinutes, DateTimeOffset? TrackerEvidenceUtc, bool? TrackerAwayFromBase,
-        DateTimeOffset? BaseReturnAtUtc, string? BaseGeofenceName, string Status, string SageExpenseStatus);
+        string Status, string SageExpenseStatus);
     public sealed record NonEmployedHourRow(DateOnly Date, Guid DriverId, string DriverName, string EmployeeNumber, string EmploymentType,
         string? AgencyName, DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoDutyEndUtc, int? TachoDutySpanMinutes,
         int? TachoActivityMinutes, DateTimeOffset? TrackerFirstMovementUtc, int? CardToFirstMovementMinutes, DateTimeOffset? TrackerLastMovementUtc,
