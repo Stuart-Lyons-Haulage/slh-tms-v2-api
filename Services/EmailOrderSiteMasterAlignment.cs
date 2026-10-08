@@ -14,11 +14,12 @@ public static class EmailOrderSiteMasterAlignment
     public static async Task<EmailIntakeParseResult> AlignAsync(
         TmsDbContext db,
         EmailIntakeParseResult parsed,
-        CancellationToken ct)
+        CancellationToken ct,
+        PlannerSourceMasterDataResolver? resolver = null)
     {
         if (parsed.Orders.Count == 0) return parsed;
 
-        var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
+        resolver ??= await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
         var orders = new List<ParsedEmailOrder>(parsed.Orders.Count);
         foreach (var order in parsed.Orders)
         {
@@ -65,15 +66,13 @@ public static class EmailOrderSiteMasterAlignment
             root["collectionSite"] = collection.SiteName;
             root["collectionSiteId"] = collection.SiteId?.ToString();
             root["collectionSiteCode"] = collection.SiteNumber;
-            root["collectionGeofenceId"] = collection.GeofenceId?.ToString();
-            root["collectionGeofenceName"] = collection.GeofenceName;
             evidence.Add($"Collection: {collection.EvidenceNote}");
         }
 
         if (delivery.SiteMatched && !string.IsNullOrWhiteSpace(delivery.SiteName))
         {
             PreserveSource(root, "sourceStallNumber", rawDelivery, delivery.SiteName);
-            // Market jobs have two identities: the physical Market Site for routing/geofence
+            // Market jobs have two identities: the physical Market Site for routing
             // and the Markets Master trader/stall for the driver. Do not overwrite stallNumber
             // with the physical market name or the downstream MarketContact lookup loses the
             // trader/stall before approval.
@@ -84,8 +83,6 @@ public static class EmailOrderSiteMasterAlignment
             root["deliverySite"] = delivery.SiteName;
             root["deliverySiteId"] = delivery.SiteId?.ToString();
             root["deliverySiteCode"] = delivery.SiteNumber;
-            root["deliveryGeofenceId"] = delivery.GeofenceId?.ToString();
-            root["deliveryGeofenceName"] = delivery.GeofenceName;
             if (!string.IsNullOrWhiteSpace(delivery.Address)) root["masterDeliveryAddress"] = delivery.Address;
             evidence.Add($"Destination: {delivery.EvidenceNote}");
         }
