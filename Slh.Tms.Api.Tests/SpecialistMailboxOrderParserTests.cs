@@ -1,6 +1,7 @@
 using System.Text;
 using Slh.Tms.Api.Services;
 using IntakeParser = Slh.Tms.Api.Controllers.SpecialistMailboxOrderParser;
+using UglyToad.PdfPig;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
@@ -111,6 +112,11 @@ public sealed class SpecialistMailboxOrderParserTests
             "Bedford (Euro Pool System Ltd) Barfoots Sefter Farm",
             "Material Description Load carrier Quality Logistic variant Order Qty LPC Qty Total Qty",
             "21000019 216-Green tray LPR PR080 EP Conditioned 300 Folded IN 33 252 8.316");
+        using var pdfStream = new MemoryStream(pdf);
+        using var pdfDocument = PdfDocument.Open(pdfStream);
+        var extractedText = string.Join("\n", pdfDocument.GetPages().Select(page => page.Text));
+        Assert.True(extractedText.Contains("Order", StringComparison.OrdinalIgnoreCase), extractedText);
+        Assert.True(IntakeParser.ParseEuroPoolConfirmationPdf(extractedText) is not null, extractedText);
         var request = new MailboxEmailIntakeRequest(
             "message-europool-pdf", null, "info@lyonshaulage.com", "Kamila.Biohn@barfoots.co.uk", "Kamila Biohn",
             "EUROPOOL Aldi trays collection 10.10, 228788160", DateTimeOffset.Parse("2026-10-08T11:27:19Z"),
