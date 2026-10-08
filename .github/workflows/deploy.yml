@@ -74,3 +74,5 @@ jobs:
           done
           echo "API health check failed" >&2
           exit 1
+
+# Production deployment is triggered from main after validated merges.
