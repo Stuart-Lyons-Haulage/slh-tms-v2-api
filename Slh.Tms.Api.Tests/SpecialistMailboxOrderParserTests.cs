@@ -115,6 +115,7 @@ public sealed class SpecialistMailboxOrderParserTests
         using var pdfStream = new MemoryStream(pdf);
         using var pdfDocument = PdfDocument.Open(pdfStream);
         var extractedText = string.Join("\n", pdfDocument.GetPages().Select(page => page.Text));
+        Console.WriteLine($"EUROPOOL_EXTRACTED={extractedText}");
         Assert.True(extractedText.Contains("Order", StringComparison.OrdinalIgnoreCase), extractedText);
         Assert.True(IntakeParser.ParseEuroPoolConfirmationPdf(extractedText) is not null, extractedText);
         var request = new MailboxEmailIntakeRequest(
