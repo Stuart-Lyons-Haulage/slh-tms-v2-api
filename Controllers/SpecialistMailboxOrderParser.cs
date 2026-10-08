@@ -68,23 +68,23 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     private static readonly Regex EuroPoolSalesOrderRegex = new(
-        @"\bSales\s+order\s+number\s*:\s*(?<order>\d{6,})\b",
+        @"Sales\s+order\s+number\s*:\s*(?<order>\d{6,})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolLoadingDateRegex = new(
-        @"\bLoading\s+date\s*:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})\b",
+        @"(?<![A-Za-z])Loading\s+date\s*:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})(?=\D|$)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolCollectionRegex = new(
-        @"(?im)^\s*(?<site>[A-Za-z][A-Za-z .'-]{1,50}?)\s*\(Euro\s+Pool\s+System\s+Ltd\)",
+        @"(?<site>[A-Za-z][A-Za-z'-]{2,30})\s*\(Euro\s+Pool\s+System\s+Ltd\)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolBarfootsDestinationRegex = new(
-        @"\bBarfoots\s+(?<site>Sefter|Leythorne)(?:\s+Farm)?\b",
+        @"\bBarfoots\s+(?<site>Sefter|Leythorne)(?:\s+Farm)?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolLineItemRegex = new(
-        @"(?m)^\s*(?<material>\d{6,})\s+(?<description>.+?)\s+(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)\s+(?<quality>.+?)\s+(?<variant>.+?)\s+(?<carrierQty>\d{1,6})\s+(?<unitsPerCarrier>\d{1,6})\s+(?<totalQty>\d[\d.,]*)\s*$",
+        @"(?<!\d)(?<material>\d{6,})\s+(?<description>.+?)\s+(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)\s+(?<quality>.+?)\s+(?<variant>.+?)\s+(?<carrierQty>\d{1,6})\s+(?<unitsPerCarrier>\d{1,6})\s+(?<totalQty>\d[\d.,]*)(?![\d.,])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     static SpecialistMailboxOrderParser()
@@ -584,8 +584,8 @@ public sealed class SpecialistMailboxOrderParser
 
     internal static EuroPoolPdfConfirmation? ParseEuroPoolConfirmationPdf(string text)
     {
-        if (!Regex.IsMatch(text, @"\bOrder\s+Confirmation\b", RegexOptions.IgnoreCase) ||
-            !Regex.IsMatch(text, @"Euro\s+Pool\s+System", RegexOptions.IgnoreCase))
+        if (!Regex.IsMatch(text, @"\bOrder\s*Confirmation", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(text, @"Euro\s*Pool\s*System", RegexOptions.IgnoreCase))
             return null;
 
         var orderMatch = EuroPoolSalesOrderRegex.Match(text);
@@ -600,7 +600,11 @@ public sealed class SpecialistMailboxOrderParser
             : null;
         var collectionMatch = EuroPoolCollectionRegex.Match(text);
         var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(text);
-        var lineItems = EuroPoolLineItemRegex.Matches(text).Cast<Match>()
+        var totalQuantityHeaderIndex = text.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
+        var itemText = totalQuantityHeaderIndex < 0
+            ? text
+            : text[(totalQuantityHeaderIndex + "Total Qty".Length)..];
+        var lineItems = EuroPoolLineItemRegex.Matches(itemText).Cast<Match>()
             .Select(match => new EuroPoolPdfLineItem(
                 match.Groups["material"].Value,
                 match.Groups["carrier"].Value.Trim(),
