@@ -278,7 +278,7 @@ public sealed class InfoMailboxGraphPollingService(
                 continue;
 
             var attachments = message.HasAttachments
-                ? await FetchAttachmentsAsync(client, token.Token, message.Id, ct)
+                ? await FetchAttachmentsSafelyAsync(client, token.Token, message.Id, ct)
                 : [];
             attachments.AddRange(await FetchLinkedDocumentAttachmentsAsync(client, token.Token, message, ct));
 
@@ -446,10 +446,8 @@ public sealed class InfoMailboxGraphPollingService(
             $"users/{mailbox}/messages/{encodedMessageId}/attachments" +
             "?$select=id,name,contentType,size,isInline";
 
-        using var metadataRequest = new HttpRequestMessage(HttpMethod.Get, metadataUrl);
-        metadataRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-        using var metadataResponse = await client.SendAsync(metadataRequest, ct);
-        await EnsureGraphSuccessAsync(metadataResponse, metadataRequest.RequestUri, ct);
+        using var metadataResponse = await SendGraphRequestWithRetryAsync(client, accessToken, metadataUrl, ct);
+        await EnsureGraphSuccessAsync(metadataResponse, metadataResponse.RequestMessage?.RequestUri, ct);
 
         using var document = JsonDocument.Parse(await metadataResponse.Content.ReadAsStringAsync(ct));
         var result = new List<MailboxAttachmentRequest>();
@@ -472,29 +470,108 @@ public sealed class InfoMailboxGraphPollingService(
                 continue;
 
             var payloadUrl = $"users/{mailbox}/messages/{encodedMessageId}/attachments/{Uri.EscapeDataString(attachmentId)}";
-            using var payloadRequest = new HttpRequestMessage(HttpMethod.Get, payloadUrl);
-            payloadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            using var payloadResponse = await client.SendAsync(payloadRequest, ct);
-            await EnsureGraphSuccessAsync(payloadResponse, payloadRequest.RequestUri, ct);
+            try
+            {
+                using var payloadResponse = await SendGraphRequestWithRetryAsync(client, accessToken, payloadUrl, ct);
+                await EnsureGraphSuccessAsync(payloadResponse, payloadResponse.RequestMessage?.RequestUri, ct);
 
-            using var payloadDocument = JsonDocument.Parse(await payloadResponse.Content.ReadAsStringAsync(ct));
-            var payload = payloadDocument.RootElement;
-            var contentBytes = Text(payload, "contentBytes");
-            if (string.IsNullOrWhiteSpace(contentBytes))
-                throw new InvalidOperationException($"Graph did not return file content for supported order attachment '{name}'.");
+                using var payloadDocument = JsonDocument.Parse(await payloadResponse.Content.ReadAsStringAsync(ct));
+                var payload = payloadDocument.RootElement;
+                var contentBytes = Text(payload, "contentBytes");
+                if (string.IsNullOrWhiteSpace(contentBytes))
+                    throw new InvalidOperationException($"Graph did not return file content for supported order attachment '{name}'.");
 
-            result.Add(new MailboxAttachmentRequest(
-                name,
-                Text(payload, "contentType") ?? Text(item, "contentType"),
-                null,
-                false,
-                Text(payload, "contentId") ?? Text(item, "contentId"),
-                Long(payload, "size") ?? size,
-                contentBytes));
+                result.Add(new MailboxAttachmentRequest(
+                    name,
+                    Text(payload, "contentType") ?? Text(item, "contentType"),
+                    null,
+                    false,
+                    Text(payload, "contentId") ?? Text(item, "contentId"),
+                    Long(payload, "size") ?? size,
+                    contentBytes));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                var detail = $"Graph attachment retrieval failed: {ex.GetBaseException().Message}";
+                logger.LogWarning(ex, "Could not retrieve Graph attachment {AttachmentName} for message {MessageId}; retaining it for replay.", name, messageId);
+                result.Add(new MailboxAttachmentRequest(name, Text(item, "contentType"), null, false, null, size, null, null, detail));
+            }
         }
 
         return result;
     }
+
+    private async Task<List<MailboxAttachmentRequest>> FetchAttachmentsSafelyAsync(
+        HttpClient client,
+        string accessToken,
+        string messageId,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await FetchAttachmentsAsync(client, accessToken, messageId, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // A single slow attachment must not abort the whole mailbox poll. Retain
+            // the message as evidence so the body and attachment failure remain visible
+            // for replay/manual review, then continue with the next message.
+            var detail = $"Graph attachment retrieval failed: {ex.GetBaseException().Message}";
+            logger.LogWarning(ex, "Could not retrieve attachments for Graph message {MessageId}; retaining evidence and continuing.", messageId);
+            return
+            [
+                new MailboxAttachmentRequest(
+                    "outlook-attachment-unavailable",
+                    null,
+                    null,
+                    false,
+                    null,
+                    null,
+                    null,
+                    null,
+                    detail)
+            ];
+        }
+    }
+
+    private static async Task<HttpResponseMessage> SendGraphRequestWithRetryAsync(
+        HttpClient client,
+        string accessToken,
+        string relativeUrl,
+        CancellationToken ct)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, relativeUrl);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            try
+            {
+                var response = await client.SendAsync(request, ct);
+                if (!IsTransientGraphResponse(response) || attempt == maxAttempts)
+                    return response;
+
+                response.Dispose();
+            }
+            catch (TaskCanceledException) when (!ct.IsCancellationRequested && attempt < maxAttempts)
+            {
+                // HttpClient timeout is distinct from application shutdown cancellation.
+            }
+            catch (HttpRequestException) when (attempt < maxAttempts)
+            {
+                // Retry transient transport failures from the Azure-hosted Graph client.
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct);
+        }
+
+        throw new InvalidOperationException("Graph request retry loop ended unexpectedly.");
+    }
+
+    private static bool IsTransientGraphResponse(HttpResponseMessage response) =>
+        response.StatusCode == HttpStatusCode.RequestTimeout ||
+        response.StatusCode == (HttpStatusCode)429 ||
+        (int)response.StatusCode >= 500;
 
     private async Task<List<MailboxAttachmentRequest>> FetchLinkedDocumentAttachmentsAsync(
         HttpClient client,
