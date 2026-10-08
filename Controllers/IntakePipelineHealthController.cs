@@ -85,6 +85,8 @@ public sealed class IntakePipelineHealthController(
                 graphHealth.LastAttemptUtc,
                 graphHealth.LastSuccessUtc,
                 graphHealth.LastError,
+                graphHealth.LastFailureStage,
+                graphHealth.InProgress,
                 graphHealth.LastMessagesSeen,
                 graphHealth.LastMessagesIngested,
                 stale = graphPollStale
@@ -99,14 +101,12 @@ public sealed class IntakePipelineHealthController(
         if (!graphOptions.Enabled || !graphOptions.IsConfigured)
             return BadRequest(new { message = "Microsoft Graph mailbox polling is not fully configured." });
 
-        await graphPoller.PollOnceAsync(ct);
-        return Ok(new
+        var queuedAtUtc = DateTimeOffset.UtcNow;
+        graphPoller.RequestImmediatePoll();
+        return Accepted(new
         {
-            message = "Graph mailbox poll completed; Order Review is being refreshed from the canonical staging queue.",
-            graphHealth.LastAttemptUtc,
-            graphHealth.LastSuccessUtc,
-            graphHealth.LastMessagesSeen,
-            graphHealth.LastMessagesIngested
+            message = "Graph mailbox poll queued. Order Review will refresh when the run completes.",
+            queuedAtUtc
         });
     }
 }
