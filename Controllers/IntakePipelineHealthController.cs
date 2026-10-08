@@ -102,10 +102,11 @@ public sealed class IntakePipelineHealthController(
             return BadRequest(new { message = "Microsoft Graph mailbox polling is not fully configured." });
 
         var queuedAtUtc = DateTimeOffset.UtcNow;
-        graphPoller.RequestImmediatePoll();
+        var receivedDate = graphPoller.RequestImmediatePoll();
         return Accepted(new
         {
-            message = "Graph mailbox poll queued. Order Review will refresh when the run completes.",
+            message = "Graph mailbox poll queued for one UK mailbox-received day. Order Review will refresh when the run completes.",
+            receivedDate,
             queuedAtUtc
         });
     }
