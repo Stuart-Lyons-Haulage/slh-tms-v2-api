@@ -343,10 +343,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         EmailIntakeParseResult parsed;
         try
         {
-            parsed = nwfQuantityChangeParser.TryParse(request)
-                ?? nwfCsvParser.TryParse(request)
-                ?? nwfWorkbookParser.TryParse(request)
-                ?? nwfParser.TryParse(request)
+            var nwfAttachment = nwfWorkbookParser.TryParse(request) ?? nwfCsvParser.TryParse(request);
+            var nwfBodyUpdate = nwfQuantityChangeParser.TryParse(request) ?? nwfParser.TryParse(request);
+            parsed = MergeNwfAttachmentAndBody(nwfAttachment, nwfBodyUpdate)
                 ?? sainsburyParser.TryParse(request)
                 ?? specialistParser.TryParse(request)
                 ?? (IsVerifiedRetainedBodyFormat(request)
@@ -397,6 +396,106 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         return enriched with { Orders = ordersToStage };
     }
+
+    private static EmailIntakeParseResult? MergeNwfAttachmentAndBody(
+        EmailIntakeParseResult? attachment,
+        EmailIntakeParseResult? bodyUpdate)
+    {
+        if (attachment is null) return bodyUpdate;
+        if (bodyUpdate is null || bodyUpdate.Orders.Count == 0) return attachment;
+        if (attachment.Orders.Count == 0) return bodyUpdate;
+
+        var merged = new List<ParsedEmailOrder>();
+        var unmatched = bodyUpdate.Orders.ToList();
+        var warnings = attachment.Warnings.Concat(bodyUpdate.Warnings).ToList();
+
+        foreach (var attachmentOrder in attachment.Orders)
+        {
+            var candidates = unmatched
+                .Select(update => (Update: update, Score: NwfBodyMatchScore(attachmentOrder.Payload, update.Payload)))
+                .Where(item => item.Score > 0)
+                .OrderByDescending(item => item.Score)
+                .ToList();
+
+            if (candidates.Count == 0)
+            {
+                merged.Add(attachmentOrder);
+                continue;
+            }
+
+            var bestScore = candidates[0].Score;
+            var best = candidates.Where(item => item.Score == bestScore).ToList();
+            if (best.Count != 1)
+            {
+                warnings.Add($"NWF body update could not be matched uniquely to attachment row {attachmentOrder.SourceKey}; retained for Order Review.");
+                merged.Add(attachmentOrder with
+                {
+                    Warnings = attachmentOrder.Warnings.Append("NWF body update was ambiguous; attachment row was not changed.").ToList()
+                });
+                continue;
+            }
+
+            var update = best[0].Update;
+            unmatched.Remove(update);
+            merged.Add(ApplyNwfBodyUpdate(attachmentOrder, update));
+        }
+
+        if (unmatched.Count > 0)
+            warnings.Add($"{unmatched.Count} NWF body update row(s) did not match an attachment row; retained for review.");
+
+        return new EmailIntakeParseResult(merged, warnings, attachment.IgnoredReason);
+    }
+
+    private static int NwfBodyMatchScore(JsonElement attachment, JsonElement update)
+    {
+        if (!DateOnly.TryParse(ReadText(attachment, "collectionDate"), out var attachmentDate) ||
+            !DateOnly.TryParse(ReadText(update, "collectionDate"), out var updateDate) ||
+            attachmentDate != updateDate) return 0;
+
+        var attachmentKeys = ReadMatchKeys(attachment);
+        var updateKeys = ReadMatchKeys(update);
+        var keyScore = attachmentKeys.Intersect(updateKeys, StringComparer.OrdinalIgnoreCase).Count();
+        if (keyScore == 0) return 0;
+
+        var attachmentDepot = FirstText(attachment, "stallNumber", "deliverySite", "deliveryLocation");
+        var updateDepot = FirstText(update, "stallNumber", "deliverySite", "deliveryLocation");
+        if (!string.IsNullOrWhiteSpace(attachmentDepot) && !string.IsNullOrWhiteSpace(updateDepot) &&
+            !string.Equals(NormaliseIntakeValue(attachmentDepot), NormaliseIntakeValue(updateDepot), StringComparison.OrdinalIgnoreCase)) return 0;
+
+        return keyScore * 10 + (string.Equals(NormaliseIntakeValue(attachmentDepot), NormaliseIntakeValue(updateDepot), StringComparison.OrdinalIgnoreCase) ? 5 : 0);
+    }
+
+    private static ParsedEmailOrder ApplyNwfBodyUpdate(ParsedEmailOrder attachment, ParsedEmailOrder update)
+    {
+        var payload = JsonNode.Parse(attachment.Payload.GetRawText())?.AsObject() ?? new JsonObject();
+        var updatePayload = JsonNode.Parse(update.Payload.GetRawText())?.AsObject() ?? new JsonObject();
+        var bodyPallets = TextNode(updatePayload, "pallets");
+        if (int.TryParse(bodyPallets, out var parsedPallets) && parsedPallets > 0)
+            payload["pallets"] = parsedPallets;
+
+        var bodyInstructions = TextNode(updatePayload, "driverInstructions");
+        if (!string.IsNullOrWhiteSpace(bodyInstructions))
+            payload["driverInstructions"] = ClipIntakeText($"{TextNode(payload, "driverInstructions")} · Body update: {bodyInstructions}", 1000);
+
+        payload["bodyUpdateApplied"] = true;
+        payload["bodyUpdateSourceMessageId"] = TextNode(updatePayload, "sourceMessageId");
+        payload["bodyUpdateSourceSubject"] = TextNode(updatePayload, "sourceSubject");
+        payload["bodyUpdateParser"] = TextNode(updatePayload, "intakeParser");
+        payload["bodyUpdatePayload"] = update.Payload.GetRawText();
+
+        var warnings = attachment.Warnings.ToList();
+        warnings.RemoveAll(warning => warning.Contains("Crate-return instruction is present", StringComparison.OrdinalIgnoreCase));
+        warnings.AddRange(update.Warnings);
+        return attachment with
+        {
+            Payload = JsonSerializer.SerializeToElement(payload),
+            Warnings = warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+        };
+    }
+
+    private static string? TextNode(JsonObject payload, string name) => payload[name]?.ToString();
+    private static string NormaliseIntakeValue(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string ClipIntakeText(string? value, int limit) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Length <= limit ? value : value[..limit];
 
     private static bool IsVerifiedRetainedBodyFormat(MailboxEmailIntakeRequest request)
     {

@@ -88,6 +88,7 @@ public sealed class NwfDailyTrackerParser
                 AddMatchKey(matchKeys, date, "PRODUCT", productPo);
                 AddMatchKey(matchKeys, date, "TRANSPORT", transportPo);
                 AddMatchKey(matchKeys, date, "LOADING", loadingPlace);
+                AddMatchKey(matchKeys, date, "DEPOT", destination.Name);
                 var instructionParts = new[]
                 {
                     "Order type: NWF inbound",

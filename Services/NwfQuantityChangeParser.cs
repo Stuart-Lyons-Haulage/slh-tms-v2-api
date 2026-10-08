@@ -74,7 +74,7 @@ public sealed class NwfQuantityChangeParser
         var orders = new List<ParsedEmailOrder>();
         foreach (var split in depotSplits)
         {
-            var matchKeys = BuildMatchKeys(deliveryDate, transportPo, productPo, loadingPlace, customerRef);
+            var matchKeys = BuildMatchKeys(deliveryDate, transportPo, productPo, loadingPlace, customerRef, split.Depot);
             var depotToken = Normalise(split.Depot);
             var loadingToken = Normalise(loadingPlace);
             var referenceRoot = productPo ?? transportPo ?? customerRef ?? $"NWF-{deliveryDate:yyyyMMdd}-{loadingToken}";
@@ -134,13 +134,14 @@ public sealed class NwfQuantityChangeParser
         return new EmailIntakeParseResult(orders, warnings, null);
     }
 
-    private static IReadOnlyList<string> BuildMatchKeys(DateOnly date, string? transportPo, string? productPo, string? loadingPlace, string? customerRef)
+    private static IReadOnlyList<string> BuildMatchKeys(DateOnly date, string? transportPo, string? productPo, string? loadingPlace, string? customerRef, string? depot)
     {
         var keys = new List<string>();
         AddKey(keys, date, "PRODUCT", productPo);
         AddKey(keys, date, "TRANSPORT", transportPo);
         AddKey(keys, date, "LOADING", loadingPlace);
         AddKey(keys, date, "ORDERREF", customerRef);
+        AddKey(keys, date, "DEPOT", depot);
         return keys.Count == 0 ? [$"NWF|QUANTITYCHANGE|{date:yyyy-MM-dd}|UNKNOWN"] : keys;
     }
 
