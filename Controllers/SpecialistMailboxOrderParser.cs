@@ -10,6 +10,20 @@ using UglyToad.PdfPig;
 
 namespace Slh.Tms.Api.Controllers;
 
+internal sealed record EuroPoolPdfLineItem(
+    string MaterialCode,
+    string LoadCarrier,
+    int CarrierQuantity,
+    int UnitsPerCarrier,
+    int TotalQuantity);
+
+internal sealed record EuroPoolPdfConfirmation(
+    string? SalesOrderNumber,
+    DateOnly? LoadingDate,
+    string? CollectionSite,
+    string? Destination,
+    IReadOnlyList<EuroPoolPdfLineItem> LineItems);
+
 /// <summary>
 /// Controller-local intake guard. Because OrderIntakeController resolves unqualified
 /// types in its own namespace first, this wrapper becomes the parser used by the
@@ -53,6 +67,26 @@ public sealed class SpecialistMailboxOrderParser
         @"\bref\s*number\b.*\bcases\s*ordered\b.*\bnumber\s*of\s*base\s*pallets\b.*\bpallet\s*type\b.*\btemp\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
+    private static readonly Regex EuroPoolSalesOrderRegex = new(
+        @"Sales\s+order\s+number\s*:\s*(?<order>\d{6,})(?!\d)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex EuroPoolLoadingDateRegex = new(
+        @"(?<![A-Za-z])Loading\s+date\s*:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})(?=\D|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex EuroPoolCollectionRegex = new(
+        @"(?<site>[A-Za-z][A-Za-z'-]{2,30})\s*\(Euro\s+Pool\s+System\s+Ltd\)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex EuroPoolBarfootsDestinationRegex = new(
+        @"\bBarfoots\s+(?<site>Sefter|Leythorne)(?:\s+Farm)?",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex EuroPoolLineItemRegex = new(
+        @"(?<!\d)(?<material>\d{6,})\s+(?<description>.+?)\s+(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)\s+(?<quality>.+?)\s+(?<variant>.+?)\s+(?<carrierQty>\d{1,6})\s+(?<unitsPerCarrier>\d{1,6})\s+(?<totalQty>\d[\d.,]*)(?![\d.,])",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     static SpecialistMailboxOrderParser()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -60,6 +94,10 @@ public sealed class SpecialistMailboxOrderParser
 
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
+        var euroPoolPdf = TryParseBarfootsEuroPoolConfirmationPdf(request);
+        if (euroPoolPdf is not null)
+            return euroPoolPdf;
+
         var waitrosePdf = TryParseWaitroseBookingPdf(request);
         if (waitrosePdf is not null)
             return waitrosePdf;
@@ -424,6 +462,174 @@ public sealed class SpecialistMailboxOrderParser
         }
 
         return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
+    }
+
+    private static EmailIntakeParseResult? TryParseBarfootsEuroPoolConfirmationPdf(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        if (!sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("EUROPOOL", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var pdfAttachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true &&
+                           !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
+                           string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".pdf", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (pdfAttachments.Count == 0)
+            return null;
+
+        var recognisedConfirmation = false;
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        foreach (var attachment in pdfAttachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var document = PdfDocument.Open(stream);
+                var pdfText = string.Join("\n", document.GetPages().Select(page => page.Text));
+                var parsed = ParseEuroPoolConfirmationPdf(pdfText);
+                if (parsed is null)
+                    continue;
+
+                recognisedConfirmation = true;
+                if (parsed.SalesOrderNumber is null || parsed.LoadingDate is null ||
+                    string.IsNullOrWhiteSpace(parsed.CollectionSite) ||
+                    string.IsNullOrWhiteSpace(parsed.Destination) || parsed.LineItems.Count == 0)
+                {
+                    warnings.Add($"Attachment '{attachment.Name}' is a Barfoots Euro Pool confirmation but its order reference, loading date, route, or item quantities could not be read. Source evidence retained for manual review.");
+                    continue;
+                }
+
+                var rowWarnings = new List<string>
+                {
+                    "The source reports load carriers rather than an explicit pallet count; confirm the pallet count before approval.",
+                    "The confirmation does not state an unloading date; delivery date is provisionally set to the loading date for review."
+                };
+                var totalQuantity = parsed.LineItems.Sum(row => row.TotalQuantity);
+                var carrierQuantity = parsed.LineItems.Sum(row => row.CarrierQuantity);
+                var reference = BuildReference(parsed.SalesOrderNumber, parsed.Destination);
+                var naturalKey = $"BARFOOTS|EUROPOOL|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyy-MM-dd}";
+                var instructions = string.Join(" · ", new[]
+                {
+                    "Order type: Euro Pool tray collection",
+                    $"Order reference: {parsed.SalesOrderNumber}",
+                    $"Load carrier: {string.Join(", ", parsed.LineItems.Select(row => row.LoadCarrier).Distinct(StringComparer.OrdinalIgnoreCase))}",
+                    $"Load carriers: {carrierQuantity}",
+                    $"Euro Pool tray quantity: {totalQuantity:N0}",
+                    $"Source attachment: {attachment.Name}",
+                    "Confirm pallet count and unloading date before approval."
+                });
+                var payload = new Dictionary<string, object?>
+                {
+                    ["poNumber"] = reference,
+                    ["customerPo"] = parsed.SalesOrderNumber,
+                    ["customerCode"] = "BARFOOTS",
+                    ["collectionDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    ["deliveryDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    ["pallets"] = null,
+                    ["unitType"] = "Euro Pool Trays",
+                    ["handlingUnitType"] = "Euro Pool Trays",
+                    ["handlingUnitQuantity"] = totalQuantity,
+                    ["loadCarrierType"] = string.Join(", ", parsed.LineItems.Select(row => row.LoadCarrier).Distinct(StringComparer.OrdinalIgnoreCase)),
+                    ["loadCarrierQuantity"] = carrierQuantity,
+                    ["unitsPerLoadCarrier"] = parsed.LineItems.Count == 1 ? parsed.LineItems[0].UnitsPerCarrier : null,
+                    ["sellerName"] = parsed.CollectionSite,
+                    ["collectionSite"] = parsed.CollectionSite,
+                    ["collectionPoint"] = parsed.CollectionSite,
+                    ["stallNumber"] = parsed.Destination,
+                    ["destination"] = parsed.Destination,
+                    ["marketName"] = "BARFOOTS",
+                    ["jobType"] = "Euro Pool tray collection",
+                    ["orderType"] = "Delivery",
+                    ["driverInstructions"] = instructions,
+                    ["temperatureRequirement"] = null,
+                    ["sourceMessageId"] = request.MessageId,
+                    ["sourceInternetMessageId"] = request.InternetMessageId,
+                    ["sourceSender"] = request.SenderAddress,
+                    ["sourceSenderName"] = request.SenderName,
+                    ["sourceSubject"] = request.Subject,
+                    ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+                    ["sourceWebLink"] = request.WebLink,
+                    ["sourceAttachmentName"] = attachment.Name,
+                    ["intakeNaturalKey"] = naturalKey,
+                    ["amendmentMatchKey"] = $"BARFOOTS|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}",
+                    ["intakeMatchKeys"] = new[] { $"BARFOOTS|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}" },
+                    ["intakeParser"] = "Barfoots Euro Pool confirmation PDF",
+                    ["intakeProfile"] = "BARFOOTS_EUROPOOL_CONFIRMATION_PDF",
+                    ["intakeConfidence"] = "Medium",
+                    ["intakeWarnings"] = rowWarnings,
+                    ["plannerReady"] = false,
+                    ["intakeStatus"] = "Review"
+                };
+                var element = JsonSerializer.SerializeToElement(payload);
+                orders.Add(new ParsedEmailOrder(
+                    $"barfoots-europool-{parsed.SalesOrderNumber}", naturalKey, element, rowWarnings));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Barfoots Euro Pool confirmation parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        if (orders.Count > 0)
+            return new EmailIntakeParseResult(orders, warnings, null);
+
+        return recognisedConfirmation
+            ? new EmailIntakeParseResult([], warnings, "Barfoots Euro Pool confirmation could not be mapped to a complete review row; source evidence retained.")
+            : null;
+    }
+
+    internal static EuroPoolPdfConfirmation? ParseEuroPoolConfirmationPdf(string text)
+    {
+        if (!text.Contains("Order", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var orderMatch = EuroPoolSalesOrderRegex.Match(text);
+        var dateMatch = EuroPoolLoadingDateRegex.Match(text);
+        DateOnly? loadingDate = DateOnly.TryParseExact(
+            dateMatch.Groups["date"].Value,
+            ["d/M/yyyy", "dd/MM/yyyy"],
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out var date)
+            ? date
+            : null;
+        var collectionMatch = EuroPoolCollectionRegex.Match(text);
+        var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(text);
+        var totalQuantityHeaderIndex = text.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
+        var itemText = totalQuantityHeaderIndex < 0
+            ? text
+            : text[(totalQuantityHeaderIndex + "Total Qty".Length)..];
+        var lineItems = EuroPoolLineItemRegex.Matches(itemText).Cast<Match>()
+            .Select(match => new EuroPoolPdfLineItem(
+                match.Groups["material"].Value,
+                match.Groups["carrier"].Value.Trim(),
+                ParseEuroPoolQuantity(match.Groups["carrierQty"].Value),
+                ParseEuroPoolQuantity(match.Groups["unitsPerCarrier"].Value),
+                ParseEuroPoolQuantity(match.Groups["totalQty"].Value)))
+            .Where(row => row.CarrierQuantity > 0 && row.UnitsPerCarrier > 0 && row.TotalQuantity > 0)
+            .ToList();
+
+        return new EuroPoolPdfConfirmation(
+            orderMatch.Success ? orderMatch.Groups["order"].Value : null,
+            loadingDate,
+            collectionMatch.Success ? collectionMatch.Groups["site"].Value.Trim() : null,
+            destinationMatch.Success
+                ? $"Barfoots {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(destinationMatch.Groups["site"].Value.ToLowerInvariant())}"
+                : null,
+            lineItems);
+    }
+
+    private static int ParseEuroPoolQuantity(string value)
+    {
+        var digits = value.Replace(",", string.Empty, StringComparison.Ordinal)
+            .Replace(".", string.Empty, StringComparison.Ordinal);
+        return int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var quantity)
+            ? quantity
+            : 0;
     }
 
     private static EmailIntakeParseResult? TryParseWaitroseBookingPdf(MailboxEmailIntakeRequest request)
