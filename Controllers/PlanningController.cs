@@ -15,6 +15,8 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
     {
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        Response.Headers.Pragma = "no-cache";
         try
         {
             var query = db.TransportOrders.AsNoTracking().Where(order => order.Status != OrderStatus.Cancelled).AsQueryable();

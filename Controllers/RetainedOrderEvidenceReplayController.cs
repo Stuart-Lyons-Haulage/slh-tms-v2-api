@@ -24,6 +24,9 @@ public sealed class RetainedOrderEvidenceReplayController(
         CancellationToken ct)
     {
         var receivedFromUtc = request.ReceivedFromUtc ?? DateTimeOffset.UtcNow.AddDays(-4);
+        var receivedToUtc = request.ReceivedToUtc;
+        if (receivedToUtc is not null && receivedToUtc <= receivedFromUtc)
+            return BadRequest(new { error = "received_to_before_received_from" });
         var minimumPlanningDate = request.MinimumPlanningDate ?? DateOnly.FromDateTime(DateTime.UtcNow.Date);
         var maximumPlanningDate = request.MaximumPlanningDate;
         if (maximumPlanningDate is not null && maximumPlanningDate < minimumPlanningDate)
@@ -37,6 +40,7 @@ public sealed class RetainedOrderEvidenceReplayController(
             .AsNoTracking()
             .Where(item => item.EntityType == "email-evidence" &&
                            item.ReceivedAtUtc >= receivedFromUtc &&
+                           (receivedToUtc == null || item.ReceivedAtUtc < receivedToUtc) &&
                            (request.AfterReceivedAtUtc == null ||
                             item.ReceivedAtUtc > request.AfterReceivedAtUtc ||
                             (item.ReceivedAtUtc == request.AfterReceivedAtUtc &&
@@ -57,6 +61,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         var summary = new ReplaySummary();
         summary.LegacyMappingExceptionsArchived = await ArchiveLegacyMappingExceptions(
             receivedFromUtc,
+            receivedToUtc,
             minimumPlanningDate,
             maximumPlanningDate,
             ct);
@@ -64,7 +69,8 @@ public sealed class RetainedOrderEvidenceReplayController(
             ? await db.StagedImports
                 .Where(item => item.EntityType == "order" &&
                                item.Status == StagingStatus.PendingReview &&
-                               item.ReceivedAtUtc >= receivedFromUtc)
+                               item.ReceivedAtUtc >= receivedFromUtc &&
+                               (receivedToUtc == null || item.ReceivedAtUtc < receivedToUtc))
                 .ToListAsync(ct)
             : [];
         var manuallyAmendedPendingIds = pendingCandidates.Count == 0
@@ -280,6 +286,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         return Ok(new
         {
             receivedFromUtc,
+            receivedToUtc,
             minimumPlanningDate = minimumPlanningDate.ToString("yyyy-MM-dd"),
             maximumPlanningDate = maximumPlanningDate?.ToString("yyyy-MM-dd"),
             maxMessages,
@@ -308,6 +315,7 @@ public sealed class RetainedOrderEvidenceReplayController(
 
     private async Task<int> ArchiveLegacyMappingExceptions(
         DateTimeOffset receivedFromUtc,
+        DateTimeOffset? receivedToUtc,
         DateOnly minimumPlanningDate,
         DateOnly? maximumPlanningDate,
         CancellationToken ct)
@@ -316,6 +324,7 @@ public sealed class RetainedOrderEvidenceReplayController(
             .Where(item => item.EntityType == "order" &&
                            item.Status == StagingStatus.PendingReview &&
                            item.ReceivedAtUtc >= receivedFromUtc &&
+                           (receivedToUtc == null || item.ReceivedAtUtc < receivedToUtc) &&
                            ((item.Source != null && item.Source.StartsWith("Info mailbox mapping exception")) ||
                             item.PayloadJson.Contains("\"intakeStatus\":\"MappingException\"")))
             .ToListAsync(ct);
@@ -541,6 +550,7 @@ public sealed class RetainedOrderEvidenceReplayController(
 
 public sealed record RetainedOrderEvidenceReplayRequest(
     DateTimeOffset? ReceivedFromUtc = null,
+    DateTimeOffset? ReceivedToUtc = null,
     DateOnly? MinimumPlanningDate = null,
     DateOnly? MaximumPlanningDate = null,
     bool? RefreshUnamendedPending = true,

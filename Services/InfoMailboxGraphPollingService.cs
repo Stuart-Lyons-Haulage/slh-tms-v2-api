@@ -260,6 +260,9 @@ public sealed class InfoMailboxGraphPollingService(
             messageIndex++;
             stage = $"attachment download and order intake ({messageIndex} of {seen})";
             ct.ThrowIfCancellationRequested();
+            using var messageTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            messageTimeout.CancelAfter(TimeSpan.FromSeconds(45));
+            var messageCt = messageTimeout.Token;
 
             var evidenceKey = SourceEvidenceKeyBuilder.For(message.Id, message.InternetMessageId);
             var linkedUrls = ExtractSupportedDocumentLinks(message.BodyHtml, message.BodyPreview);
@@ -268,19 +271,19 @@ public sealed class InfoMailboxGraphPollingService(
                 : await db.StagedImports.AsNoTracking()
                     .Where(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey)
                     .Select(item => item.PayloadJson)
-                    .FirstOrDefaultAsync(ct);
+                    .FirstOrDefaultAsync(messageCt);
             if (existingEvidence is not null && linkedUrls.All(url =>
                     existingEvidence.Contains(url, StringComparison.Ordinal) &&
                     !existingEvidence.Contains("retrievalError", StringComparison.Ordinal)))
                 continue;
             if (existingEvidence is null && linkedUrls.Count == 0 && await db.StagedImports.AsNoTracking()
-                .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct))
+                .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, messageCt))
                 continue;
 
             var attachments = message.HasAttachments
-                ? await FetchAttachmentsSafelyAsync(client, token.Token, message.Id, ct)
+                ? await FetchAttachmentsSafelyAsync(client, token.Token, message.Id, messageCt)
                 : [];
-            attachments.AddRange(await FetchLinkedDocumentAttachmentsAsync(client, token.Token, message, ct));
+            attachments.AddRange(await FetchLinkedDocumentAttachmentsAsync(client, token.Token, message, messageCt));
 
             var request = ToIntakeRequest(message, attachments, options.Mailbox);
 
@@ -295,7 +298,15 @@ public sealed class InfoMailboxGraphPollingService(
             httpContext.Request.Host = new HostString("localhost");
             controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
 
-            await controller.Intake(request, ct);
+            try
+            {
+                await controller.Intake(request, messageCt);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && messageCt.IsCancellationRequested)
+            {
+                logger.LogWarning("Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.", message.Id);
+                continue;
+            }
             ingested++;
             }
             logger.LogInformation("Info mailbox Graph poll {PollId} completed chunk through message {MessageIndex} of {Total}.", pollId, messageIndex, seen);
