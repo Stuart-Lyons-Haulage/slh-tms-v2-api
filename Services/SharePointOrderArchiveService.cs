@@ -42,10 +42,31 @@ public sealed class SharePointOrderArchiveService(
     ILogger<SharePointOrderArchiveService> logger)
 {
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
+    private static readonly TimeSpan ApprovalArchiveBudget = TimeSpan.FromSeconds(8);
 
     public async Task ArchiveApprovedOrderAsync(StagedImport order, JsonElement orderPayload, string? actor, CancellationToken ct)
     {
         if (!options.IsConfigured || !string.Equals(order.EntityType, "order", StringComparison.OrdinalIgnoreCase)) return;
+
+        using var archiveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        archiveCts.CancelAfter(ApprovalArchiveBudget);
+        try
+        {
+            await ArchiveApprovedOrderCoreAsync(order, orderPayload, actor, archiveCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            db.StagedImportEvents.Add(ArchiveEvent(order, "SharePointArchiveTimedOut", actor, new
+            {
+                timeoutSeconds = (int)ApprovalArchiveBudget.TotalSeconds,
+                message = "Approval was completed without waiting for the optional SharePoint archive."
+            }));
+            logger.LogWarning("SharePoint archive timed out for approved order {OrderId}; approval will continue without blocking.", order.Id);
+        }
+    }
+
+    private async Task ArchiveApprovedOrderCoreAsync(StagedImport order, JsonElement orderPayload, string? actor, CancellationToken ct)
+    {
 
         var evidence = await FindEvidenceAsync(orderPayload, ct);
         if (evidence is null) return;
