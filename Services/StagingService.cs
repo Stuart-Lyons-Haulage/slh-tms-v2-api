@@ -6,7 +6,7 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
-public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingRuleStore = null)
+public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingRuleStore = null, SharePointOrderArchiveService? sharePointOrderArchive = null)
 {
     private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "emailroute", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order", "communication" };
     public StagedImport Create(StageImportRequest r)
@@ -100,6 +100,11 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             try
             {
                 await Promote(item, ct);
+                if (item.EntityType == "order" && sharePointOrderArchive is not null)
+                {
+                    using var orderPayload = JsonDocument.Parse(item.PayloadJson);
+                    await sharePointOrderArchive.ArchiveApprovedOrderAsync(item, orderPayload.RootElement, actor, ct);
+                }
                 using var document = JsonDocument.Parse(item.PayloadJson);
                 var detailKey = DetailKey(item.EntityType, document.RootElement);
                 if (!string.IsNullOrWhiteSpace(detailKey))
@@ -424,7 +429,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             // the date, destination or source-row number. The stable movement link
             // is authoritative once the first approved revision exists.
             existing = await db.TransportOrders
-                .Where(order => order.SourceMovementId == movement.Id || order.Reference == reference)
+                .Where(order => order.SourceMovementId == movement.Id)
                 .OrderByDescending(order => order.CreatedAtUtc)
                 .FirstOrDefaultAsync(ct);
         }
@@ -474,9 +479,10 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         var normalCustomer = ClipRequired(customerCode.Trim().ToUpperInvariant(), 40);
         var suppliedMovementKey = Text(payload, "amendmentMatchKey");
         var normalReference = new string(reference.Trim().ToUpperInvariant().Where(char.IsLetterOrDigit).ToArray());
+        var serviceDate = DateOnlyOrNull(payload, "collectionDate") ?? DateOnlyOrNull(payload, "deliveryDate");
         var stableKey = ClipRequired(
             string.IsNullOrWhiteSpace(suppliedMovementKey)
-                ? $"{normalCustomer}:{normalReference}"
+                ? $"{normalCustomer}:{normalReference}:{serviceDate?.ToString("yyyyMMdd") ?? "UNKNOWN-DATE"}"
                 : $"{normalCustomer}:{suppliedMovementKey.Trim().ToUpperInvariant()}",
             240);
         var movement = await db.OrderMovements.SingleOrDefaultAsync(x => x.CustomerCode == normalCustomer && x.StableMovementKey == stableKey, ct);

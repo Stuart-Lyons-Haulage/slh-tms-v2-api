@@ -24,7 +24,7 @@ public sealed class OrderMovementLifecycleTests
         await service.ReviewAndPromote(second.Id, true, "Load detail checked", Planner(), CancellationToken.None);
 
         var movement = Assert.Single(await db.OrderMovements.ToListAsync());
-        Assert.Equal("COOP:PO1001", movement.StableMovementKey);
+        Assert.Equal("COOP:PO1001:20260824", movement.StableMovementKey);
         Assert.Equal(OrderMovementStatus.PlannerReady, movement.LifecycleStatus);
 
         var revisions = await db.OrderRevisions.OrderBy(x => x.RevisionNumber).ToListAsync();
@@ -44,12 +44,12 @@ public sealed class OrderMovementLifecycleTests
     }
 
     [Fact]
-    public async Task Later_approved_revision_updates_existing_live_order_dates()
+    public async Task Same_service_date_revision_updates_existing_live_order_without_merging_a_repeat_day()
     {
         await using var db = CreateDb();
         var service = new StagingService(db);
         var first = StageSingle("amend-first", "PO-AMEND-1", "2026-08-25", "2026-08-25", 4);
-        var second = StageSingle("amend-second", "PO-AMEND-1", "2026-08-26", "2026-08-27", 9);
+        var second = StageSingle("amend-second", "PO-AMEND-1", "2026-08-25", "2026-08-27", 9);
         db.StagedImports.AddRange(first, second);
         await db.SaveChangesAsync();
 
@@ -58,10 +58,29 @@ public sealed class OrderMovementLifecycleTests
 
         var order = Assert.Single(await db.TransportOrders.ToListAsync());
         Assert.Equal("PO-AMEND-1", order.Reference);
-        Assert.Equal(new DateOnly(2026, 8, 26), order.CollectionDate);
+        Assert.Equal(new DateOnly(2026, 8, 25), order.CollectionDate);
         Assert.Equal(new DateOnly(2026, 8, 27), order.DeliveryDate);
         Assert.Equal(9, order.Pallets);
         Assert.Equal(second.Id, order.SourceStagedImportId);
+    }
+
+    [Fact]
+    public async Task Repeat_reference_on_another_service_date_creates_a_new_operational_order()
+    {
+        await using var db = CreateDb();
+        var service = new StagingService(db);
+        var first = StageSingle("repeat-one", "PORD000676", "2026-10-08", "2026-10-08", 8);
+        var second = StageSingle("repeat-two", "PORD000676", "2026-10-09", "2026-10-09", 10);
+        db.StagedImports.AddRange(first, second);
+        await db.SaveChangesAsync();
+
+        await service.ReviewAndPromote(first.Id, true, "First daily order", Planner(), CancellationToken.None);
+        await service.ReviewAndPromote(second.Id, true, "Next daily order", Planner(), CancellationToken.None);
+
+        Assert.Equal(2, await db.OrderMovements.CountAsync());
+        Assert.Equal(2, await db.TransportOrders.CountAsync());
+        Assert.Contains(await db.OrderMovements.ToListAsync(), movement => movement.StableMovementKey == "AMAZON:PORD000676:20261008");
+        Assert.Contains(await db.OrderMovements.ToListAsync(), movement => movement.StableMovementKey == "AMAZON:PORD000676:20261009");
     }
 
     private static StagedImport Stage(string key, int lineCount, string messageId, string attachment, string state)

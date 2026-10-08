@@ -109,6 +109,15 @@ builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta
 builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
 builder.Services.Configure<NightlyArchiveOptions>(builder.Configuration.GetSection("Archive"));
 
+var sharePointOrderArchiveOptions = new SharePointOrderArchiveOptions();
+builder.Configuration.GetSection("Integrations:SharePointOrderArchive").Bind(sharePointOrderArchiveOptions);
+builder.Services.AddSingleton(sharePointOrderArchiveOptions);
+builder.Services.AddHttpClient("SharePointOrderArchive", client =>
+{
+    client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
+    client.Timeout = TimeSpan.FromSeconds(90);
+});
+
 var infoMailboxGraphOptions = new InfoMailboxGraphOptions();
 builder.Configuration.GetSection("Integrations:InfoMailboxGraph").Bind(infoMailboxGraphOptions);
 builder.Services.AddSingleton(infoMailboxGraphOptions);
@@ -140,6 +149,7 @@ builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
 builder.Services.AddScoped<StagingService>();
+builder.Services.AddScoped<SharePointOrderArchiveService>();
 builder.Services.AddScoped<MasterDataService>();
 builder.Services.AddScoped<SiteAddressPropagationService>();
 builder.Services.AddScoped<MasterAssignmentComplianceService>();
