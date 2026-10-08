@@ -1148,8 +1148,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var siteMatch = Regex.Match(text, @"\b(?:collected|collect(?:ion)?)\s+from\s+(?<site>[A-Za-z][A-Za-z0-9 &'()/-]{1,80})", RegexOptions.IgnoreCase);
         var site = siteMatch.Success ? siteMatch.Groups["site"].Value.Trim().TrimEnd('.', ',', ';', ':') : null;
         if (customer is null || string.IsNullOrWhiteSpace(site)) return 0;
+        var operationalDate = ExtractDate(request)?.ToString("yyyy-MM-dd");
 
-        var receivedDate = DateOnly.FromDateTime((request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).Date).ToString("yyyy-MM-dd");
         var candidates = await db.StagedImports
             .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
             .ToListAsync(ct);
@@ -1163,7 +1163,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 var payload = document.RootElement;
                 if (!string.Equals(ReadText(payload, "customerCode"), customer, StringComparison.OrdinalIgnoreCase) ||
                     !string.Equals(ReadText(payload, "sellerName"), site, StringComparison.OrdinalIgnoreCase) ||
-                    !string.Equals(ReadText(payload, "collectionDate"), receivedDate, StringComparison.Ordinal))
+                    (operationalDate is not null && !string.Equals(ReadText(payload, "collectionDate"), operationalDate, StringComparison.Ordinal)))
                     continue;
                 if (await db.StagedImportEvents.AnyAsync(item => item.StagedImportId == candidate.Id && item.Actor == actor, ct))
                     continue;

@@ -1236,8 +1236,8 @@ public sealed class EmailOrderIntakeService
                     ["sourceSheet"] = reader.Name,
                     ["sourceRow"] = rowIndex + 1,
                     ["intakeNaturalKey"] = naturalKey,
-                    ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination),
-                    ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination),
+                    ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination, rowDate),
+                    ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination, rowDate),
                     ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
                     ["intakeWarnings"] = warnings
                 };
@@ -1549,8 +1549,8 @@ public sealed class EmailOrderIntakeService
             ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
             ["sourceWebLink"] = request.WebLink,
             ["intakeNaturalKey"] = naturalKey,
-            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination),
-            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination),
+            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination, sourceDate),
+            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination, sourceDate),
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : warnings.Count <= 2 ? "Medium" : "Low",
             ["intakeWarnings"] = warnings
         };
@@ -1886,8 +1886,8 @@ public sealed class EmailOrderIntakeService
             ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
             ["sourceWebLink"] = request.WebLink,
             ["intakeNaturalKey"] = naturalKey,
-            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination),
-            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination),
+            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, rawPo, destination, collectionDate),
+            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, rawPo, destination, collectionDate),
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
             ["intakeWarnings"] = warnings
         };
@@ -1895,17 +1895,17 @@ public sealed class EmailOrderIntakeService
         return new ParsedEmailOrder(sourceKey, naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
 
-    private static string? BuildAmendmentMatchKey(string customer, string? rawPo, string? destination)
+    private static string? BuildAmendmentMatchKey(string customer, string? rawPo, string? destination, DateOnly? serviceDate = null)
     {
         if (string.IsNullOrWhiteSpace(rawPo)) return null;
-        // PO/reference is the stable identity of an order. Destination is mutable
-        // amendment data and must not split one order into multiple movements.
-        return $"{NormaliseKey(customer)}|{NormaliseKey(rawPo)}";
+        // Daily repeat customers can reuse a PO/reference. The service date is part
+        // of the movement identity; destination remains mutable amendment data.
+        return $"{NormaliseKey(customer)}|{NormaliseKey(rawPo)}|{serviceDate?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? "UNKNOWN-DATE"}";
     }
 
-    private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? rawPo, string? destination)
+    private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? rawPo, string? destination, DateOnly? serviceDate = null)
     {
-        var key = BuildAmendmentMatchKey(customer, rawPo, destination);
+        var key = BuildAmendmentMatchKey(customer, rawPo, destination, serviceDate);
         return string.IsNullOrWhiteSpace(key) ? [] : [key];
     }
 

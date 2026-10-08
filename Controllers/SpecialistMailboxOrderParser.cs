@@ -1428,8 +1428,8 @@ public sealed class SpecialistMailboxOrderParser
             ["sourceSheet"] = sheetName,
             ["sourceRow"] = sourceRow,
             ["intakeNaturalKey"] = NaturalKey(request, customer, collection, destination, deliveryDate, pallets),
-            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, customerPo, destination),
-            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, customerPo, destination),
+            ["amendmentMatchKey"] = BuildAmendmentMatchKey(customer, customerPo, destination, collectionDate),
+            ["intakeMatchKeys"] = BuildAmendmentMatchKeys(customer, customerPo, destination, collectionDate),
             ["intakeParser"] = parser,
             ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
             ["intakeWarnings"] = warnings,
@@ -1439,15 +1439,15 @@ public sealed class SpecialistMailboxOrderParser
         return JsonSerializer.SerializeToElement(payload);
     }
 
-    private static string? BuildAmendmentMatchKey(string customer, string? customerPo, string? destination)
+    private static string? BuildAmendmentMatchKey(string customer, string? customerPo, string? destination, DateOnly? serviceDate = null)
     {
         if (string.IsNullOrWhiteSpace(customerPo)) return null;
-        return $"{NormaliseKey(customer)}|{NormaliseKey(customerPo)}|{NormaliseKey(destination)}";
+        return $"{NormaliseKey(customer)}|{NormaliseKey(customerPo)}|{serviceDate?.ToString("yyyyMMdd", CultureInfo.InvariantCulture) ?? "UNKNOWN-DATE"}";
     }
 
-    private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? customerPo, string? destination)
+    private static IReadOnlyList<string> BuildAmendmentMatchKeys(string customer, string? customerPo, string? destination, DateOnly? serviceDate = null)
     {
-        var key = BuildAmendmentMatchKey(customer, customerPo, destination);
+        var key = BuildAmendmentMatchKey(customer, customerPo, destination, serviceDate);
         return string.IsNullOrWhiteSpace(key) ? [] : [key];
     }
 
