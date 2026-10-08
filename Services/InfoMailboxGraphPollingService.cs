@@ -540,7 +540,7 @@ public sealed class InfoMailboxGraphPollingService(
         string relativeUrl,
         CancellationToken ct)
     {
-        const int maxAttempts = 3;
+        const int maxAttempts = 2;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, relativeUrl);

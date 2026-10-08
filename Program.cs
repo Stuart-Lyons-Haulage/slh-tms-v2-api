@@ -125,7 +125,10 @@ builder.Services.AddSingleton<InfoMailboxGraphHealthState>();
 builder.Services.AddHttpClient("InfoMailboxGraph", client =>
 {
     client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
-    client.Timeout = TimeSpan.FromSeconds(60);
+    // Keep one slow Graph attachment from holding the single mailbox poll open
+    // for minutes in the hosted environment. Individual requests are retried by
+    // the poller and failed attachments are retained for replay/manual review.
+    client.Timeout = TimeSpan.FromSeconds(20);
 });
 
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
