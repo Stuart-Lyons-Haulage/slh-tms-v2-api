@@ -150,7 +150,12 @@ public sealed class InfoMailboxGraphPollingService(
                         ? queuedManualReceivedDates.Dequeue()
                         : null;
                 }
-                await PollOnceAsync(stoppingToken, manualReceivedDate);
+                // A hosted poll must never hold the single poll gate forever. Graph,
+                // SQL or a parser can occasionally fail to honour a lower-level
+                // timeout, so bound the complete pass and let the next cycle retry.
+                using var pollTimeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                pollTimeout.CancelAfter(TimeSpan.FromMinutes(5));
+                await PollOnceAsync(pollTimeout.Token, manualReceivedDate);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
