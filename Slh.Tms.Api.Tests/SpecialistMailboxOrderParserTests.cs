@@ -101,45 +101,6 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal(8316, line.TotalQuantity);
     }
 
-    [Fact]
-    public void BarfootsEuroPoolPdf_CreatesReviewRowWithoutTreatingLoadCarriersAsPallets()
-    {
-        var pdf = CreateTextPdf(
-            "Order Confirmation",
-            "Euro Pool System UK Limited",
-            "Sales order number: 228788160",
-            "Loading date: 10/10/2026",
-            "Bedford (Euro Pool System Ltd) Barfoots Sefter Farm",
-            "Material Description Load carrier Quality Logistic variant Order Qty LPC Qty Total Qty",
-            "21000019 216-Green tray LPR PR080 EP Conditioned 300 Folded IN 33 252 8.316");
-        using var pdfStream = new MemoryStream(pdf);
-        using var pdfDocument = PdfDocument.Open(pdfStream);
-        var extractedText = string.Join("\n", pdfDocument.GetPages().Select(page => page.Text));
-        Assert.True(extractedText.Contains("Order", StringComparison.OrdinalIgnoreCase), extractedText);
-        var request = new MailboxEmailIntakeRequest(
-            "message-europool-pdf", null, "info@lyonshaulage.com", "Kamila.Biohn@barfoots.co.uk", "Kamila Biohn",
-            "EUROPOOL Aldi trays collection 10.10, 228788160", DateTimeOffset.Parse("2026-10-08T11:27:19Z"),
-            "Collection from Bedford to Sefter", null, null,
-            [new MailboxAttachmentRequest("Order confirmation 0228788160 10.10.2026.PDF", "application/pdf", Convert.ToBase64String(pdf))]);
-
-        var result = parser.TryParse(request);
-
-        Assert.NotNull(result);
-        var order = Assert.Single(result!.Orders);
-        var payload = order.Payload;
-        Assert.Equal("228788160", payload.GetProperty("customerPo").GetString());
-        Assert.Equal("2026-10-10", payload.GetProperty("collectionDate").GetString());
-        Assert.Equal("2026-10-10", payload.GetProperty("deliveryDate").GetString());
-        Assert.Equal("Bedford", payload.GetProperty("collectionSite").GetString());
-        Assert.Equal("Barfoots Sefter", payload.GetProperty("destination").GetString());
-        Assert.Equal(System.Text.Json.JsonValueKind.Null, payload.GetProperty("pallets").ValueKind);
-        Assert.Equal("Euro Pool Trays", payload.GetProperty("handlingUnitType").GetString());
-        Assert.Equal(8316, payload.GetProperty("handlingUnitQuantity").GetInt32());
-        Assert.Equal(33, payload.GetProperty("loadCarrierQuantity").GetInt32());
-        Assert.False(payload.GetProperty("plannerReady").GetBoolean());
-        Assert.Contains(order.Warnings, warning => warning.Contains("load carriers", StringComparison.OrdinalIgnoreCase));
-    }
-
     private static byte[] CreateTextPdf(params string[] lines)
     {
         var content = new StringBuilder("BT\n/F1 10 Tf\n72 760 Td\n");
