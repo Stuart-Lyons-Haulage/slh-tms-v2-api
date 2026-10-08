@@ -46,7 +46,7 @@ public sealed class VerifiedWorkbookIntakeParserTests
         Assert.NotNull(result);
         var north = Assert.Single(result!.Orders.Where(order =>
             order.Payload.GetProperty("sellerName").GetString() == "Sefter North"));
-        Assert.Equal("", north.Payload.GetProperty("temperatureRequirement").GetString());
+        Assert.Null(north.Payload.GetProperty("temperatureRequirement").GetString());
         Assert.Equal("Thursday 24.09.2026.xlsx", north.Payload.GetProperty("sourceAttachmentName").GetString());
         Assert.Contains(north.Warnings, warning =>
             warning.Contains("temperature requirement", StringComparison.OrdinalIgnoreCase));
