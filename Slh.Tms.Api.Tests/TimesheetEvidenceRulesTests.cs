@@ -35,53 +35,44 @@ public sealed class TimesheetEvidenceRulesTests
     }
 
     [Fact]
-    public void Night_out_regular_rest_requires_eleven_hours_away_from_depot()
+    public void Eleven_hour_rest_is_not_confirmed_from_location_without_boundary_evidence()
     {
         var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");
-        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), end.AddMinutes(-5), 53.8m, -1.2m, new[] { new DepotPoint(52.0m, -1.0m) }, true);
-        Assert.Equal("Confirmed Night Out - Regular Rest", result.Status);
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), true);
+        Assert.Equal("Possible Night Out", result.Status);
     }
 
     [Fact]
     public void Night_out_reduced_rest_is_between_nine_and_eleven_hours()
     {
         var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");
-        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(10), end, 53.8m, -1.2m, Array.Empty<DepotPoint>(), true);
-        Assert.Equal("Confirmed Night Out - Reduced Rest", result.Status);
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(10), true);
+        Assert.Equal("Possible Night Out", result.Status);
     }
 
     [Fact]
-    public void Returning_to_home_depot_is_not_a_night_out()
+    public void Vehicle_location_is_not_inferred_from_a_depot_radius()
     {
         var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");
-        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), end, 52m, -1m, new[] { new DepotPoint(52m, -1m) }, true);
-        Assert.Equal("No Night Out", result.Status);
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), true);
+        Assert.Equal("Possible Night Out", result.Status);
     }
 
     [Fact]
-    public void Lorry_park_geofence_near_duty_end_confirms_night_out_when_vehicle_matches()
+    public void Location_boundaries_do_not_auto_confirm_night_out()
     {
         var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");
-        var result = TimesheetEvidenceRules.AssessNightOut(
-            end,
-            end.AddHours(11),
-            end.AddMinutes(-5),
-            53.8m,
-            -1.2m,
-            Array.Empty<DepotPoint>(),
-            true,
-            new[] { new LorryParkEvidence("FN69AHY", end.AddMinutes(-20), end.AddMinutes(10), "Example Lorry Park") },
-            new[] { "FN69AHY" });
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), true);
 
-        Assert.Equal("Confirmed Night Out - Regular Rest", result.Status);
-        Assert.Contains("lorry-park geofence", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Possible Night Out", result.Status);
+        Assert.Contains("does not infer overnight location", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
     public void Incomplete_evidence_is_possible_night_out_not_auto_payable()
     {
         var end = DateTimeOffset.Parse("2026-09-24T04:00:00Z");
-        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), null, null, null, Array.Empty<DepotPoint>(), true);
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(11), true);
         Assert.Equal("Possible Night Out", result.Status);
     }
 
@@ -89,7 +80,7 @@ public sealed class TimesheetEvidenceRulesTests
     public void Friday_to_monday_full_rest_is_not_a_night_out()
     {
         var end = DateTimeOffset.Parse("2026-09-25T18:00:00Z");
-        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(59), end, 53.8m, -1.2m, Array.Empty<DepotPoint>(), true);
+        var result = TimesheetEvidenceRules.AssessNightOut(end, end.AddHours(59), true);
         Assert.Equal("No Night Out", result.Status);
         Assert.Contains("full/weekly rest", result.Reason, StringComparison.OrdinalIgnoreCase);
     }

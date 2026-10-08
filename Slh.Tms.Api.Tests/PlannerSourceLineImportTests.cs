@@ -143,8 +143,7 @@ public sealed class PlannerSourceLineImportTests : IClassFixture<CustomWebFactor
         Assert.Empty(summary.UnresolvedTrailers);
         Assert.DoesNotContain(summary.Warnings, warning =>
             warning.Contains("NWF-Selsey", StringComparison.OrdinalIgnoreCase) &&
-            (warning.Contains("did not resolve uniquely", StringComparison.OrdinalIgnoreCase) ||
-             warning.Contains("no active linked geofence", StringComparison.OrdinalIgnoreCase)));
+            warning.Contains("did not resolve uniquely", StringComparison.OrdinalIgnoreCase));
 
         using var finalScope = _factory.Services.CreateScope();
         var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();

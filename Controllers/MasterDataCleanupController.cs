@@ -51,7 +51,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 references = usage
             });
 
-        var removed = await Remove(entity, id, false, ct);
+        var removed = await Remove(entity, id, ct);
         if (removed is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
 
         var auditRecorded = await TryAudit(Title(Singular(entity)), id, "Deleted", removed.Value.Snapshot, null, ct);
@@ -87,18 +87,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         {
             directUsage = ids.ToDictionary(id => id, _ => new List<object>());
 
-            if (entity == "sites")
-            {
-                var geofenceCounts = await db.SiteGeofences.AsNoTracking()
-                    .Where(x => x.SiteId.HasValue && ids.Contains(x.SiteId.Value))
-                    .GroupBy(x => x.SiteId!.Value)
-                    .Select(group => new { Id = group.Key, Count = group.Count() })
-                    .ToListAsync(ct);
-
-                foreach (var row in geofenceCounts)
-                    directUsage[row.Id].Add(new { area = "Geofences", count = row.Count });
-            }
-            else
+            if (entity == "drivers")
             {
                 var runCounts = await db.Loads.AsNoTracking()
                     .Where(x => x.DriverId.HasValue && ids.Contains(x.DriverId.Value))
@@ -183,7 +172,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 continue;
             }
 
-            var removed = await Remove(entity, id, forceSiteHistoryOverride, ct);
+            var removed = await Remove(entity, id, ct);
             if (removed is null)
             {
                 notFound.Add(id);
@@ -193,7 +182,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
             var auditRecorded = await TryAudit(
                 Title(Singular(entity)),
                 id,
-                removed.Value.GeofencesDetached > 0 ? "BulkForceDeletedGeofenceLinksDetached" : "BulkDeleted",
+                "BulkDeleted",
                 removed.Value.Snapshot,
                 null,
                 ct);
@@ -202,7 +191,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 id,
                 label = Label(item),
                 integrationMappingsRemoved = removed.Value.MappingsRemoved,
-                geofenceLinksDetached = removed.Value.GeofencesDetached,
                 auditRecorded
             });
         }
@@ -217,7 +205,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
             deletedRows = deleted,
             blockedRows = blocked,
             notFoundRows = notFound,
-            message = $"{deleted.Count} {Singular(entity)} record{(deleted.Count == 1 ? "" : "s")} permanently deleted. {blocked.Count} blocked by live/history references.{(entity == "sites" && request.ForceHistoryOverride ? " Linked geofences were detached; geofence visits and history were retained." : string.Empty)}"
+            message = $"{deleted.Count} {Singular(entity)} record{(deleted.Count == 1 ? "" : "s")} permanently deleted. {blocked.Count} blocked by live/history references."
         });
     }
 
@@ -231,7 +219,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
 
         var before = Snapshot(item);
         SetActiveValue(item, active);
-        if (item is SiteGeofence geofence) geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
         await db.SaveChangesAsync(ct);
         var auditRecorded = await TryAudit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item), ct);
@@ -245,7 +232,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         "trailers" => await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct),
         "sites" => await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct),
         "customers" => await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct),
-        "geofences" => await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct),
         _ => null
     };
 
@@ -256,7 +242,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         "trailers" => await db.Trailers.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
         "sites" => await db.Sites.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
         "customers" => await db.Customers.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
-        "geofences" => await db.SiteGeofences.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
         _ => null
     };
 
@@ -269,7 +254,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         {
             case "vehicles":
                 Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.VehicleId == id, ct));
-                Add("Geofence history", await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.VehicleId == id, ct));
                 break;
             case "drivers":
                 Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.DriverId == id, ct));
@@ -279,10 +263,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.TrailerId == id, ct));
                 break;
             case "sites":
-                Add("Geofences", await db.SiteGeofences.AsNoTracking().CountAsync(x => x.SiteId == id, ct));
-                break;
-            case "geofences":
-                Add("Geofence visit history", await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.GeofenceId == id, ct));
                 break;
             case "customers":
             {
@@ -304,7 +284,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         return result;
     }
 
-    private async Task<(int MappingsRemoved, int GeofencesDetached, string Snapshot)?> Remove(string entity, Guid id, bool detachSiteGeofences, CancellationToken ct)
+    private async Task<(int MappingsRemoved, string Snapshot)?> Remove(string entity, Guid id, CancellationToken ct)
     {
         var item = await Find(entity, id, ct);
         if (item is null) return null;
@@ -313,20 +293,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         var mappings = await db.IntegrationMappings.Where(x => x.TmsEntityId == id).ToListAsync(ct);
         if (mappings.Count > 0) db.IntegrationMappings.RemoveRange(mappings);
 
-        var geofencesDetached = 0;
-        if (detachSiteGeofences && item is Site)
-        {
-            var linkedGeofences = await db.SiteGeofences.Where(x => x.SiteId == id).ToListAsync(ct);
-            foreach (var geofence in linkedGeofences)
-            {
-                // Keep the geofence and its visit history, but remove the deleted site's master link.
-                geofence.SiteId = null;
-                geofence.SiteNumber = null;
-                geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            }
-            geofencesDetached = linkedGeofences.Count;
-        }
-
         switch (item)
         {
             case Driver value: db.Drivers.Remove(value); break;
@@ -334,12 +300,11 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
             case Trailer value: db.Trailers.Remove(value); break;
             case Site value: db.Sites.Remove(value); break;
             case Customer value: db.Customers.Remove(value); break;
-            case SiteGeofence value: db.SiteGeofences.Remove(value); break;
             default: return null;
         }
 
         await db.SaveChangesAsync(ct);
-        return (mappings.Count, geofencesDetached, snapshot);
+        return (mappings.Count, snapshot);
     }
 
     private async Task<bool> TryAudit(string entityType, Guid entityId, string action, string before, string? after, CancellationToken ct)
@@ -380,7 +345,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
     private static bool GetActive(object item) => item switch
     {
         Driver x => x.Active, Vehicle x => x.Active, Trailer x => x.Active,
-        Site x => x.Active, Customer x => x.Active, SiteGeofence x => x.Active, _ => false
+        Site x => x.Active, Customer x => x.Active, _ => false
     };
 
     private static void SetActiveValue(object item, bool active)
@@ -392,7 +357,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
             case Trailer x: x.Active = active; break;
             case Site x: x.Active = active; break;
             case Customer x: x.Active = active; break;
-            case SiteGeofence x: x.Active = active; break;
         }
     }
 
@@ -410,7 +374,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         Vehicle x => x.Registration,
         Trailer x => x.TrailerNumber,
         Customer x => $"{x.Name} ({x.Code})",
-        SiteGeofence x => x.Name,
         _ => item.GetType().Name
     };
 
@@ -418,7 +381,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
     {
         "driver" or "drivers" => "drivers", "vehicle" or "vehicles" => "vehicles",
         "trailer" or "trailers" => "trailers", "site" or "sites" => "sites",
-        "customer" or "customers" => "customers", "geofence" or "geofences" => "geofences", _ => string.Empty
+        "customer" or "customers" => "customers", _ => string.Empty
     };
     private static string Singular(string entity) => entity.EndsWith('s') ? entity[..^1] : entity;
     private static string Title(string value) => value.Length == 0 ? value : char.ToUpperInvariant(value[0]) + value[1..];

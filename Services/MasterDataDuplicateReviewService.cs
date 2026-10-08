@@ -179,14 +179,6 @@ public static class MasterDataDuplicateReviewService
             // fields remain sufficient for a safe duplicate scan.
             db.ChangeTracker.Clear();
         }
-        var geofenceHashesBySite = (await db.SiteGeofences.AsNoTracking()
-                .Where(fence => fence.Active && fence.SiteId.HasValue)
-                .Select(fence => new { SiteId = fence.SiteId!.Value, fence.PolygonJson })
-                .ToListAsync(ct))
-            .GroupBy(fence => fence.SiteId)
-            .ToDictionary(
-                group => group.Key,
-                group => group.Select(fence => PolygonHash(fence.PolygonJson)).ToHashSet(StringComparer.OrdinalIgnoreCase));
         var groups = new Dictionary<string, HashSet<Site>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var row in rows)
@@ -213,15 +205,10 @@ public static class MasterDataDuplicateReviewService
                 if (string.IsNullOrWhiteSpace(postcode) && address.Length == 0 && token.Length >= 8) Add(groups, $"site-token-only:{token}", row);
             }
 
-            // A repeated DOT boundary is strong evidence that two Site records refer
-            // to the same physical location, but it is not enough to auto-merge: one
-            // boundary can legitimately be shared by different customers or purposes.
-            if (geofenceHashesBySite.TryGetValue(row.Id, out var hashes))
-                foreach (var hash in hashes) Add(groups, $"site-geofence:{hash}", row);
         }
 
         return DistinctGroups(groups.Values, row => row.Id)
-            .Select(group => BuildSiteCandidate(group, geofenceHashesBySite))
+            .Select(BuildSiteCandidate)
             .OrderByDescending(candidate => candidate.Confidence)
             .ThenBy(candidate => candidate.Canonical.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -380,49 +367,6 @@ public static class MasterDataDuplicateReviewService
             await MasterDetailStore.SaveAsync(db, "site", duplicate.ExternalCode, JsonSerializer.Serialize(duplicate), "Duplicate merge archived source site", actor, ct);
         }
 
-        var canonicalActiveGeofences = await db.SiteGeofences
-            .Where(row => row.Active && row.SiteId == canonical.Id)
-            .ToListAsync(ct);
-        var geofences = await db.SiteGeofences
-            .Where(row => row.SiteId.HasValue && duplicateIds.Contains(row.SiteId.Value))
-            .ToListAsync(ct);
-
-        // SQLite test storage cannot translate DateTimeOffset ordering. The result
-        // sets are site-bounded, so ordering after materialisation is safe and keeps
-        // SQL Server and the test provider behaviour identical.
-        canonicalActiveGeofences = canonicalActiveGeofences
-            .OrderByDescending(row => row.UpdatedAtUtc)
-            .ToList();
-        geofences = geofences
-            .OrderByDescending(row => row.UpdatedAtUtc)
-            .ToList();
-
-        var activeDuplicateGeofences = geofences.Where(row => row.Active).ToList();
-        var retainedGeofence = canonicalActiveGeofences.FirstOrDefault();
-        var geofencesReassigned = 0;
-        var geofencesUnlinkedForReview = 0;
-
-        if (retainedGeofence is null)
-        {
-            retainedGeofence = activeDuplicateGeofences.FirstOrDefault();
-            if (retainedGeofence is not null)
-            {
-                retainedGeofence.SiteId = canonical.Id;
-                retainedGeofence.SiteNumber = canonical.ExternalCode;
-                retainedGeofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                geofencesReassigned++;
-            }
-        }
-
-        foreach (var geofence in activeDuplicateGeofences.Where(row => retainedGeofence is null || row.Id != retainedGeofence.Id))
-        {
-            geofence.SiteId = null;
-            geofence.SiteNumber = null;
-            geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            geofencesUnlinkedForReview++;
-            messages.Add($"Geofence '{geofence.Name}' was left unlinked for review because canonical Site {canonical.ExternalCode} already has an active geofence.");
-        }
-
         var runStops = await db.RunStops.Where(row => duplicateIds.Contains(row.SiteId)).ToListAsync(ct);
         foreach (var runStop in runStops) runStop.SiteId = canonical.Id;
 
@@ -436,11 +380,11 @@ public static class MasterDataDuplicateReviewService
             EntityId = canonical.Id,
             Action = "DuplicateMerge",
             ChangedBy = actor,
-            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(row => row.ExternalCode), request.Note, geofencesReassigned, geofencesUnlinkedForReview, runStopsReassigned = runStops.Count, mappingsReassigned = mappingCount, messages })
+            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(row => row.ExternalCode), request.Note, runStopsReassigned = runStops.Count, mappingsReassigned = mappingCount, messages })
         });
         await db.SaveChangesAsync(ct);
 
-        messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {geofencesReassigned} geofence(s), left {geofencesUnlinkedForReview} additional geofence(s) unlinked for review, reassigned {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
+        messages.Insert(0, $"Merged {duplicates.Count} site duplicate(s) into {canonical.Name}; reassigned {runStops.Count} run stop(s) and {mappingCount} integration mapping(s).");
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, messages);
     }
 
@@ -729,9 +673,7 @@ public static class MasterDataDuplicateReviewService
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, [$"Merged {duplicates.Count} market duplicate(s) into {canonical.Market} / {canonical.Name}."]);
     }
 
-    private static MasterDataDuplicateCandidate BuildSiteCandidate(
-        IReadOnlyList<Site> group,
-        IReadOnlyDictionary<Guid, HashSet<string>> geofenceHashesBySite)
+    private static MasterDataDuplicateCandidate BuildSiteCandidate(IReadOnlyList<Site> group)
     {
         var canonical = group.OrderByDescending(SiteCompleteness).ThenBy(row => row.ExternalCode, StringComparer.OrdinalIgnoreCase).First();
         var duplicates = group.Where(row => row.Id != canonical.Id).ToList();
@@ -740,14 +682,12 @@ public static class MasterDataDuplicateReviewService
         var canonicalTokens = SiteIdentityTokens(canonical).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sameIdentity = duplicates.All(row => SiteIdentityTokens(row).Any(canonicalTokens.Contains));
         var samePostcode = !string.IsNullOrWhiteSpace(postcode) && duplicates.All(row => ExtractPostcode(row.CollectionAddress) == postcode);
-        var sameGeofence = geofenceHashesBySite.TryGetValue(canonical.Id, out var canonicalGeofences) &&
-                           duplicates.Any(row => geofenceHashesBySite.TryGetValue(row.Id, out var duplicateGeofences) && canonicalGeofences.Overlaps(duplicateGeofences));
         var customerCodes = group.Select(row => Clean(row.CustomerCode))
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => Normalise(value))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var conflictingCustomers = customerCodes.Count > 1;
-        var confidence = sameExternalCode && sameIdentity ? 99 : sameIdentity && samePostcode ? 98 : sameExternalCode ? 94 : sameIdentity ? 88 : samePostcode ? 82 : sameGeofence ? 84 : 70;
+        var confidence = sameExternalCode && sameIdentity ? 99 : sameIdentity && samePostcode ? 98 : sameExternalCode ? 94 : sameIdentity ? 88 : samePostcode ? 82 : 70;
         var canAutoMerge = confidence >= 95 && !conflictingCustomers;
         var reason = conflictingCustomers
             ? "Same site candidate has conflicting Customer assignments — review ownership before merging."
@@ -757,9 +697,7 @@ public static class MasterDataDuplicateReviewService
                     ? "Same site name/alias and postcode."
                     : sameIdentity
                         ? "Same site name/alias; review address before merging."
-                        : sameGeofence
-                            ? "Same geofence boundary; review site name and Customer before merging."
-                            : "Likely duplicate site name/address. Review before merging.";
+                        : "Likely duplicate site name/address. Review before merging.";
 
         return new MasterDataDuplicateCandidate(
             CandidateId($"site:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
@@ -769,11 +707,8 @@ public static class MasterDataDuplicateReviewService
             canAutoMerge,
             SiteRecord(canonical),
             duplicates.Select(SiteRecord).ToList(),
-            ["collectionAddress", "mapLink", "latitude", "longitude", "collectionInstructions", "driverTextName", "aliases", "geofences", "integrationMappings", "runStops"]);
+            ["collectionAddress", "mapLink", "latitude", "longitude", "collectionInstructions", "driverTextName", "aliases", "integrationMappings", "runStops"]);
     }
-
-    private static string PolygonHash(string? polygonJson) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(polygonJson ?? string.Empty)));
 
     private static MasterDataDuplicateCandidate BuildDriverCandidate(IReadOnlyList<Driver> group)
     {

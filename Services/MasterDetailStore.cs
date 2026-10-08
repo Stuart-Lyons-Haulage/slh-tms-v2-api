@@ -234,38 +234,12 @@ public static class MasterDetailStore
                     site.CustomField3 = Text(payload, "customField3");
                     site.Latitude = Decimal(payload, "latitude");
                     site.Longitude = Decimal(payload, "longitude");
-                    site.GeofenceRadiusMetres = Int(payload, "geofenceRadiusMetres")
-                        ?? Int(payload, "geofenceRadiusMeters")
-                        ?? Int(payload, "radiusMeters");
                     site.OperationalRegion = Text(payload, "operationalRegion") ?? Text(payload, "region") ?? site.OperationalRegion;
                 }
             }
             catch (JsonException) { }
         }
 
-        // A promoted site payload may not contain a point, while its approved
-        // SiteGeofence is still authoritative for route dispatch. Use that
-        // polygon's centroid rather than guessing from a town or postcode.
-        var unresolvedSiteIds = sites
-            .Where(site => site.Latitude is null || site.Longitude is null)
-            .Select(site => site.Id)
-            .ToList();
-        if (unresolvedSiteIds.Count > 0)
-        {
-            var linkedFences = await db.SiteGeofences.AsNoTracking()
-                .Where(fence => fence.Active && fence.SiteId.HasValue && unresolvedSiteIds.Contains(fence.SiteId.Value))
-                .ToListAsync(ct);
-            linkedFences = linkedFences
-                .OrderByDescending(fence => fence.UpdatedAtUtc)
-                .ToList();
-            foreach (var site in sites.Where(site => unresolvedSiteIds.Contains(site.Id)))
-            {
-                var fence = linkedFences.FirstOrDefault(item => item.SiteId == site.Id);
-                if (fence is null || !TryPolygonCentroid(fence.PolygonJson, out var latitude, out var longitude)) continue;
-                site.Latitude = latitude;
-                site.Longitude = longitude;
-            }
-        }
     }
 
     public static async Task EnrichTrailersAsync(TmsDbContext db, IReadOnlyCollection<Trailer> trailers, CancellationToken ct)
@@ -428,49 +402,6 @@ public static class MasterDetailStore
     private static int? Int(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
     private static decimal? Decimal(JsonElement payload, string name) => decimal.TryParse(Text(payload, name), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : null;
 
-    private static bool TryPolygonCentroid(string polygonJson, out decimal latitude, out decimal longitude)
-    {
-        latitude = 0;
-        longitude = 0;
-        try
-        {
-            using var document = JsonDocument.Parse(polygonJson);
-            var points = document.RootElement.EnumerateArray()
-                .Where(point => point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2)
-                .Select(point => (Longitude: point[0].GetDecimal(), Latitude: point[1].GetDecimal()))
-                .ToList();
-            if (points.Count == 0) return false;
-
-            decimal signedAreaTwice = 0;
-            decimal centroidLongitude = 0;
-            decimal centroidLatitude = 0;
-            for (var index = 0; index < points.Count; index++)
-            {
-                var current = points[index];
-                var next = points[(index + 1) % points.Count];
-                var cross = current.Longitude * next.Latitude - next.Longitude * current.Latitude;
-                signedAreaTwice += cross;
-                centroidLongitude += (current.Longitude + next.Longitude) * cross;
-                centroidLatitude += (current.Latitude + next.Latitude) * cross;
-            }
-
-            if (Math.Abs(signedAreaTwice) > 0.0000000001m)
-            {
-                longitude = centroidLongitude / (3m * signedAreaTwice);
-                latitude = centroidLatitude / (3m * signedAreaTwice);
-            }
-            else
-            {
-                longitude = points.Average(point => point.Longitude);
-                latitude = points.Average(point => point.Latitude);
-            }
-
-            return latitude is >= -90 and <= 90 && longitude is >= -180 and <= 180;
-        }
-        catch (JsonException) { return false; }
-        catch (FormatException) { return false; }
-        catch (InvalidOperationException) { return false; }
-    }
 }
 
 public sealed record TrailerAliasMergeResult(int Renamed, int Merged, int LoadsReassigned, int MappingsReassigned, int AuditEntriesReassigned);

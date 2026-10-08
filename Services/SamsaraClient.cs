@@ -8,6 +8,7 @@ namespace Slh.Tms.Api.Services;
 
 public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options, ILogger<SamsaraClient> logger)
 {
+    public const int DefaultLocationRadiusMeters = 300;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public bool IsConfigured => options.IsConfigured;
@@ -16,7 +17,6 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     public string StopExternalIdKey => options.StopExternalIdKey;
     public string SiteExternalIdKey => options.SiteExternalIdKey;
     public bool AddressSyncEnabled => options.EnableAddressSync;
-    public int StopRadiusMeters => Math.Clamp(options.StopRadiusMeters, 50, 5000);
 
     public async Task<SamsaraConnectionSummary> GetConnectionSummaryAsync(CancellationToken ct)
     {
@@ -338,7 +338,6 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                     address = stop.Address,
                     latitude = stop.Latitude,
                     longitude = stop.Longitude,
-                    radiusMeters = stop.RadiusMeters
                 };
             }
 
@@ -394,7 +393,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             {
                 circle = new
                 {
-                    radiusMeters = Math.Clamp(address.RadiusMeters, 50, 5000)
+                    radiusMeters = DefaultLocationRadiusMeters
                 }
             }
         };
@@ -617,8 +616,7 @@ public sealed record SamsaraAddressRequest(
     string Name,
     string FormattedAddress,
     double? Latitude,
-    double? Longitude,
-    int RadiusMeters);
+    double? Longitude);
 
 public sealed record SamsaraAddressSnapshot(
     string? Id,
@@ -643,7 +641,6 @@ public sealed record SamsaraRouteStopRequest(
     string Address,
     double Latitude,
     double Longitude,
-    int RadiusMeters,
     DateTimeOffset? ScheduledArrivalTime,
     DateTimeOffset? ScheduledDepartureTime,
     string? Notes);

@@ -13,6 +13,61 @@ namespace Slh.Tms.Api.Tests;
 public sealed class SamsaraRouteProgressServiceTests
 {
     [Fact]
+    public async Task Samsara_departures_record_stop_events_and_complete_the_run()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase($"samsara-complete-{Guid.NewGuid():N}")
+            .Options;
+        await using var db = new TmsDbContext(options);
+        var load = new Load
+        {
+            Reference = "AM-SAM-1",
+            PlanningDate = new DateOnly(2026, 10, 8),
+            Status = LoadStatus.Dispatched,
+            Stops =
+            [
+                new LoadStop { Sequence = 1, Name = "Collection", Address = "Site 1" },
+                new LoadStop { Sequence = 2, Name = "Delivery", Address = "Site 2" }
+            ]
+        };
+        db.Loads.Add(load);
+        db.IntegrationMappings.AddRange(
+            RouteMapping("route-complete", "Load", load.Id),
+            RouteMapping("stop-a", "LoadStop", load.Stops[0].Id),
+            RouteMapping("stop-b", "LoadStop", load.Stops[1].Id));
+        await db.SaveChangesAsync();
+
+        var handler = new StubHandler(_ => Task.FromResult(JsonResponse("""
+        {
+          "data": [{
+            "time": "2026-10-08T12:00:00Z",
+            "operation": "route updated",
+            "route": { "id": "route-complete" },
+            "changes": { "after": { "stops": [
+              { "id": "stop-a", "state": "departed", "arrivalTime": "2026-10-08T09:00:00Z", "departureTime": "2026-10-08T09:30:00Z" },
+              { "id": "stop-b", "state": "departed", "arrivalTime": "2026-10-08T11:00:00Z", "departureTime": "2026-10-08T11:30:00Z" }
+            ] } }
+          }],
+          "pagination": { "endCursor": "complete-cursor", "hasNextPage": false }
+        }
+        """)));
+        var samsara = new SamsaraClient(new HttpClient(handler), new SamsaraOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api.samsara.com",
+            ApiToken = "test-token"
+        }, NullLogger<SamsaraClient>.Instance);
+
+        var result = await new SamsaraRouteProgressService(db, samsara, NullLogger<SamsaraRouteProgressService>.Instance)
+            .PollAsync(CancellationToken.None);
+
+        Assert.Equal(2, result.StopsUpdated);
+        Assert.Equal(LoadStatus.Completed, (await db.Loads.SingleAsync()).Status);
+        Assert.Equal(2, await db.DriverStatusLogs.CountAsync(log => log.Status == "SamsaraStopDeparted"));
+        Assert.True(await db.DriverStatusLogs.AnyAsync(log => log.LoadId == load.Id && log.Status == "RunCompleted"));
+    }
+
+    [Fact]
     public async Task Poll_persists_only_latest_stop_progress_and_cursor()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()
@@ -125,6 +180,16 @@ public sealed class SamsaraRouteProgressServiceTests
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
+
+    private static IntegrationMapping RouteMapping(string externalKey, string entityType, Guid entityId) => new()
+    {
+        Provider = "Samsara",
+        ExternalKey = externalKey,
+        TmsEntityType = entityType,
+        TmsEntityId = entityId,
+        Active = true,
+        MappingKind = "ProviderIdentity"
+    };
 
     private sealed class StubHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> responder) : HttpMessageHandler
     {

@@ -10,33 +10,23 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class DriverPlanningController(TmsDbContext db, IConfiguration configuration) : ControllerBase
+public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
 {
-    [HttpGet("driver-assignments"), AllowAnonymous]
+    [HttpGet("driver-assignments")]
     public async Task<IActionResult> Assignments(
-        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
         [FromQuery] DateOnly? from,
         [FromQuery] DateOnly? to,
         CancellationToken ct)
     {
-        var signedInAllowed = User.Identity?.IsAuthenticated == true;
-        // Older Hisense/Vewd browsers can drop custom headers. The paired key is
-        // read-only and is validated against the same SQL-backed display key.
-        if (string.IsNullOrWhiteSpace(displayKey) && Request.Query.TryGetValue("key", out var queryKey))
-            displayKey = queryKey.FirstOrDefault();
-        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
-        if (!signedInAllowed && !pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
-
         var firstDate = from ?? DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-7);
         var lastDate = to ?? firstDate;
         if (lastDate < firstDate || lastDate.DayNumber - firstDate.DayNumber > 92)
             return BadRequest("Choose a valid date range of no more than 93 days.");
 
-        // Read assignments through the same resilient production source used by the
-        // planned-runs wallboard feed. The operational enrichment is essential here:
+        // Read assignments through the same resilient production source used by planning.
+        // The operational enrichment is essential here:
         // Dispatch can persist the newest allocation in the operational register while a
         // stale dbo.Loads / planning-register copy still has blank DriverId / VehicleId.
-        // Without this enrichment the route is visible but both wallboards show TBC.
         var loads = (await PlanningResilience.ReadLoadsAsync(db, null, ct))
             .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
             .OrderBy(load => load.PlanningDate)

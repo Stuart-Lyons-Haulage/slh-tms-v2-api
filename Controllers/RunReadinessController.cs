@@ -41,8 +41,8 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
         var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.TryGetValue(id, out var vehicle) && IsVor(vehicle));
         var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.TryGetValue(id, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName));
-        var geofenceGaps = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
-        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingForDay == 0;
+        var stopsMissingCoordinates = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
+        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && stopsMissingCoordinates == 0 && pendingForDay == 0;
 
         PlanLockInfo? planLock = null;
         try { planLock = await PlanLockStore.GetAsync(db, day, ct); } catch { db.ChangeTracker.Clear(); }
@@ -62,7 +62,7 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
             missingAllocations,
             vorConflicts,
             tachoConcerns,
-            geofenceGaps,
+            stopsMissingCoordinates,
             unreviewedOrders = pendingForDay,
             planLock
         });

@@ -110,7 +110,7 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db, ILogger
                 var beforeAddress = stop.Address;
 
                 // User-facing planning/dispatch data is deliberately address/postcode + notes.
-                // GPS coordinates remain internal to tracker/geofence evidence and are not copied
+                // Site Master physical address and coordinates remain the dispatch destination data and are not copied
                 // from Site Master into planner stops.
                 if (!string.IsNullOrWhiteSpace(site.CollectionAddress))
                     stop.Address = MergeAddress(site.CollectionAddress, stop.Address);

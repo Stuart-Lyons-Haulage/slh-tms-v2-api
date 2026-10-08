@@ -13,8 +13,6 @@ internal static class ControlPageFallback
         "/api/v1/intelligence/readiness",
         "/api/v1/intelligence/plan-stability",
         "/api/v1/intelligence/freshness",
-        "/api/v1/management/resilient-summary",
-        "/api/v1/management/eta-precision"
     };
 
     public static bool IsProtectedGet(HttpRequest request) =>

@@ -53,7 +53,6 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<TmsUser> TmsUsers => Set<TmsUser>();
     public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
-    public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
     public DbSet<MasterDepot> MasterDepots => Set<MasterDepot>();
     public DbSet<MasterCustomer> MasterCustomers => Set<MasterCustomer>();
     public DbSet<MasterDriver> MasterDrivers => Set<MasterDriver>();
@@ -316,8 +315,6 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.RunId, x.RunStopId });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.GeofenceId, x.EnteredAtUtc });
         b.Entity<GeofenceVisit>().HasIndex(x => x.EnteredAtUtc);
-        b.Entity<EtaSnapshot>().HasIndex(x => new { x.StopId, x.CapturedAtUtc });
-        b.Entity<EtaSnapshot>().HasIndex(x => x.LoadId);
 
         b.Entity<VehicleTrackingEvent>()
             .HasIndex(x => new { x.ProviderName, x.ProviderEventId })

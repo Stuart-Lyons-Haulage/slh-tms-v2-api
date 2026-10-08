@@ -23,6 +23,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private readonly NwfWorkbookSnapshotParser nwfWorkbookParser = new();
     private readonly NwfPalletOrderCsvParser nwfCsvParser = new();
     private readonly NwfQuantityChangeParser nwfQuantityChangeParser = new();
+    private PlannerSourceMasterDataResolver? replayMasterDataResolver;
     private const int SourceBodyPreviewLimit = 12000;
     private const int SourceBodyTextLimit = 200000;
     private const int SourceBodyHtmlLimit = 400000;
@@ -251,7 +252,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     }
 
     internal Task<EmailIntakeParseResult> ParseForReplay(MailboxEmailIntakeRequest request, CancellationToken ct) =>
-        ParseEmail(request, ct);
+        ParseEmail(request, ct, reuseMasterDataForReplay: true);
 
     internal async Task<IActionResult> StageParsedForReplay(
         MailboxEmailIntakeRequest request,
@@ -344,7 +345,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return key.Length <= 200 ? key : key[..200];
     }
 
-    private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
+    private async Task<EmailIntakeParseResult> ParseEmail(
+        MailboxEmailIntakeRequest request,
+        CancellationToken ct,
+        bool reuseMasterDataForReplay = false)
     {
         // Keep operational status messages out of the order-creation lane while still
         // allowing Intake() to link them to the existing staged order as evidence.
@@ -418,7 +422,13 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (parsed.Orders.Count == 0)
             return parsed;
 
-        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct);
+        PlannerSourceMasterDataResolver? replayResolver = null;
+        if (reuseMasterDataForReplay)
+        {
+            replayMasterDataResolver ??= await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
+            replayResolver = replayMasterDataResolver;
+        }
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct, replayResolver);
         var enriched = await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
 
         // A later tray/crate instruction can be matched uniquely back to the retained

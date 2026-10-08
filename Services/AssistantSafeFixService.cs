@@ -18,7 +18,6 @@ public sealed class AssistantSafeFixService(
 
         await SafeStep("Vehicles", () => NormaliseVehicleRegistrations(changes, skipped, ct), changes, skipped);
         await SafeStep("Sites", () => RepairSites(changes, skipped, ct), changes, skipped);
-        await SafeStep("Geofence site links", () => RepairGeofenceSiteLinks(changes, skipped, ct), changes, skipped);
         await SafeStep("Markets", () => RepairMarkets(changes, skipped, ct), changes, skipped);
         await SafeStep("Customer contacts", () => NormaliseCustomerEmails(changes, ct), changes, skipped);
 
@@ -88,7 +87,6 @@ public sealed class AssistantSafeFixService(
 
     private async Task RepairSites(List<string> changes, List<string> skipped, CancellationToken ct)
     {
-        await GeofenceRuntimeRepair.EnsureAsync(db, ct);
         var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
         foreach (var site in sites.Where(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink)))
@@ -132,8 +130,6 @@ public sealed class AssistantSafeFixService(
             canonical.Aliases = MergeAliases(canonical, duplicates);
             foreach (var duplicate in duplicates)
             {
-                var geofences = await db.SiteGeofences.Where(x => x.SiteId == duplicate.Id).ToListAsync(ct);
-                foreach (var geofence in geofences) geofence.SiteId = canonical.Id;
                 var mappings = await db.IntegrationMappings.Where(x => x.TmsEntityType == "Site" && x.TmsEntityId == duplicate.Id).ToListAsync(ct);
                 foreach (var mapping in mappings) { mapping.TmsEntityId = canonical.Id; mapping.UpdatedAtUtc = DateTimeOffset.UtcNow; mapping.UpdatedBy = "SLH Assistant"; }
                 duplicate.Active = false;
@@ -141,20 +137,10 @@ public sealed class AssistantSafeFixService(
             }
             await MasterDetailStore.SaveAsync(db, "site", canonical.ExternalCode, JsonSerializer.Serialize(canonical), "SLH Assistant duplicate consolidation", null, ct);
             db.MasterDataAudits.Add(new MasterDataAudit { EntityType = "Site", EntityId = canonical.Id, Action = "AssistantDuplicateMerge", ChangedBy = "SLH Assistant", ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.ExternalCode, merged = duplicates.Select(x => x.ExternalCode).ToList() }) });
-            changes.Add($"Consolidated {duplicates.Count} safe duplicate site record{(duplicates.Count == 1 ? "" : "s")} into {canonical.Name} ({canonical.ExternalCode}); linked geofences and integration mappings were retained.");
+            changes.Add($"Consolidated {duplicates.Count} safe duplicate site record{(duplicates.Count == 1 ? "" : "s")} into {canonical.Name} ({canonical.ExternalCode}); site integration mappings were retained.");
         }
         var remainingLikely = FindLikelySiteDuplicateGroups(sites.Where(x => x.Active).ToList()).Where(group => !safeGroups.Any(safe => safe.Select(x => x.Id).OrderBy(x => x).SequenceEqual(group.Select(x => x.Id).OrderBy(x => x)))).Take(20);
         foreach (var group in remainingLikely) skipped.Add($"Possible site duplicate left for review: {string.Join(" / ", group.Select(x => $"{x.Name} ({x.ExternalCode})"))}.");
-    }
-
-    private async Task RepairGeofenceSiteLinks(List<string> changes, List<string> skipped, CancellationToken ct)
-    {
-        var result = await SiteGeofenceMasterSync.SyncAsync(db, ct);
-        if (result.SitesCoded > 0) changes.Add($"Canonicalised {result.SitesCoded} Site Master code{(result.SitesCoded == 1 ? "" : "s")} to the SITE### geofence format.");
-        if (result.GeofencesLinked > 0) changes.Add($"Synced {result.GeofencesLinked} geofence-to-site link{(result.GeofencesLinked == 1 ? "" : "s")}.");
-        if (result.GeofencesCanonicalized > 0) changes.Add($"Updated {result.GeofencesCanonicalized} geofence site code{(result.GeofencesCanonicalized == 1 ? "" : "s")} to the canonical Site Master code.");
-        if (result.GeofencesUnlinked > 0) skipped.Add($"{result.GeofencesUnlinked} stale geofence link{(result.GeofencesUnlinked == 1 ? " was" : "s were")} cleared for manual review.");
-        if (result.SitesMissingGeofence > 0) skipped.Add($"{result.SitesMissingGeofence} active site{(result.SitesMissingGeofence == 1 ? " is" : "s are")} still missing a confirmed geofence link.");
     }
 
     private async Task RepairMarkets(List<string> changes, List<string> skipped, CancellationToken ct)

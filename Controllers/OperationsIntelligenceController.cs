@@ -44,28 +44,11 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         {
             if (load.DriverId is null) items.Add(Item(load, "High", "UnallocatedDriver", "Run has no driver", "Allocate a driver before dispatch."));
             if (load.VehicleId is null) items.Add(Item(load, "High", "UnallocatedVehicle", "Run has no vehicle", "Allocate a vehicle before dispatch."));
-            if (load.Stops.Any(x => x.Latitude is null || x.Longitude is null)) items.Add(Item(load, "Medium", "MissingGeocode", "Run contains an unmapped stop", "Map all operational stops so routing and geofence matching are reliable."));
+            if (load.Stops.Any(x => x.Latitude is null || x.Longitude is null)) items.Add(Item(load, "Medium", "MissingSiteCoordinates", "Run contains a stop without dispatch coordinates", "Add the physical site address and coordinates in Site Master."));
             if (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && IsVor(vehicle))
                 items.Add(Item(load, "High", "VorVehicle", $"VOR vehicle allocated: {vehicle.Registration}", vehicle.FleetioStatus ?? "Vehicle is marked out of service."));
             if (load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName))
                 items.Add(Item(load, "Medium", "TachoMapping", $"Driver missing Tacho mapping: {driver.DisplayName}", "Tacho-aware planning cannot be fully validated."));
-        }
-        try
-        {
-            var loadIds = loads.Select(x => x.Id).ToList();
-            if (loadIds.Count > 0)
-            {
-                var visits = await db.GeofenceVisits.AsNoTracking().Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value) && (x.Status == "SiteDelay" || x.Status == "PassThrough")).OrderByDescending(x => x.UpdatedAtUtc).Take(100).ToListAsync(ct);
-                foreach (var visit in visits)
-                {
-                    var load = loads.First(x => x.Id == visit.LoadId);
-                    items.Add(Item(load, visit.Status == "SiteDelay" ? "High" : "Medium", visit.Status, visit.Status == "SiteDelay" ? "Site dwell exceeded limit" : "Possible missed/short site visit", visit.StatusReason ?? $"Dwell {visit.DwellMinutes} min"));
-                }
-            }
-        }
-        catch
-        {
-            // Geofence intelligence is additive; core attention items remain useful without it.
         }
         return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, count = items.Count, items });
     }
@@ -108,17 +91,6 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         {
             var logs = await db.DriverStatusLogs.AsNoTracking().Where(x => x.LoadId == id).OrderBy(x => x.CapturedAtUtc).ToListAsync(ct);
             events.AddRange(logs.Select(x => new TimelineEvent(x.CapturedAtUtc, x.Status, x.Notes ?? "Operational status updated", "Operations", x.CapturedBy)));
-        }
-        catch { }
-        try
-        {
-            var visits = await db.GeofenceVisits.AsNoTracking().Where(x => x.LoadId == id).ToListAsync(ct);
-            foreach (var v in visits)
-            {
-                events.Add(new(v.EnteredAtUtc, "Geofence arrival", v.StatusReason ?? v.VehicleIdentifier, "Tracking", null));
-                if (v.ConfirmedAtUtc != null) events.Add(new(v.ConfirmedAtUtc.Value, "Site visit confirmed", $"Dwell threshold confirmed · {v.DwellMinutes} min", "Tracking", null));
-                if (v.ExitedAtUtc != null) events.Add(new(v.ExitedAtUtc.Value, "Geofence departure", v.Status, "Tracking", null));
-            }
         }
         catch { }
         try
@@ -199,12 +171,12 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         var pendingReview = await db.StagedImports.AsNoTracking().CountAsync(x => x.Status == StagingStatus.PendingReview, ct);
         var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.Any(v => v.Id == id && IsVor(v)));
         var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.Any(d => d.Id == id && string.IsNullOrWhiteSpace(d.TachoName)));
-        var geofenceGaps = loads.Sum(x => x.Stops.Count(s => s.Latitude is null || s.Longitude is null));
+        var siteCoordinateGaps = loads.Sum(x => x.Stops.Count(s => s.Latitude is null || s.Longitude is null));
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
-        var ready = missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingReview == 0;
+        var ready = missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && siteCoordinateGaps == 0 && pendingReview == 0;
         PlanLockInfo? planLock = null;
         try { planLock = await PlanLockStore.GetAsync(db, day, ct); } catch { }
-        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, ready, runs = loads.Count, assignedDrivers = assignedDriverIds.Count, activeDrivers = drivers.Count, assignedVehicles = assignedVehicleIds.Count, activeVehicles = vehicles.Count, missingAllocations, vorConflicts, tachoConcerns, geofenceGaps, unreviewedOrders = pendingReview, planLock });
+        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, ready, runs = loads.Count, assignedDrivers = assignedDriverIds.Count, activeDrivers = drivers.Count, assignedVehicles = assignedVehicleIds.Count, activeVehicles = vehicles.Count, missingAllocations, vorConflicts, tachoConcerns, siteCoordinateGaps, unreviewedOrders = pendingReview, planLock });
     }
 
     private static object Item(Load load, string severity, string type, string title, string detail) => new { id = $"{type}-{load.Id}", severity, type, title, detail, entityId = load.Id, entityType = "run", href = $"/timeline/run/{load.Id}" };

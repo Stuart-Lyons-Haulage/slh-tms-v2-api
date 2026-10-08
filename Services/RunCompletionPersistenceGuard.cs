@@ -20,9 +20,26 @@ public static class RunCompletionPersistenceGuard
             .AnyAsync(log => log.LoadId == loadId && log.Status == CompletionEvidenceStatus, ct);
         if (persistedEvidence) return;
 
+        var load = await db.Loads.AsNoTracking().Include(item => item.Stops)
+            .SingleOrDefaultAsync(item => item.Id == loadId, ct)
+            ?? await PlanningRegisterStore.GetLoadAsync(db, loadId, ct);
+        if (load is not null && load.Stops.Count > 0)
+        {
+            var stopIds = load.Stops.Select(stop => stop.Id).ToList();
+            var snapshots = await db.IntegrationMappings.AsNoTracking()
+                .Where(item => item.Active && item.Provider == "Samsara" && item.TmsEntityType == "LoadStop" && stopIds.Contains(item.TmsEntityId))
+                .ToListAsync(ct);
+            var departed = snapshots
+                .Select(item => (item.TmsEntityId, Progress: SamsaraRouteProgressService.ReadProgress(item.Notes)))
+                .Where(item => item.Progress?.DepartureTime is not null)
+                .Select(item => item.TmsEntityId)
+                .ToHashSet();
+            if (stopIds.All(departed.Contains)) return;
+        }
+
         throw new RunCompletionEvidenceException(
             "RUN_COMPLETION_EVIDENCE_REQUIRED",
-            "Run completion is evidence-controlled. A load can only become Completed after a RunCompleted geofence evidence event has been recorded.");
+            "Run completion is evidence-controlled. A load can only become Completed after Samsara has reported departure from every planned stop.");
     }
 }
 

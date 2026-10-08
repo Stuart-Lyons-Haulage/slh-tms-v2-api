@@ -39,13 +39,7 @@ public static class TimesheetEvidenceRules
     public static NightOutAssessment AssessNightOut(
         DateTimeOffset? dutyEndUtc,
         DateTimeOffset? nextDutyStartUtc,
-        DateTimeOffset? lastMovementUtc,
-        decimal? lastLatitude,
-        decimal? lastLongitude,
-        IEnumerable<DepotPoint> depots,
-        bool sameVehicle,
-        IEnumerable<LorryParkEvidence>? lorryParks = null,
-        IEnumerable<string>? vehicleAliases = null)
+        bool sameVehicle)
     {
         if (dutyEndUtc is null || nextDutyStartUtc is null || nextDutyStartUtc <= dutyEndUtc)
             return new("No Night Out", null, "No consecutive completed duties were available.");
@@ -60,50 +54,16 @@ public static class TimesheetEvidenceRules
         if (restMinutes > 24 * 60)
             return new("No Night Out", restMinutes, "The rest interval exceeded 24 hours and is treated as full/weekly rest, not a night out.");
 
-        var aliases = (vehicleAliases ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var lorryParkAtDutyEnd = sameVehicle && lorryParks is not null && lorryParks.Any(park =>
-            (aliases.Count == 0 || aliases.Contains(Normalise(park.VehicleIdentifier))) &&
-            park.EnteredAtUtc <= dutyEndUtc.Value.AddMinutes(30) &&
-            park.LastInsideAtUtc >= dutyEndUtc.Value.AddMinutes(-90));
-        if (lorryParkAtDutyEnd)
-        {
-            return restMinutes >= 11 * 60
-                ? new("Confirmed Night Out - Regular Rest", restMinutes, "RoadTech confirmed the vehicle entered a recognised lorry-park geofence near duty end and remained away from the depot through a completed 11-hour rest interval.")
-                : new("Confirmed Night Out - Reduced Rest", restMinutes, "RoadTech confirmed the vehicle entered a recognised lorry-park geofence near duty end and remained away from the depot through a completed reduced rest interval.");
-        }
-
-        if (lastMovementUtc is null || lastLatitude is null || lastLongitude is null)
-            return new("Possible Night Out", restMinutes, "The duty gap is long enough, but the final away-from-depot location is incomplete.");
-
-        var awayFromDepot = depots.Any(depot => DistanceMetres(lastLatitude.Value, lastLongitude.Value, depot.Latitude, depot.Longitude) <= depot.RadiusMetres);
-        if (awayFromDepot)
-            return new("No Night Out", restMinutes, "The vehicle was at a depot/home geofence during the rest interval.");
-
-        if (!sameVehicle)
-            return new("Possible Night Out", restMinutes, "The driver resumed in a different vehicle; planner confirmation is required.");
-
-        return restMinutes >= 11 * 60
-            ? new("Confirmed Night Out - Regular Rest", restMinutes, "Vehicle remained away from the depot through a completed 11-hour rest interval.")
-            : new("Confirmed Night Out - Reduced Rest", restMinutes, "Vehicle remained away from the depot through a completed reduced rest interval.");
+        var vehicleContext = sameVehicle ? "The same vehicle is allocated to the next duty" : "Vehicle continuity is not confirmed";
+        return new("Possible Night Out", restMinutes,
+            $"The rest interval is long enough to review, but this system no longer infers overnight location from boundaries around depots or other sites. {vehicleContext}; planner confirmation is required.");
     }
 
     private static bool IsMovement(DotTelemetryRecord item) => item.IsMoving == true || (item.SpeedKph ?? 0m) > 0m;
 
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
-    private static double DistanceMetres(decimal latitude, decimal longitude, decimal otherLatitude, decimal otherLongitude)
-    {
-        const double earthRadiusMetres = 6_371_000;
-        var lat1 = (double)latitude * Math.PI / 180;
-        var lat2 = (double)otherLatitude * Math.PI / 180;
-        var dLat = lat2 - lat1;
-        var dLon = ((double)otherLongitude - (double)longitude) * Math.PI / 180;
-        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) + Math.Cos(lat1) * Math.Cos(lat2) * Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
-        return earthRadiusMetres * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
-    }
 }
 
 public sealed record MovementWindow(DateTimeOffset? FirstUtc, DateTimeOffset? LastUtc, IReadOnlyList<string> VehicleIdentifiers);
-public sealed record DepotPoint(decimal Latitude, decimal Longitude, int RadiusMetres = 500);
-public sealed record LorryParkEvidence(string VehicleIdentifier, DateTimeOffset EnteredAtUtc, DateTimeOffset LastInsideAtUtc, string GeofenceName);
 public sealed record NightOutAssessment(string Status, int? RestMinutes, string Reason);

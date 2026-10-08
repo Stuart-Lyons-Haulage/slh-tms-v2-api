@@ -94,37 +94,6 @@ public sealed class LiveVehicleDetailsController(
             .ThenByDescending(load => load.Status == LoadStatus.Dispatched)
             .FirstOrDefaultAsync(cancellationToken);
 
-        LiveGeofenceSummary? geofence = null;
-        if (currentLoad is not null)
-        {
-            try
-            {
-                var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, today, new[] { currentLoad }, cancellationToken);
-                var activeVisit = snapshot.ActiveVisits
-                    .Where(visit => visit.VehicleId == vehicle.Id)
-                    .OrderByDescending(visit => visit.LastInsideAtUtc)
-                    .FirstOrDefault();
-                var latestVisit = snapshot.ConfirmedVisits
-                    .Where(visit => visit.VehicleId == vehicle.Id)
-                    .OrderByDescending(visit => visit.LastInsideAtUtc)
-                    .FirstOrDefault();
-                var evidence = activeVisit ?? latestVisit;
-                geofence = evidence is null
-                    ? new LiveGeofenceSummary("NoVisit", null, null, null, snapshot.LatestTrackingUtc)
-                    : new LiveGeofenceSummary(
-                        activeVisit is not null ? "Inside" : "LastConfirmedVisit",
-                        evidence.Fence.Name,
-                        evidence.EnteredAtUtc,
-                        evidence.DwellMinutes,
-                        snapshot.LatestTrackingUtc);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogWarning(exception, "Geofence live detail enrichment failed for {Vehicle}.", vehicle.Registration);
-                geofence = new LiveGeofenceSummary("Unavailable", null, null, null, null);
-            }
-        }
-
         var now = DateTimeOffset.UtcNow;
         var ageMinutes = live is null ? (int?)null : Math.Max(0, (int)(now - live.LastEventTimeUtc).TotalMinutes);
         var trackingState = live is null
@@ -169,7 +138,6 @@ public sealed class LiveVehicleDetailsController(
                 tacho.DriveAvailableTodayMinutes,
                 tacho.WorkAvailableWeekMinutes),
             currentLoad is null ? null : new LiveRunSummary(currentLoad.Id, currentLoad.Reference, currentLoad.Status.ToString()),
-            geofence,
             compliance,
             DateTimeOffset.UtcNow));
     }
@@ -225,7 +193,6 @@ public sealed record LiveVehicleDetailResponse(
     LiveDriverSummary Driver,
     LiveTachoSummary? Tacho,
     LiveRunSummary? Run,
-    LiveGeofenceSummary? Geofence,
     LiveComplianceSummary Compliance,
     DateTimeOffset RetrievedAtUtc);
 
@@ -258,5 +225,4 @@ public sealed record LiveTachoSummary(
     int? DriveAvailableTodayMinutes,
     int? WorkAvailableWeekMinutes);
 public sealed record LiveRunSummary(Guid Id, string Reference, string Status);
-public sealed record LiveGeofenceSummary(string State, string? FenceName, DateTimeOffset? EnteredAtUtc, int? DwellMinutes, DateTimeOffset? LatestTrackingUtc);
 public sealed record LiveComplianceSummary(string Status, string Message);

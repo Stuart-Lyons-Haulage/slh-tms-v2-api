@@ -80,8 +80,8 @@ public sealed class SamsaraClientTests
                 "driver-1",
                 null,
                 [
-                    new SamsaraRouteStopRequest(firstStop, 1, "SLH Depot", "address-1", "Depot", 50.0, -0.1, 250, null, start, "Start"),
-                    new SamsaraRouteStopRequest(lastStop, 2, "Customer", "address-2", "Customer", 51.0, -0.2, 250, finish, finish, "Deliver")
+                    new SamsaraRouteStopRequest(firstStop, 1, "SLH Depot", "address-1", "Depot", 50.0, -0.1, null, start, "Start"),
+                    new SamsaraRouteStopRequest(lastStop, 2, "Customer", "address-2", "Customer", 51.0, -0.2, finish, finish, "Deliver")
                 ]),
             CancellationToken.None);
 
@@ -136,7 +136,7 @@ public sealed class SamsaraClientTests
         var siteId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
 
         var result = await client.UpsertAddressAsync(
-            new SamsaraAddressRequest(siteId, "SITE123", "Greenhouse", "Greenhouse Road", 50.84, -0.67, 300),
+            new SamsaraAddressRequest(siteId, "SITE123", "Greenhouse", "Greenhouse Road", 50.84, -0.67),
             CancellationToken.None);
 
         Assert.Equal("address-99", result.AddressId);

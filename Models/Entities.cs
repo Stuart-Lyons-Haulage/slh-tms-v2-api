@@ -151,7 +151,6 @@ public sealed class Site
     [MaxLength(1000)] public string? MapLink { get; set; }
     [NotMapped] public decimal? Latitude { get; set; }
     [NotMapped] public decimal? Longitude { get; set; }
-    [NotMapped] public int? GeofenceRadiusMetres { get; set; }
     [MaxLength(500)] public string? Aliases { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField1 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField2 { get; set; }

@@ -56,11 +56,14 @@ public sealed class CustomerNotificationService(
         var contactsByCode = contacts.GroupBy(contact => contact.CustomerCode, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
 
         var stopIds = deliveryStops.Select(stop => stop.Id).ToList();
-        var snapshots = await db.EtaSnapshots.AsNoTracking()
-            .Where(snapshot => stopIds.Contains(snapshot.StopId) && snapshot.EtaUtc != null)
-            .OrderByDescending(snapshot => snapshot.CapturedAtUtc)
+        var mappings = await db.IntegrationMappings.AsNoTracking()
+            .Where(mapping => mapping.Active && mapping.Provider == "Samsara" && mapping.TmsEntityType == "LoadStop" && stopIds.Contains(mapping.TmsEntityId))
             .ToListAsync(ct);
-        var latestByStop = snapshots.GroupBy(snapshot => snapshot.StopId).ToDictionary(group => group.Key, group => group.First());
+        var progressByStop = mappings
+            .Select(mapping => (mapping.TmsEntityId, Progress: SamsaraRouteProgressService.ReadProgress(mapping.Notes)))
+            .Where(item => item.Progress is not null)
+            .GroupBy(item => item.TmsEntityId)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.Progress!.OccurredAtUtc).First().Progress!);
 
         var result = new List<MorningBriefingPreviewItem>();
         foreach (var stop in deliveryStops.OrderBy(stop => stop.PlannedArrivalUtc))
@@ -69,8 +72,8 @@ public sealed class CustomerNotificationService(
             if (!customersByCode.TryGetValue(order.CustomerCode, out var customer)) continue;
             contactsByCode.TryGetValue(order.CustomerCode, out var customerContacts);
             customerContacts ??= [];
-            latestByStop.TryGetValue(stop.Id, out var etaSnapshot);
-            var eta = etaSnapshot?.EtaUtc ?? stop.PlannedArrivalUtc;
+            var progress = progressByStop.GetValueOrDefault(stop.Id);
+            var eta = progress?.EstimatedArrivalTime ?? progress?.ArrivalTime;
             var window = FormatEtaWindow(eta);
             result.Add(new MorningBriefingPreviewItem(
                 customer.Id,
@@ -116,7 +119,7 @@ public sealed class CustomerNotificationService(
     {
         if (eta is null) return "ETA unavailable";
         var local = TimeZoneInfo.ConvertTime(eta.Value, _ukZone);
-        return $"{local.AddMinutes(-15):HH:mm}–{local.AddMinutes(15):HH:mm}";
+        return local.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private DateTimeOffset LocalDateStartUtc(DateOnly date)

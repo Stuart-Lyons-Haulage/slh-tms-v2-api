@@ -57,7 +57,7 @@ public sealed class TmsAssistantService(
         var noMapPoints = loads.Where(x => x.Stops.Count == 0 || x.Stops.Any(s => s.Latitude is null || s.Longitude is null)).ToList();
         if (noMapPoints.Count > 0)
             suggestions.Add(new("loads-unmapped", "medium", "Finish route stop coordinates",
-                $"{noMapPoints.Count} run{(noMapPoints.Count == 1 ? " has" : "s have")} missing stop coordinates — ETA calculations and the optimiser cannot work without them. Link a geofence or add the site address/postcode first.",
+                $"{noMapPoints.Count} run{(noMapPoints.Count == 1 ? " has" : "s have")} missing stop coordinates — routes cannot be sent to Samsara until Site Master has the physical address and coordinates.",
                 "Sites", false));
 
         var emptyMiles = loads.Sum(x => x.EmptyMiles ?? 0);
@@ -179,12 +179,12 @@ public sealed class TmsAssistantService(
                 $"{untidyRegistrations} registration{(untidyRegistrations == 1 ? " needs" : "s need")} safe spacing/case normalisation.",
                 "Vehicles", true));
 
-        // ── Sites & geofences ──────────────────────────────────────────────
+        // ── Site addresses ────────────────────────────────────────────────
         var missingPhysicalAddresses = sites.Count(x =>
             string.IsNullOrWhiteSpace(x.CollectionAddress) && (x.Latitude is null || x.Longitude is null));
         if (missingPhysicalAddresses > 0)
             suggestions.Add(new("sites-physical-address", "high", "Sites missing address and coordinates",
-                $"{missingPhysicalAddresses} active site{(missingPhysicalAddresses == 1 ? " has" : "s have")} neither a physical address nor coordinates. Link a geofence or add the address/postcode in Site Master so Azure Maps can geocode it.",
+                $"{missingPhysicalAddresses} active site{(missingPhysicalAddresses == 1 ? " has" : "s have")} neither a physical address nor coordinates. Add the physical address or postcode in Site Master.",
                 "Sites", false));
 
         var missingMapLinks = sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink));
@@ -198,14 +198,6 @@ public sealed class TmsAssistantService(
             suggestions.Add(new("sites-map-point", "medium", "Sites need geocoding",
                 $"{missingMapPoints} site{(missingMapPoints == 1 ? " has" : "s have")} a physical address but no coordinates. The assistant can geocode these via Azure Maps.",
                 "Sites", true));
-
-        var geofenceLinkGaps = await GeofenceLinkGaps(ct);
-        if (geofenceLinkGaps.SitesMissingGeofence > 0)
-            suggestions.Add(new("geofences-sites-sync",
-                geofenceLinkGaps.AutoFixAvailable ? "high" : "medium",
-                "Sites missing confirmed geofence link",
-                $"{geofenceLinkGaps.SitesMissingGeofence} active site{(geofenceLinkGaps.SitesMissingGeofence == 1 ? " is" : "s are")} missing a confirmed geofence link. A linked geofence is the preferred ETA/routing location — the assistant can apply unique confirmed matches.",
-                "Sites", geofenceLinkGaps.AutoFixAvailable));
 
         var duplicateSiteGroups = FindDuplicateSiteGroups(sites);
         if (duplicateSiteGroups.Count > 0)
@@ -267,7 +259,7 @@ public sealed class TmsAssistantService(
                 - Every unallocated run for today: collection point, skills required, backload flag
                 - Route optimiser analysis: which runs have savings opportunities and how much
                 - Fleet compliance: vehicles with MOT/PMI due or VOR status
-                - Site master: missing coordinates, missing geofences, duplicate sites
+                - Site master: missing physical addresses, missing coordinates, duplicate sites
                 - TachoMaster: pending new driver reviews, stale sync warnings
 
                 RULES — ALWAYS:
@@ -275,7 +267,7 @@ public sealed class TmsAssistantService(
                 2. Never suggest allocating a blocked driver — state why they are blocked.
                 3. New Tacho drivers in the review queue cannot be dispatched until promoted.
                 4. Prefer the driver's live DOT/Falcon vehicle. Show previous vehicle as fallback.
-                5. For routing, geofence coordinates beat site address coordinates beat order coordinates.
+                5. Use the physical Site Master address and coordinates for routes sent to Samsara.
                 6. If a driver has stale Tacho data (>12h), say so and caveat any hours suggestion.
                 7. CPC or digital tacho card expired = hard block. State this explicitly.
                 8. Do not discuss rates, margins, or costs.
@@ -557,22 +549,6 @@ public sealed class TmsAssistantService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Assistant site-detail enrichment was unavailable.");
-        }
-    }
-
-    private async Task<(int SitesMissingGeofence, bool AutoFixAvailable)> GeofenceLinkGaps(CancellationToken ct)
-    {
-        try
-        {
-            var statuses = await SiteGeofenceMasterSync.GetStatusAsync(db, ct);
-            var missing  = statuses.Count(s => s.NeedsReview);
-            return (missing, missing > 0);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Assistant geofence link scan was unavailable.");
-            db.ChangeTracker.Clear();
-            return (0, false);
         }
     }
 

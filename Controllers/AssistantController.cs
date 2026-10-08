@@ -123,17 +123,6 @@ public sealed class AssistantController(
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).Take(5000).ToListAsync(ct);
         var markets = await db.MarketContacts.AsNoTracking().Where(x => x.Active).Take(5000).ToListAsync(ct);
         var contacts = await db.CustomerContacts.AsNoTracking().Where(x => x.Active && x.Email != null).Take(5000).ToListAsync(ct);
-        var geofenceReview = 0;
-        try
-        {
-            geofenceReview = (await SiteGeofenceMasterSync.GetStatusAsync(db, ct)).Count(x => x.NeedsReview);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            safeFixLogger.LogWarning(exception, "Assistant verification could not read geofence status.");
-            db.ChangeTracker.Clear();
-        }
-
         return new AssistantValidationState(
             sites.Count,
             sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink)),
@@ -143,8 +132,7 @@ public sealed class AssistantController(
             markets.Count(x => CanonicalMarket(x.Market) != (x.Market ?? string.Empty).Trim()),
             CountExactMarketDuplicateRecords(markets),
             markets.Count(x => x.Active && !string.Equals(CanonicalMarket(x.Market), "Sender", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(x.StandOrLocation) && !string.IsNullOrWhiteSpace(InferStand(x.Name))),
-            contacts.Count(x => x.Email != x.Email!.Trim().ToLowerInvariant()),
-            geofenceReview);
+            contacts.Count(x => x.Email != x.Email!.Trim().ToLowerInvariant()));
     }
 
     private static List<string> VerifyChanges(IReadOnlyList<string> attempted, AssistantValidationState before, AssistantValidationState after)
@@ -158,8 +146,7 @@ public sealed class AssistantController(
             ["market-normalise"] = Math.Max(0, before.NonCanonicalMarkets - after.NonCanonicalMarkets),
             ["market-duplicate"] = Math.Max(0, before.ExactDuplicateMarketRecords - after.ExactDuplicateMarketRecords),
             ["market-stand"] = Math.Max(0, before.InferableMarketStandGaps - after.InferableMarketStandGaps),
-            ["customer-email"] = Math.Max(0, before.UntidyCustomerEmails - after.UntidyCustomerEmails),
-            ["geofence"] = Math.Max(0, before.GeofenceReviewItems - after.GeofenceReviewItems)
+            ["customer-email"] = Math.Max(0, before.UntidyCustomerEmails - after.UntidyCustomerEmails)
         };
 
         var verified = new List<string>();
@@ -183,7 +170,6 @@ public sealed class AssistantController(
         if (change.StartsWith("Consolidated", StringComparison.OrdinalIgnoreCase) && change.Contains("duplicate market", StringComparison.OrdinalIgnoreCase)) return "market-duplicate";
         if (change.Contains("stand", StringComparison.OrdinalIgnoreCase) && change.Contains("market", StringComparison.OrdinalIgnoreCase)) return "market-stand";
         if (change.StartsWith("Normalised the ETA email", StringComparison.OrdinalIgnoreCase)) return "customer-email";
-        if (change.Contains("geofence", StringComparison.OrdinalIgnoreCase) || change.Contains("SITE", StringComparison.OrdinalIgnoreCase)) return "geofence";
         return null;
     }
 
@@ -307,5 +293,4 @@ public sealed record AssistantValidationState(
     int NonCanonicalMarkets,
     int ExactDuplicateMarketRecords,
     int InferableMarketStandGaps,
-    int UntidyCustomerEmails,
-    int GeofenceReviewItems);
+    int UntidyCustomerEmails);

@@ -31,9 +31,9 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
         var pendingReview = await PendingOrdersForDate(day, ct);
         var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.TryGetValue(id, out var vehicle) && IsVor(vehicle));
         var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.TryGetValue(id, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName));
-        var geofenceGaps = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
+        var siteCoordinateGaps = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
-        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingReview.Count == 0;
+        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && siteCoordinateGaps == 0 && pendingReview.Count == 0;
 
         PlanLockInfo? planLock = null;
         try { planLock = await PlanLockStore.GetAsync(db, day, ct); }
@@ -57,7 +57,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
             missingAllocations,
             vorConflicts,
             tachoConcerns,
-            geofenceGaps,
+            siteCoordinateGaps,
             unreviewedOrders = pendingReview.Count,
             planLock
         });
@@ -97,9 +97,8 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
                 items.Add(Item(load, "Medium", "TachoMapping", $"Driver missing Tacho mapping: {driver.DisplayName}", "Tacho-aware planning cannot be fully validated."));
         }
 
-        // Needs Attention is an operational queue. A missing latitude/longitude is a mapping
-        // diagnostic, not proof that the route cannot be geofenced. Use the same Site Master
-        // and geofence resolver as the wallboards so this queue reflects actual geofence gaps.
+        // Needs Attention includes sites that need physical address or coordinate data before
+        // their planned routes can be sent to Samsara.
         try
         {
             var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
@@ -107,52 +106,28 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
             {
                 var gaps = OperationalStopOrdering.Order(load.Stops)
                     .Select((stop, index) => new { Stop = stop, Sequence = index + 1, Resolution = resolver.Resolve(stop.Name) })
-                    .Where(item => !item.Resolution.SiteMatched || !item.Resolution.GeofenceLinked)
+                    .Where(item => !item.Resolution.SiteMatched || item.Resolution.Latitude is null || item.Resolution.Longitude is null)
                     .ToList();
                 if (gaps.Count == 0) continue;
 
                 var unresolved = gaps.Count(item => !item.Resolution.SiteMatched);
-                var unlinked = gaps.Count(item => item.Resolution.SiteMatched && !item.Resolution.GeofenceLinked);
+                var missingCoordinates = gaps.Count(item => item.Resolution.SiteMatched && (item.Resolution.Latitude is null || item.Resolution.Longitude is null));
                 var examples = string.Join(", ", gaps.Take(3).Select(item => $"{item.Sequence}. {item.Stop.Name}"));
                 if (gaps.Count > 3) examples += $" + {gaps.Count - 3} more";
                 var breakdown = string.Join(" · ", new[]
                 {
                     unresolved > 0 ? $"{unresolved} site name unresolved" : null,
-                    unlinked > 0 ? $"{unlinked} site recognised but geofence unlinked" : null
+                    missingCoordinates > 0 ? $"{missingCoordinates} site coordinates missing" : null
                 }.Where(value => value is not null));
 
-                items.Add(Item(load, "Medium", "GeofenceCoverage",
-                    $"Run has {gaps.Count} geofence gap{(gaps.Count == 1 ? "" : "s")}",
-                    $"{breakdown}. {examples}. Resolve in Site Master / Geofence Integrity."));
+                items.Add(Item(load, "Medium", "SiteMasterCoverage",
+                    $"Run has {gaps.Count} site mapping issue{(gaps.Count == 1 ? "" : "s")}",
+                    $"{breakdown}. {examples}. Resolve the physical site address or coordinates in Site Master."));
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogDebug(ex, "Geofence linkage attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
-            db.ChangeTracker.Clear();
-        }
-
-        try
-        {
-            var loadIds = loads.Select(x => x.Id).ToList();
-            if (loadIds.Count > 0)
-            {
-                var visits = await db.GeofenceVisits.AsNoTracking()
-                    .Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value) && (x.Status == "SiteDelay" || x.Status == "PassThrough"))
-                    .OrderByDescending(x => x.UpdatedAtUtc).Take(100).ToListAsync(ct);
-                foreach (var visit in visits)
-                {
-                    var load = loads.FirstOrDefault(x => x.Id == visit.LoadId);
-                    if (load is null) continue;
-                    items.Add(Item(load, visit.Status == "SiteDelay" ? "High" : "Medium", visit.Status,
-                        visit.Status == "SiteDelay" ? "Site dwell exceeded limit" : "Possible missed/short site visit",
-                        visit.StatusReason ?? $"Dwell {visit.DwellMinutes} min"));
-                }
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogDebug(ex, "Geofence attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
+            logger.LogDebug(ex, "Site Master attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
             db.ChangeTracker.Clear();
         }
 

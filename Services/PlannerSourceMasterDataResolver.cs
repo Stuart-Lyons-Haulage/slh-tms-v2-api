@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -8,8 +7,7 @@ namespace Slh.Tms.Api.Services;
 
 /// <summary>
 /// Resolves the planner's human-readable source-line site labels to stable Site Master
-/// identity and the manually linked DOT/Falcon geofence without replacing the source
-/// wording used by Planner and driver instructions.
+/// identity without replacing the source wording used by Planner and driver instructions.
 /// </summary>
 public sealed class PlannerSourceMasterDataResolver
 {
@@ -19,16 +17,13 @@ public sealed class PlannerSourceMasterDataResolver
     };
 
     private readonly IReadOnlyList<Site> _sites;
-    private readonly IReadOnlyList<SiteGeofence> _geofences;
     private readonly IReadOnlyList<MarketContact> _marketContacts;
 
     private PlannerSourceMasterDataResolver(
         IReadOnlyList<Site> sites,
-        IReadOnlyList<SiteGeofence> geofences,
         IReadOnlyList<MarketContact> marketContacts)
     {
         _sites = sites;
-        _geofences = geofences;
         _marketContacts = marketContacts;
     }
 
@@ -36,17 +31,6 @@ public sealed class PlannerSourceMasterDataResolver
     {
         var sites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
-
-        List<SiteGeofence> geofences;
-        try
-        {
-            geofences = await db.SiteGeofences.AsNoTracking().Where(fence => fence.Active).ToListAsync(ct);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-            geofences = [];
-        }
 
         List<MarketContact> marketContacts;
         try
@@ -59,48 +43,16 @@ public sealed class PlannerSourceMasterDataResolver
             marketContacts = [];
         }
 
-        return new PlannerSourceMasterDataResolver(sites, geofences, marketContacts);
+        return new PlannerSourceMasterDataResolver(sites, marketContacts);
     }
 
     public PlannerSourceSiteResolution Resolve(string? sourceLabel)
     {
         if (string.IsNullOrWhiteSpace(sourceLabel)) return PlannerSourceSiteResolution.Unresolved(sourceLabel);
 
-        var embeddedFence = ResolveEmbeddedFence(sourceLabel);
-        var linkedByFence = embeddedFence is null ? null : LinkedGeofence(embeddedFence.Name);
-
-        var site = MatchSite(sourceLabel)
-            ?? SiteFromLink(linkedByFence);
-
-        var linkedGeofence = site is null
-            ? linkedByFence
-            : _geofences
-                .Where(item => item.SiteId == site.Id ||
-                    (!string.IsNullOrWhiteSpace(item.SiteNumber) && Normalize(item.SiteNumber) == Normalize(site.ExternalCode)))
-                .OrderByDescending(item => item.UpdatedAtUtc)
-                .FirstOrDefault()
-                ?? linkedByFence;
-
-        embeddedFence ??= ResolveEmbeddedFence(linkedGeofence?.Name)
-            ?? ResolveEmbeddedFence(site?.DriverTextName)
-            ?? ResolveEmbeddedFence(site?.Name);
-
+        var site = MatchSite(sourceLabel);
         var latitude = site?.Latitude;
         var longitude = site?.Longitude;
-        if ((latitude is null || longitude is null) && linkedGeofence is not null)
-        {
-            var centre = GeofenceCentre(linkedGeofence);
-            if (centre is not null)
-            {
-                longitude = centre.Value.Longitude;
-                latitude = centre.Value.Latitude;
-            }
-        }
-        if ((latitude is null || longitude is null) && embeddedFence is not null)
-        {
-            longitude = (decimal)embeddedFence.Points.Average(point => point.Longitude);
-            latitude = (decimal)embeddedFence.Points.Average(point => point.Latitude);
-        }
 
         return new PlannerSourceSiteResolution(
             sourceLabel.Trim(),
@@ -110,38 +62,7 @@ public sealed class PlannerSourceMasterDataResolver
             site?.CollectionAddress,
             latitude,
             longitude,
-            linkedGeofence?.Id,
-            linkedGeofence?.Name ?? embeddedFence?.Name,
-            site is not null,
-            linkedGeofence is not null);
-    }
-
-    /// <summary>
-    /// Returns a canonical Site Master decision for a planned stop versus a physical
-    /// embedded geofence. True/false is authoritative when both sides resolve to Site
-    /// Master identity. Null means canonical evidence is incomplete and the caller may
-    /// use the proven physical/fuzzy matching rules instead of rejecting real telemetry.
-    /// </summary>
-    public bool? CanonicalGeofenceMatch(string? sourceLabel, EmbeddedFence fence)
-    {
-        if (string.IsNullOrWhiteSpace(sourceLabel)) return null;
-
-        var linked = LinkedGeofence(fence.Name);
-        var linkedSite = SiteFromLink(linked);
-        if (linked is null || linkedSite is null) return null;
-
-        var plannedSite = MatchSite(sourceLabel);
-        return plannedSite is null ? null : plannedSite.Id == linkedSite.Id;
-    }
-
-    private SiteGeofence? LinkedGeofence(string? fenceName)
-    {
-        if (string.IsNullOrWhiteSpace(fenceName)) return null;
-        var key = Normalize(fenceName);
-        return _geofences
-            .Where(item => Normalize(item.Name) == key || Normalize(item.NormalizedName) == key)
-            .OrderByDescending(item => item.UpdatedAtUtc)
-            .FirstOrDefault();
+            site is not null);
     }
 
     private Site? MatchSite(string value)
@@ -154,22 +75,15 @@ public sealed class PlannerSourceMasterDataResolver
         if (direct.Count == 1) return direct[0];
 
         // Market jobs are a two-level master-data relationship: MarketContacts identifies
-        // the trader/stall, while Site Master identifies the physical market/geofence.
+        // the trader/stall, while Site Master identifies the physical market.
         // Resolve either a market label (for example COVENTGARDEN) or a unique market
         // customer/stall back to that physical Site before ordinary planner fuzzy matching.
         var marketSite = MatchMarketSite(value);
         if (marketSite is not null) return marketSite;
 
-        var geofenceKey = Normalize(GeofencePlanningMatch.MatchText(value));
-        if (geofenceKey.Length > 0 && geofenceKey != rawKey)
-        {
-            var geofenceExact = ExactSites(geofenceKey);
-            if (geofenceExact.Count == 1) return geofenceExact[0];
-        }
-
         var keys = PlannerSiteVariants(value)
             .Select(Normalize)
-            .Where(item => item.Length > 0 && item != rawKey && item != geofenceKey)
+            .Where(item => item.Length > 0 && item != rawKey)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -247,7 +161,7 @@ public sealed class PlannerSourceMasterDataResolver
     private static IEnumerable<string> PlannerSiteVariants(string value)
     {
         var initial = value.Trim();
-        var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { initial, GeofencePlanningMatch.MatchText(initial) };
+        var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { initial, StripOperationalPrefix(initial) };
 
         foreach (var candidate in values.ToList())
         {
@@ -283,35 +197,8 @@ public sealed class PlannerSourceMasterDataResolver
         return values;
     }
 
-    private Site? SiteFromLink(SiteGeofence? linked)
-    {
-        if (linked is null) return null;
-        if (linked.SiteId is Guid siteId)
-        {
-            var byId = _sites.FirstOrDefault(site => site.Id == siteId);
-            if (byId is not null) return byId;
-        }
-        if (!string.IsNullOrWhiteSpace(linked.SiteNumber))
-        {
-            var key = Normalize(linked.SiteNumber);
-            return _sites.FirstOrDefault(site => Normalize(site.ExternalCode) == key);
-        }
-        return null;
-    }
-
-    private static EmbeddedFence? ResolveEmbeddedFence(string? label)
-    {
-        if (string.IsNullOrWhiteSpace(label)) return null;
-        var canonical = GeofencePlanningMatch.MatchText(label);
-        var matches = EmbeddedGeofenceEngine.ApprovedFences
-            .Where(fence => Normalize(fence.Name) == Normalize(canonical) || Normalize(fence.Name) == Normalize(label))
-            .ToList();
-        if (matches.Count == 1) return matches[0];
-
-        var probe = new LoadStop { Name = label.Trim(), Sequence = 1, LoadId = Guid.Empty };
-        matches = EmbeddedGeofenceEngine.ApprovedFences.Where(fence => GeofencePlanningMatch.SamePhysicalSite(probe, fence)).ToList();
-        return matches.Count == 1 ? matches[0] : null;
-    }
+    private static string StripOperationalPrefix(string value) =>
+        Regex.Replace(value.Trim(), @"^(COLLECT|COLLECTION|DELIVER|DELIVERY)\s*[·:\-]\s*", string.Empty, RegexOptions.IgnoreCase).Trim();
 
     private static IEnumerable<string?> SiteCandidates(Site site)
     {
@@ -323,42 +210,6 @@ public sealed class PlannerSourceMasterDataResolver
     }
 
     private static string DisplayName(Site site) => !string.IsNullOrWhiteSpace(site.DriverTextName) ? site.DriverTextName.Trim() : site.Name.Trim();
-
-    private static (decimal Longitude, decimal Latitude)? GeofenceCentre(SiteGeofence geofence)
-    {
-        if (string.IsNullOrWhiteSpace(geofence.PolygonJson)) return null;
-        try
-        {
-            using var document = JsonDocument.Parse(geofence.PolygonJson);
-            if (document.RootElement.ValueKind != JsonValueKind.Array) return null;
-            var points = new List<(decimal Longitude, decimal Latitude)>();
-            foreach (var point in document.RootElement.EnumerateArray())
-            {
-                if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 &&
-                    point[0].TryGetDecimal(out var longitude) && point[1].TryGetDecimal(out var latitude))
-                {
-                    points.Add((longitude, latitude));
-                    continue;
-                }
-
-                if (point.ValueKind != JsonValueKind.Object) continue;
-                var objectLongitude = Decimal(point, "longitude") ?? Decimal(point, "lng") ?? Decimal(point, "lon") ?? Decimal(point, "x");
-                var objectLatitude = Decimal(point, "latitude") ?? Decimal(point, "lat") ?? Decimal(point, "y");
-                if (objectLongitude is not null && objectLatitude is not null)
-                    points.Add((objectLongitude.Value, objectLatitude.Value));
-            }
-            return points.Count == 0
-                ? null
-                : (points.Average(item => item.Longitude), points.Average(item => item.Latitude));
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static decimal? Decimal(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.TryGetDecimal(out var number) ? number : null;
 
     private static string Normalize(string? value) => new((value ?? string.Empty)
         .Where(char.IsLetterOrDigit)
@@ -374,18 +225,14 @@ public sealed record PlannerSourceSiteResolution(
     string? Address,
     decimal? Latitude,
     decimal? Longitude,
-    Guid? GeofenceId,
-    string? GeofenceName,
-    bool SiteMatched,
-    bool GeofenceLinked)
+    bool SiteMatched)
 {
     public static PlannerSourceSiteResolution Unresolved(string? sourceLabel) =>
-        new(sourceLabel, null, null, null, null, null, null, null, null, false, false);
+        new(sourceLabel, null, null, null, null, null, null, false);
 
     public string EvidenceNote => string.Join(" · ", new[]
     {
         SiteMatched ? $"Site ref: {SiteNumber}" : "Site ref: unresolved",
-        SiteMatched ? $"Master site: {SiteName}" : null,
-        GeofenceLinked ? $"Geofence: {GeofenceName}" : "Geofence: unlinked"
+        SiteMatched ? $"Master site: {SiteName}" : null
     }.Where(value => !string.IsNullOrWhiteSpace(value)));
 }

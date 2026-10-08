@@ -3,12 +3,11 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Builds the execution journey used by ETA/geofence wallboards without changing the
+/// Builds the execution journey used by route progress views without changing the
 /// underlying order lines. Consecutive rows for the same action at the same physical
 /// site represent one vehicle visit, even when several orders are handled there.
 ///
-/// Physical identity is deliberately evidence-led: use the canonical Site Master/DOT
-/// geofence first, then mapped coordinates/address, and only fall back to the display
+/// Physical identity uses mapped coordinates/address and falls back to the display
 /// label. This prevents several orders for one real visit (for example repeated Selsey,
 /// Runcton or Morrisons Stockton lines) from inflating progress or ETA routing.
 /// </summary>
@@ -52,23 +51,6 @@ public static class WallboardPhysicalStops
     {
         var action = Action(stop.Name);
 
-        // The approved geofence catalogue is the closest wallboard representation of the
-        // canonical Site Master identity. SamePhysicalSite includes NWF aliases and mapped
-        // coordinates, so two differently-labelled order lines at one physical fence become
-        // one operational visit.
-        try
-        {
-            var fence = EmbeddedGeofenceEngine.ApprovedFences
-                .FirstOrDefault(candidate => GeofencePlanningMatch.SamePhysicalSite(stop, candidate));
-            if (fence is not null)
-                return $"{action}:FENCE:{Normalize(fence.Name)}";
-        }
-        catch
-        {
-            // The embedded catalogue is a resilience source. If it cannot be initialised,
-            // continue with mapped stop evidence rather than failing the wallboard read.
-        }
-
         if (stop.Latitude is decimal latitude && stop.Longitude is decimal longitude)
         {
             // Four decimal places is roughly an 11m grid in the UK: tight enough to keep
@@ -77,11 +59,14 @@ public static class WallboardPhysicalStops
             return $"{action}:COORD:{Math.Round(latitude, 4):F4}:{Math.Round(longitude, 4):F4}";
         }
 
-        var address = Normalize(GeofencePlanningMatch.MatchText(stop.Address));
+        var address = Normalize(StripOperationalPrefix(stop.Address));
         if (address.Length >= 5) return $"{action}:ADDRESS:{address}";
 
-        return $"{action}:NAME:{Normalize(GeofencePlanningMatch.MatchText(stop.Name))}";
+        return $"{action}:NAME:{Normalize(StripOperationalPrefix(stop.Name))}";
     }
+
+    private static string StripOperationalPrefix(string? value) =>
+        System.Text.RegularExpressions.Regex.Replace(value?.Trim() ?? string.Empty, @"^(COLLECT|COLLECTION|DELIVER|DELIVERY)\s*[·:\-]\s*", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
 
     private static string Action(string? name)
     {

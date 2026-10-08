@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
 /// Resilient routing used by Driver Dispatch. It resolves missing stop coordinates from
-/// Site Master/linked geofences first and Azure Maps address search as a final fallback,
+/// Site Master physical addresses first and Azure Maps address search as a final fallback,
 /// so a single unmapped planner stop cannot make an otherwise valid run unusable.
 /// </summary>
 [ApiController, Route("api/v1/driver-dispatch-routes"), Authorize]

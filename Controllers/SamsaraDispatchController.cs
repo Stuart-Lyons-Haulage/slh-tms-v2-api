@@ -323,8 +323,7 @@ public sealed class SamsaraDispatchController(
                         candidate.Site.DriverTextName ?? candidate.Site.Name,
                         candidate.Site.CollectionAddress!,
                         (double)candidate.Site.Latitude!.Value,
-                        (double)candidate.Site.Longitude!.Value,
-                        candidate.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
+                        (double)candidate.Site.Longitude!.Value),
                     ct);
                 return new SiteAddressSyncResult(candidate.Site, result, null);
             }
@@ -396,8 +395,7 @@ public sealed class SamsaraDispatchController(
                     candidate.Site.DriverTextName ?? candidate.Site.Name,
                     candidate.Site.CollectionAddress!,
                     (double)candidate.Site.Latitude!.Value,
-                    (double)candidate.Site.Longitude!.Value,
-                    candidate.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters), ct);
+                    (double)candidate.Site.Longitude!.Value), ct);
                 await SaveMappingAsync("Site", candidate.Site.Id, result.AddressId ?? result.ExternalId, candidate.Site.Name, ct);
                 siteResults.Add(new { reference = candidate.Site.ExternalCode, status = result.Created ? "created" : "updated" });
             }
@@ -648,7 +646,7 @@ public sealed class SamsaraDispatchController(
             var stop = orderedStops[index];
             var resolved = ResolveLocation(stop, sites);
             if (resolved.Latitude is null || resolved.Longitude is null)
-                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Complete Site Master/geofence mapping for {stop.Name}." });
+                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Add the physical address and coordinates to Site Master for {stop.Name}." });
 
             orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
             var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
@@ -874,8 +872,7 @@ public sealed class SamsaraDispatchController(
                                 site.DriverTextName ?? site.Name,
                                 item.Representative.Address!,
                                 item.Representative.Latitude!.Value,
-                                item.Representative.Longitude!.Value,
-                                site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
+                                item.Representative.Longitude!.Value),
                             ct);
                         return new AddressSyncResult(site.Id, result.AddressId);
                     }
@@ -973,9 +970,6 @@ public sealed class SamsaraDispatchController(
                     representative.Address ?? CleanStopName(stop.Name),
                     representative.Latitude.Value,
                     representative.Longitude.Value,
-                    representativeSite is not null
-                        ? representativeSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters
-                        : samsara.StopRadiusMeters,
                     scheduledArrival,
                     scheduledDeparture,
                     stopNotes));
@@ -984,7 +978,7 @@ public sealed class SamsaraDispatchController(
             if (missingLocations.Count > 0)
                 return BadRequest(new
                 {
-                    message = $"Samsara needs coordinates for every route stop. Complete Site Master/geofence mapping for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    message = $"Samsara needs a physical site address and coordinates for every route stop. Update Site Master for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
                     missingStops = missingLocations
                 });
 
@@ -1168,7 +1162,6 @@ public sealed class SamsaraDispatchController(
             handoverSite.CollectionAddress ?? handoverSite.Name,
             (double)handoverSite.Latitude.Value,
             (double)handoverSite.Longitude.Value,
-            handoverSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters,
             handoverTime,
             handoverTime,
             $"Trailer swap / relay handover. Collection driver: {collectionDriver.DisplayName}. Delivery driver: {deliveryDriver.DisplayName}. Trailer: {collectionTrailer?.TrailerNumber ?? "not allocated"} → {deliveryTrailer.TrailerNumber}.");

@@ -121,14 +121,14 @@ public sealed class SamsaraRouteProgressService(
             if (string.IsNullOrWhiteSpace(routeId))
                 return 0;
 
-            var knownLoad = await db.IntegrationMappings.AsNoTracking()
-                .AnyAsync(item =>
+            var loadMapping = await db.IntegrationMappings.AsNoTracking()
+                .FirstOrDefaultAsync(item =>
                     item.Active &&
                     item.Provider == Provider &&
                     item.TmsEntityType == "Load" &&
                     item.ExternalKey == routeId, ct);
 
-            if (!knownLoad)
+            if (loadMapping is null)
                 return 0;
 
             if (!root.TryGetProperty("changes", out var changes) ||
@@ -159,6 +159,10 @@ public sealed class SamsaraRouteProgressService(
                     item.TmsEntityType == "LoadStop" &&
                     externalStopIds.Contains(item.ExternalKey))
                 .ToListAsync(ct);
+            var coreLoadExists = loadMapping.TmsEntityId != Guid.Empty && await db.Loads.AsNoTracking()
+                .AnyAsync(item => item.Id == loadMapping.TmsEntityId, ct);
+            var planningLoadExists = !coreLoadExists && loadMapping.TmsEntityId != Guid.Empty &&
+                await PlanningRegisterStore.GetLoadAsync(db, loadMapping.TmsEntityId, ct) is not null;
 
             var updated = 0;
             foreach (var changedStop in changedStops)
@@ -182,17 +186,86 @@ public sealed class SamsaraRouteProgressService(
 
                 foreach (var mapping in matchingMappings)
                 {
+                    var previous = ReadProgress(mapping.Notes);
                     mapping.Notes = JsonSerializer.Serialize(progress, JsonOptions);
                     mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
                     mapping.UpdatedBy = "system:samsara-progress";
                     updated++;
+
+                    if (coreLoadExists)
+                    {
+                        if (progress.ArrivalTime is not null && previous?.ArrivalTime != progress.ArrivalTime)
+                            db.DriverStatusLogs.Add(new DriverStatusLog
+                            {
+                                LoadId = loadMapping.TmsEntityId,
+                                Status = "SamsaraStopArrived",
+                                Notes = $"Samsara reported arrival at stop {mapping.TmsEntityId} at {progress.ArrivalTime:u}.",
+                                CapturedBy = "Samsara route audit feed",
+                                CapturedAtUtc = progress.ArrivalTime.Value
+                            });
+
+                        if (progress.DepartureTime is not null && previous?.DepartureTime != progress.DepartureTime)
+                            db.DriverStatusLogs.Add(new DriverStatusLog
+                            {
+                                LoadId = loadMapping.TmsEntityId,
+                                Status = "SamsaraStopDeparted",
+                                Notes = $"Samsara reported departure from stop {mapping.TmsEntityId} at {progress.DepartureTime:u}.",
+                                CapturedBy = "Samsara route audit feed",
+                                CapturedAtUtc = progress.DepartureTime.Value
+                            });
+                    }
                 }
             }
 
             if (updated > 0)
+            {
                 await db.SaveChangesAsync(ct);
+                if (coreLoadExists || planningLoadExists) await ApplyRunCompletionAsync(loadMapping.TmsEntityId, coreLoadExists, ct);
+                await db.SaveChangesAsync(ct);
+            }
 
             return updated;
+        }
+    }
+
+    private async Task ApplyRunCompletionAsync(Guid loadId, bool coreLoadExists, CancellationToken ct)
+    {
+        if (loadId == Guid.Empty) return;
+        var load = coreLoadExists
+            ? await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == loadId, ct)
+            : await PlanningRegisterStore.GetLoadAsync(db, loadId, ct);
+        if (load is null || load.Status == LoadStatus.Cancelled || load.Stops.Count == 0) return;
+
+        var stopIds = load.Stops.Select(stop => stop.Id).ToList();
+        var stopMappings = await db.IntegrationMappings.AsNoTracking()
+            .Where(item => item.Active && item.Provider == Provider && item.TmsEntityType == "LoadStop" && stopIds.Contains(item.TmsEntityId))
+            .ToListAsync(ct);
+        var departed = stopMappings
+            .Select(item => (item.TmsEntityId, Progress: ReadProgress(item.Notes)))
+            .Where(item => item.Progress?.DepartureTime is not null)
+            .Select(item => item.TmsEntityId)
+            .ToHashSet();
+
+        var hasStarted = departed.Count > 0 || stopMappings.Any(item => ReadProgress(item.Notes)?.ArrivalTime is not null);
+        if (hasStarted && (load.Status is LoadStatus.Planned or LoadStatus.Dispatched))
+            load.Status = LoadStatus.InProgress;
+
+        if (!RunCompletionEvidence.CanAutoComplete(load, departed, logger)) return;
+        load.Status = LoadStatus.Completed;
+        if (coreLoadExists)
+        {
+            if (!await db.DriverStatusLogs.AnyAsync(item => item.LoadId == load.Id && item.Status == RunCompletionPersistenceGuard.CompletionEvidenceStatus, ct))
+                db.DriverStatusLogs.Add(new DriverStatusLog
+                {
+                    LoadId = load.Id,
+                    Status = RunCompletionPersistenceGuard.CompletionEvidenceStatus,
+                    Notes = $"All {load.Stops.Count} planned stops have Samsara departure events; run completed at {DateTimeOffset.UtcNow:u}.",
+                    CapturedBy = "Samsara route audit feed"
+                });
+        }
+        else
+        {
+            await PlanningRegisterStore.SaveLoadAsync(db, load, "Samsara route audit feed", ct);
         }
     }
 

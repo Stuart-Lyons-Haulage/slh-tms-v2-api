@@ -105,7 +105,6 @@ builder.Services.AddSingleton(_ =>
 builder.Services.Configure<HgvVehicleProfile>(builder.Configuration.GetSection("Routing:HgvVehicleProfile"));
 builder.Services.Configure<AzureMapsMatrixOptions>(builder.Configuration.GetSection("Routing:AzureMapsMatrix"));
 builder.Services.Configure<BackloadMatchingOptions>(builder.Configuration.GetSection("Optimisation:Backload"));
-builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta:Live"));
 builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
 builder.Services.Configure<NightlyArchiveOptions>(builder.Configuration.GetSection("Archive"));
 
@@ -175,8 +174,6 @@ builder.Services.AddScoped<DotTrackingTelemetryStore>();
 builder.Services.AddScoped<IAzureMapsMatrixService, AzureMapsMatrixService>();
 builder.Services.AddScoped<IBackloadMatchingService, BackloadMatchingService>();
 builder.Services.AddScoped<BackloadOperationsService>();
-builder.Services.AddScoped<LiveEtaCalculator>();
-builder.Services.AddScoped<EtaAccuracyProcessor>();
 builder.Services.AddScoped<CustomerNotificationService>();
 builder.Services.AddScoped<FuelOptimisationService>();
 builder.Services.AddSingleton<RoadTechLiveSnapshot>();
@@ -296,15 +293,13 @@ builder.Services.AddHttpClient<SamsaraClient>()
 builder.Services.Configure<HostOptions>(options =>
     options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
-builder.Services.AddHostedService<DotTrackingIngestionService>();
+// Samsara is the tracking authority. The TMS consumes its route audit feed for
+// per-stop arrival/departure progress and does not poll RoadTech for live positions.
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<TachoDriverHoursRefreshWorker>();
 builder.Services.AddHostedService<IntegrationSyncSchedulerBackgroundService>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
-builder.Services.AddHostedService<BackloadTriggerHostedService>();
-builder.Services.AddHostedService<LiveEtaService>();
-builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
@@ -331,8 +326,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
         {
             var accessToken = ctx.Request.Query["access_token"];
             var path = ctx.HttpContext.Request.Path;
-            if (!string.IsNullOrWhiteSpace(accessToken) &&
-                (path.StartsWithSegments("/dispatch-hub") || path.StartsWithSegments("/eta-hub")))
+            if (!string.IsNullOrWhiteSpace(accessToken) && path.StartsWithSegments("/dispatch-hub"))
                 ctx.Token = accessToken;
             return Task.CompletedTask;
         },
@@ -408,7 +402,6 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
     await SchemaMigrationRunner.ApplyAsync(db, logger, applyDeferredSchemaMigrations, CancellationToken.None);
     try
     {
-        await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);
         await CustomerNotificationStore.EnsureSchemaAsync(db, CancellationToken.None);
         var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
         if (quarantinedFleetioPlaceholders > 0)
@@ -418,9 +411,6 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
             logger.LogWarning(
                 "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
                 trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
-        var repairedGeofenceLinks = await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, CancellationToken.None);
-        if (repairedGeofenceLinks > 0)
-            logger.LogWarning("Repaired {GeofenceLinkCount} legacy active Site/geofence assignments; ambiguous geofences remain active but unlinked for review.", repairedGeofenceLinks);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
         await register.LinkRegistered(25, CancellationToken.None);
     }
@@ -469,7 +459,6 @@ app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 
 app.MapControllers();
 app.MapHub<DispatchHub>("/dispatch-hub").WithMetadata(new DisableRequestTimeoutAttribute());
-app.MapHub<EtaHub>("/eta-hub").WithMetadata(new DisableRequestTimeoutAttribute());
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
 app.Run();

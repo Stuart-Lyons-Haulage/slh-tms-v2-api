@@ -68,7 +68,6 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
                         DepotDeadline: Text(payload, "depotDeadline"),
                         LatestCollectionTime: Text(payload, "latestCollectionTime") ?? Text(payload, "wallBoardDeadline"),
                         WallBoardDeadline: Text(payload, "wallBoardDeadline") ?? Text(payload, "latestCollectionTime"),
-                        FirstGeofenceResetsLiveEtos: Bool(payload, "firstGeofenceResetsLiveEtos") ?? true,
                         Source: row.Source,
                         ReviewedAtUtc: row.ReviewedAtUtc ?? row.ReceivedAtUtc));
                 }
@@ -91,7 +90,6 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
                         CollectTo: Text(payload, "collectTo"),
                         DepotDeadline: Text(payload, "depotDeadline"),
                         LatestCollectionTime: Text(payload, "latestCollectionTime") ?? Text(payload, "collectTo") ?? Text(payload, "collectFrom"),
-                        FirstGeofenceResetsLiveEtos: Bool(payload, "firstGeofenceResetsLiveEtos") ?? true,
                         Source: row.Source,
                         ReviewedAtUtc: row.ReviewedAtUtc ?? row.ReceivedAtUtc));
                 }
@@ -106,7 +104,6 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
             Aliases: site.Aliases,
             LatestCollectionTime: cutoffs.Select(item => item.LatestCollectionTime).Concat(routeTimings.Select(item => item.LatestCollectionTime)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)),
             WallBoardDeadline: cutoffs.Select(item => item.WallBoardDeadline).Concat(routeTimings.Select(item => item.LatestCollectionTime)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)),
-            FirstGeofenceResetsLiveEtos: cutoffs.Any(item => item.FirstGeofenceResetsLiveEtos) || routeTimings.Any(item => item.FirstGeofenceResetsLiveEtos),
             Cutoffs: cutoffs
                 .OrderBy(item => item.Plan)
                 .ThenBy(item => item.PalletType)
@@ -144,17 +141,12 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
         });
         await db.SaveChangesAsync(ct);
 
-        // Alias changes are operational Master Data. Apply any unique exact alias match to
-        // an unlinked Falcon geofence immediately rather than waiting for a re-import/restart.
-        var geofenceLinksRepaired = await GeofenceSiteAliasRepair.EnsureAsync(db, ct);
-
         return Ok(new
         {
             site.Id,
             site.ExternalCode,
             site.Name,
             site.Aliases,
-            geofenceLinksRepaired,
             masterDataAuthority = "SQL/TMS",
             sharePointSync = "disabled"
         });
@@ -298,7 +290,6 @@ public sealed record SiteTimingProfileDto(
     string? Aliases,
     string? LatestCollectionTime,
     string? WallBoardDeadline,
-    bool FirstGeofenceResetsLiveEtos,
     IReadOnlyCollection<SiteCutoffTimingDto> Cutoffs,
     IReadOnlyCollection<SiteRouteTimingDto> RouteTimings);
 
@@ -319,7 +310,6 @@ public sealed record SiteCutoffTimingDto(
     string? DepotDeadline,
     string? LatestCollectionTime,
     string? WallBoardDeadline,
-    bool FirstGeofenceResetsLiveEtos,
     string? Source,
     DateTimeOffset ReviewedAtUtc);
 
@@ -334,6 +324,5 @@ public sealed record SiteRouteTimingDto(
     string? CollectTo,
     string? DepotDeadline,
     string? LatestCollectionTime,
-    bool FirstGeofenceResetsLiveEtos,
     string? Source,
     DateTimeOffset ReviewedAtUtc);

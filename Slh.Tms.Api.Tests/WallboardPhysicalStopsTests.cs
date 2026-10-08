@@ -50,12 +50,5 @@ public sealed class WallboardPhysicalStopsTests
         Assert.Equal("Run 1 AM", RunDisplayLabel.For(load));
     }
 
-    [Fact]
-    public void Fresh_dot_position_and_stop_coordinates_allow_eta_without_geofence_evidence()
-    {
-        var now = new DateTimeOffset(2026, 9, 8, 10, 0, 0, TimeSpan.Zero);
-        var stop = new LoadStop { Name = "Deliver · Bracknell", Latitude = 51.41m, Longitude = -0.75m };
 
-        Assert.True(LiveEtaEligibility.CanRoute((-0.80m, 51.30m), stop, now.AddMinutes(-2), now));
-    }
 }
