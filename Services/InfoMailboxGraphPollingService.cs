@@ -30,7 +30,10 @@ public sealed class InfoMailboxGraphOptions
     // Graph delivery order is not a reliable watermark: a later-received message can
     // be visible before an earlier one. Revisit a full operational day so that such
     // messages cannot be skipped merely because another email was retained first.
-    public int OverlapMinutes { get; set; } = 1440;
+    // Revisit a short recovery window for delayed Graph delivery without
+    // re-querying a full operational day on every minute poll. Evidence is
+    // persisted in StagedImports, so older messages remain replayable there.
+    public int OverlapMinutes { get; set; } = 15;
     public int MaxMessagesPerPoll { get; set; } = 250;
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
 
@@ -157,7 +160,7 @@ public sealed class InfoMailboxGraphPollingService(
 
         var since = lastEvidenceUtc is null
             ? DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.InitialLookbackHours, 1, 168))
-            : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 60, 10080));
+            : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 10, 1440));
 
         var mappedDomains = await db.CustomerEmailRoutes.AsNoTracking()
             .Where(route => route.Active && route.SenderDomain != null)
