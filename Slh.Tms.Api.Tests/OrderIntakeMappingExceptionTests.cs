@@ -27,11 +27,11 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
             bodyText = "Please collecty 48pt from tangmere today\n15pt Fresh import spit"
         });
         var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("\"ignored\":true", await response.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Contains("\"ignored\":false", await response.Content.ReadAsStringAsync());
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains("market-mapping-")));
+        Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains("market-mapping-")));
     }
 
     [Fact]
@@ -64,12 +64,12 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
 
         var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Assert.Contains("\"ignored\":true", responseBody);
+        Assert.Contains("\"ignored\":false", responseBody);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
+        Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
         Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
     }
 
@@ -103,13 +103,13 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
 
         var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Assert.Contains("\"ignored\":true", responseBody);
+        Assert.Contains("\"ignored\":false", responseBody);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
+        Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
         Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
     }
 
@@ -143,13 +143,13 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
 
         var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Assert.Contains("\"ignored\":true", responseBody);
+        Assert.Contains("\"ignored\":false", responseBody);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
+        Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
         Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
     }
 
