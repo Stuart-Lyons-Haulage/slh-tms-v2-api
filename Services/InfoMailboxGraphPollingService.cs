@@ -110,6 +110,8 @@ public sealed class InfoMailboxGraphPollingService(
 {
     private readonly SemaphoreSlim pollGate = new(1, 1);
     private readonly SemaphoreSlim manualPollSignal = new(0);
+    private readonly object manualPollGate = new();
+    private DateOnly? queuedManualReceivedDate;
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -141,7 +143,13 @@ public sealed class InfoMailboxGraphPollingService(
         {
             try
             {
-                await PollOnceAsync(stoppingToken);
+                DateOnly? manualReceivedDate;
+                lock (manualPollGate)
+                {
+                    manualReceivedDate = queuedManualReceivedDate;
+                    queuedManualReceivedDate = null;
+                }
+                await PollOnceAsync(stoppingToken, manualReceivedDate);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -163,19 +171,34 @@ public sealed class InfoMailboxGraphPollingService(
         }
     }
 
-    public void RequestImmediatePoll()
+    public DateOnly RequestImmediatePoll()
     {
+        var receivedDate = CurrentMailboxDate();
+        lock (manualPollGate) queuedManualReceivedDate = receivedDate;
         manualPollSignal.Release();
-        logger.LogInformation("An immediate Info mailbox Graph poll was queued.");
+        logger.LogInformation("An immediate Info mailbox Graph poll for mailbox-received day {ReceivedDate} was queued.", receivedDate);
+        return receivedDate;
     }
 
-    public async Task PollOnceAsync(CancellationToken ct)
+    internal static DateOnly CurrentMailboxDate() =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+
+    internal static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) MailboxDayWindow(DateOnly date)
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        var localStart = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        var localEnd = date.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart, zone), TimeSpan.Zero),
+            new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localEnd, zone), TimeSpan.Zero));
+    }
+
+    public async Task PollOnceAsync(CancellationToken ct, DateOnly? manualReceivedDate = null)
     {
         await pollGate.WaitAsync(ct);
         health.BeginAttempt();
         try
         {
-            await PollCoreAsync(ct);
+            await PollCoreAsync(ct, manualReceivedDate);
         }
         finally
         {
@@ -183,7 +206,7 @@ public sealed class InfoMailboxGraphPollingService(
         }
     }
 
-    private async Task PollCoreAsync(CancellationToken ct)
+    private async Task PollCoreAsync(CancellationToken ct, DateOnly? manualReceivedDate)
     {
         var pollId = Guid.NewGuid().ToString("N");
         var timer = Stopwatch.StartNew();
@@ -205,9 +228,12 @@ public sealed class InfoMailboxGraphPollingService(
             .Select(item => (DateTimeOffset?)item.ReceivedAtUtc)
             .FirstOrDefaultAsync(ct);
 
-        var since = lastEvidenceUtc is null
-            ? DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.InitialLookbackHours, 1, 168))
-            : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 10, 1440));
+        var since = manualReceivedDate is null
+            ? lastEvidenceUtc is null
+                ? DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.InitialLookbackHours, 1, 168))
+                : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 10, 1440))
+            : MailboxDayWindow(manualReceivedDate.Value).StartUtc;
+        var until = manualReceivedDate is null ? (DateTimeOffset?)null : MailboxDayWindow(manualReceivedDate.Value).EndUtc;
 
         var mappedDomains = await db.CustomerEmailRoutes.AsNoTracking()
             .Where(route => route.Active && route.SenderDomain != null)
@@ -218,14 +244,18 @@ public sealed class InfoMailboxGraphPollingService(
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         stage = "Graph mailbox scan";
-        var messages = await FetchMessagesAsync(client, token.Token, since, customerDomains, ct);
+        var messages = await FetchMessagesAsync(client, token.Token, since, until, customerDomains, ct);
         var seen = messages.Count;
         var ingested = 0;
 
         stage = "attachment download and order intake";
         var messageIndex = 0;
-        foreach (var message in messages.OrderBy(item => item.ReceivedAtUtc))
+        const int chunkSize = 25;
+        foreach (var chunk in messages.OrderBy(item => item.ReceivedAtUtc).Chunk(chunkSize))
         {
+            logger.LogInformation("Info mailbox Graph poll {PollId} processing message chunk {ChunkStart}-{ChunkEnd} of {Total}.", pollId, messageIndex + 1, messageIndex + chunk.Length, seen);
+            foreach (var message in chunk)
+            {
             messageIndex++;
             stage = $"attachment download and order intake ({messageIndex} of {seen})";
             ct.ThrowIfCancellationRequested();
@@ -266,6 +296,8 @@ public sealed class InfoMailboxGraphPollingService(
 
             await controller.Intake(request, ct);
             ingested++;
+            }
+            logger.LogInformation("Info mailbox Graph poll {PollId} completed chunk through message {MessageIndex} of {Total}.", pollId, messageIndex, seen);
         }
 
         health.Success(seen, ingested);
@@ -294,11 +326,15 @@ public sealed class InfoMailboxGraphPollingService(
         HttpClient client,
         string accessToken,
         DateTimeOffset since,
+        DateTimeOffset? until,
         IReadOnlySet<string> customerDomains,
         CancellationToken ct)
     {
         var mailbox = Uri.EscapeDataString(options.Mailbox);
-        var filter = Uri.EscapeDataString($"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}");
+        var dateRange = until is null
+            ? $"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}"
+            : $"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ} and receivedDateTime lt {until.Value.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}";
+        var filter = Uri.EscapeDataString(dateRange);
         string? next =
             $"users/{mailbox}/mailFolders/inbox/messages" +
             "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,body,bodyPreview,from,toRecipients,ccRecipients,importance,webLink,hasAttachments" +
@@ -313,7 +349,7 @@ public sealed class InfoMailboxGraphPollingService(
         // info@ or be filed by an Outlook rule. Read the whole mailbox date window,
         // then retain only approved customer sender domains. This avoids relying on
         // visible To/Cc recipients or fragile subject-specific searches.
-        var dateFilter = Uri.EscapeDataString($"receivedDateTime ge {since.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}");
+        var dateFilter = Uri.EscapeDataString(dateRange);
         var mailboxSearch =
             $"users/{mailbox}/messages" +
             "?$select=id,internetMessageId,conversationId,subject,receivedDateTime,body,bodyPreview,from,toRecipients,ccRecipients,importance,webLink,hasAttachments" +
@@ -330,7 +366,8 @@ public sealed class InfoMailboxGraphPollingService(
                 limit,
                 ct,
                 since,
-                message => IsCustomerDomain(message.SenderAddress, customerDomains));
+                message => IsCustomerDomain(message.SenderAddress, customerDomains),
+                until);
             var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
             foreach (var customerMessage in customerMessages)
             {
@@ -360,7 +397,8 @@ public sealed class InfoMailboxGraphPollingService(
         int limit,
         CancellationToken ct,
         DateTimeOffset? minimumReceivedUtc = null,
-        Func<GraphMailboxMessage, bool>? predicate = null)
+        Func<GraphMailboxMessage, bool>? predicate = null,
+        DateTimeOffset? maximumReceivedUtc = null)
     {
         var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         while (!string.IsNullOrWhiteSpace(next) && messages.Count < limit)
@@ -382,6 +420,7 @@ public sealed class InfoMailboxGraphPollingService(
                     var parsed = ParseMessage(item);
                     if (parsed is not null &&
                         (minimumReceivedUtc is null || parsed.ReceivedAtUtc >= minimumReceivedUtc.Value) &&
+                        (maximumReceivedUtc is null || parsed.ReceivedAtUtc < maximumReceivedUtc.Value) &&
                         (predicate is null || predicate(parsed)) &&
                         knownIds.Add(parsed.Id))
                         messages.Add(parsed);
