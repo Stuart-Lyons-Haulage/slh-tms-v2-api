@@ -426,9 +426,6 @@ public static class EmbeddedGeofenceEngine
 
     private static bool StopMatchesFence(LoadStop stop, EmbeddedFence fence, PlannerSourceMasterDataResolver? siteResolver)
     {
-        var canonical = siteResolver?.CanonicalGeofenceMatch(stop.Name, fence);
-        if (canonical is not null) return canonical.Value;
-
         return GeofencePlanningMatch.SamePhysicalSite(stop, fence) ||
                NamesOverlap(stop.Name, fence.Name) ||
                NamesOverlap(stop.Address, fence.Name);

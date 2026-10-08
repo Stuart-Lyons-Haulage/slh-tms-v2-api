@@ -10,20 +10,13 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/run-progress")]
 [Authorize]
 public sealed class RunProgressController(
-    TmsDbContext db,
-    IConfiguration configuration) : ControllerBase
+    TmsDbContext db) : ControllerBase
 {
-    [HttpGet, AllowAnonymous]
+    [HttpGet]
     public async Task<IActionResult> Get(
-        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
         [FromQuery] DateOnly? date,
         CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(displayKey) && Request.Query.TryGetValue("key", out var queryKey))
-            displayKey = queryKey.FirstOrDefault();
-        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
-        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
-
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
         var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))

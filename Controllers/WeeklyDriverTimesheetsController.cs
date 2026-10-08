@@ -393,6 +393,8 @@ public sealed class WeeklyDriverTimesheetsController(
                 }
                 movement = movement.DistinctBy(item => item.ProviderEventId).OrderBy(item => item.EventTimeUtc).ToList();
 
+                var lastMovementEvent = movement.LastOrDefault();
+
                 var firstMovement = movement.Count > 0 ? movement.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var lastMovement = movement.Count > 0 ? movement.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var movementSpanMinutes = firstMovement is not null && lastMovement is not null
