@@ -84,7 +84,7 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolLineItemRegex = new(
-        @"(?m)^\s*(?<material>\d{6,})\s+(?<description>.+?)\s+(?<carrier>[A-Z0-9]+(?:\s+[A-Z0-9]+)*\s+EP)\s+(?<quality>.+?)\s+(?<variant>.+?)\s+(?<carrierQty>\d{1,6})\s+(?<unitsPerCarrier>\d{1,6})\s+(?<totalQty>\d[\d.,]*)\s*$",
+        @"(?m)^\s*(?<material>\d{6,})\s+(?<description>.+?)\s+(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)\s+(?<quality>.+?)\s+(?<variant>.+?)\s+(?<carrierQty>\d{1,6})\s+(?<unitsPerCarrier>\d{1,6})\s+(?<totalQty>\d[\d.,]*)\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     static SpecialistMailboxOrderParser()
