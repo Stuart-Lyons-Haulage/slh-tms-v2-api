@@ -18,7 +18,12 @@ public sealed class CapacityController : ControllerBase
                 request.EuroPallets,
                 request.UnknownPallets,
                 request.StandardCapacity ?? PalletCapacityCalculator.DefaultStandardCapacity,
-                request.EuroCapacity ?? PalletCapacityCalculator.DefaultEuroCapacity));
+                request.EuroCapacity ?? PalletCapacityCalculator.DefaultEuroCapacity,
+                null,
+                PalletCapacityCalculator.DefaultTrolleyCapacity,
+                request.StackablePallets,
+                request.StackingApproved,
+                request.StackingLevels ?? 2m));
         }
         catch (ArgumentOutOfRangeException exception)
         {
@@ -32,4 +37,7 @@ public sealed record PalletCapacityRequest(
     decimal? EuroPallets,
     decimal? UnknownPallets = null,
     decimal? StandardCapacity = null,
-    decimal? EuroCapacity = null);
+    decimal? EuroCapacity = null,
+    decimal? StackablePallets = null,
+    bool StackingApproved = false,
+    decimal? StackingLevels = null);

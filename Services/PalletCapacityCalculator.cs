@@ -13,11 +13,15 @@ public static class PalletCapacityCalculator
         decimal standardCapacity = DefaultStandardCapacity,
         decimal euroCapacity = DefaultEuroCapacity,
         decimal? trolleys = null,
-        decimal trolleyCapacity = DefaultTrolleyCapacity)
+        decimal trolleyCapacity = DefaultTrolleyCapacity,
+        decimal? stackablePallets = null,
+        bool stackingApproved = false,
+        decimal stackingLevels = 2m)
     {
         if (standardCapacity <= 0) throw new ArgumentOutOfRangeException(nameof(standardCapacity));
         if (euroCapacity <= 0) throw new ArgumentOutOfRangeException(nameof(euroCapacity));
         if (trolleyCapacity <= 0) throw new ArgumentOutOfRangeException(nameof(trolleyCapacity));
+        if (stackingLevels < 1) throw new ArgumentOutOfRangeException(nameof(stackingLevels));
         if (standardPallets < 0 || euroPallets < 0 || unknownPallets < 0 || trolleys < 0)
             throw new ArgumentOutOfRangeException(nameof(standardPallets), "Load-unit quantities cannot be negative.");
 
@@ -31,14 +35,16 @@ public static class PalletCapacityCalculator
         // 2 Euros leaves 24, and so on against the normal 26-position trailer capacity.
         // Keep euroCapacity in the contract for compatibility with trailer master data,
         // but do not use it to create a separate 33-Euro capacity for mixed loads.
-        var standardEquivalentPallets = standard + euro;
+        var physicalPallets = standard + euro;
+        var approvedStackable = stackingApproved ? Math.Min(Math.Max(stackablePallets ?? 0m, 0m), physicalPallets) : 0m;
+        var standardEquivalentPallets = physicalPallets - approvedStackable + approvedStackable / stackingLevels;
         var palletUtilisation = standardEquivalentPallets / standardCapacity;
 
         // SLH trolley rule: an otherwise empty trailer carries 41 trolleys. Each pallet position
         // used reduces that trolley allowance by one: 1 pallet => 40 trolleys, 2 => 39, etc.
         // The rule applies to both Standard and Euro pallets and is evaluated alongside the
         // pallet-footprint calculation. Whichever constraint is tighter becomes authoritative.
-        var trolleyPositionsUsed = trolley + standard + euro;
+        var trolleyPositionsUsed = trolley + standardEquivalentPallets;
         var trolleyUtilisation = trolleyPositionsUsed / trolleyCapacity;
         var utilisation = Math.Max(palletUtilisation, trolleyUtilisation);
         var utilisationPercent = Math.Round(utilisation * 100m, 1, MidpointRounding.AwayFromZero);
@@ -70,7 +76,11 @@ public static class PalletCapacityCalculator
             trolleyCapacity,
             trolleyPositionsUsed,
             trolleyRemaining,
-            Math.Round(trolleyUtilisation * 100m, 1, MidpointRounding.AwayFromZero));
+            Math.Round(trolleyUtilisation * 100m, 1, MidpointRounding.AwayFromZero),
+            physicalPallets,
+            approvedStackable,
+            stackingLevels,
+            stackingApproved);
     }
 }
 
@@ -89,4 +99,8 @@ public sealed record PalletCapacityResult(
     decimal TrolleyCapacity = PalletCapacityCalculator.DefaultTrolleyCapacity,
     decimal TrolleyPositionsUsed = 0m,
     decimal TrolleyPositionsRemaining = PalletCapacityCalculator.DefaultTrolleyCapacity,
-    decimal TrolleyUtilisationPercent = 0m);
+    decimal TrolleyUtilisationPercent = 0m,
+    decimal PhysicalPallets = 0m,
+    decimal ApprovedStackablePallets = 0m,
+    decimal StackingLevels = 1m,
+    bool StackingApproved = false);

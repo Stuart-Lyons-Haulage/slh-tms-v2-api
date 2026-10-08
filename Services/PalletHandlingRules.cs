@@ -1,7 +1,31 @@
 namespace Slh.Tms.Api.Services;
 
+using System.Text.Json;
+
 public static class PalletHandlingRules
 {
+    public static PalletStackingResult ResolveStacking(string? customer, string? sourcePayloadJson, string? sourceUnitType)
+    {
+        // Deliberately narrow, opt-in rule. A CHEP pallet alone is never sufficient evidence:
+        // the source must also identify the approved IFCO tray/material family.
+        var customerKey = Normalise(customer);
+        var sourceKey = Normalise(sourceUnitType);
+        if (!customerKey.Contains("BARFOOT") || !sourceKey.Contains("PALLET"))
+            return new(false, 1m, "No approved stacking rule matched", 0m);
+
+        var materialText = sourcePayloadJson ?? string.Empty;
+        try
+        {
+            using var json = JsonDocument.Parse(materialText);
+            materialText = json.RootElement.ToString();
+        }
+        catch (JsonException) { }
+        var materialKey = Normalise(materialText);
+        var approvedMaterial = new[] { "CHEP1210", "4310", "6420", "6424", "IFCOGREENPLUS" }.Any(materialKey.Contains);
+        return approvedMaterial
+            ? new(true, 2m, "Barfoots + IFCO Green Plus/CHEP1210 source evidence; planner approval required", 0m)
+            : new(false, 1m, "CHEP/pallet material is not an approved double-stack rule", 0m);
+    }
     public static PalletHandlingResult Resolve(string? customer, string? collectionSite, string? destination, string? sourceUnitType)
     {
         var customerKey = Normalise(customer);
@@ -77,3 +101,5 @@ public sealed record PalletHandlingResult(
     string ColourKey,
     string RuleSource,
     bool IsPallet);
+
+public sealed record PalletStackingResult(bool Eligible, decimal MaxLevels, string RuleSource, decimal StackablePallets);

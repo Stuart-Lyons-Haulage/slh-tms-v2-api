@@ -97,4 +97,26 @@ public sealed class PalletCapacityCalculatorTests
         Assert.True(result.TrolleyUtilisationPercent > 100m);
         Assert.Equal("Red", result.Status);
     }
+
+    [Fact]
+    public void ApprovedDoubleStackingKeepsPhysicalCountButUsesWholeFloorPositions()
+    {
+        var result = PalletCapacityCalculator.Calculate(45, 0, 0, 26, 33, 0, 41, 45, true, 2);
+
+        Assert.Equal(45m, result.PhysicalPallets);
+        Assert.Equal(45m, result.ApprovedStackablePallets);
+        Assert.Equal(22.5m, result.StandardEquivalentUsed);
+        Assert.Equal(23m, Math.Ceiling(result.StandardEquivalentUsed));
+        Assert.Equal("Green", result.Status);
+    }
+
+    [Fact]
+    public void UnapprovedStackingDoesNotChangeCapacity()
+    {
+        var result = PalletCapacityCalculator.Calculate(45, 0, 0, 26, 33, 0, 41, 45, false, 2);
+
+        Assert.Equal(45m, result.StandardEquivalentUsed);
+        Assert.False(result.StackingApproved);
+        Assert.Equal("Red", result.Status);
+    }
 }
