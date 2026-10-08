@@ -68,7 +68,7 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     private static readonly Regex EuroPoolSalesOrderRegex = new(
-        @"Sales\s+order\s+number\s*:\s*(?<order>\d{6,})\b",
+        @"Sales\s+order\s+number\s*:\s*(?<order>\d{6,})(?!\d)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolLoadingDateRegex = new(
