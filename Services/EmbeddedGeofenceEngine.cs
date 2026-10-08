@@ -247,10 +247,11 @@ public static class EmbeddedGeofenceEngine
         List<Site> sites;
         try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
         catch { sites = new List<Site>(); db.ChangeTracker.Clear(); }
+        var operational = await OperationalFencesAsync(db, ct);
         List<SiteGeofence> overrides;
         try
         {
-            var names = Fences.Value.Select(fence => NormalizeName(fence.Name)).ToList();
+            var names = operational.Select(fence => NormalizeName(fence.Name)).ToList();
             overrides = await db.SiteGeofences.AsNoTracking()
                 .Where(x => names.Contains(x.NormalizedName))
                 .ToListAsync(ct);
@@ -264,7 +265,7 @@ public static class EmbeddedGeofenceEngine
             .GroupBy(x => x.NormalizedName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(x => x.Key, x => x.OrderByDescending(item => item.UpdatedAtUtc).First(), StringComparer.OrdinalIgnoreCase);
 
-        return Fences.Value.Select(fence =>
+        return operational.Select(fence =>
         {
             overridesByName.TryGetValue(NormalizeName(fence.Name), out var linked);
             if (IsLocationOnly(linked)) return new EmbeddedFenceStatus(fence, null, null, null, true);

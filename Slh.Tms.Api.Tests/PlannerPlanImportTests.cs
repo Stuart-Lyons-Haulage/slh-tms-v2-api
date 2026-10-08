@@ -24,15 +24,15 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public void Mixed_capacity_uses_26_standard_and_33_euro()
+    public void Mixed_capacity_uses_one_to_one_euro_to_standard_ratio()
     {
         var run = Run(new DateOnly(2026, 8, 18), "COL-01", true, [
             Stop(1, 13, "Std"),
             Stop(2, 16, "Euro")
         ]);
         var result = PlannerPlanImportRules.Capacity(run);
-        Assert.Equal("Green", result.Status);
-        Assert.Equal(98.5m, result.UtilisationPercent);
+        Assert.Equal("Red", result.Status);
+        Assert.Equal(111.5m, result.UtilisationPercent);
     }
 
     [Theory]

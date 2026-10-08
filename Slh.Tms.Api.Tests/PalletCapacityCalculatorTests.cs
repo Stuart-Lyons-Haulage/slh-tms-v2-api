@@ -22,18 +22,18 @@ public sealed class PalletCapacityCalculatorTests
     }
 
     [Fact]
-    public void EuroFullLoad_IsOneHundredPercent()
+    public void EuroPallets_UseStandardPositionRatio()
     {
-        var result = PalletCapacityCalculator.Calculate(0, 33);
-        Assert.Equal(100m, result.UtilisationPercent);
+        var result = PalletCapacityCalculator.Calculate(0, 1);
+        Assert.Equal(3.8m, result.UtilisationPercent);
         Assert.Equal("Green", result.Status);
     }
 
     [Fact]
-    public void EuroOverCapacity_IsRed()
+    public void TwentySevenEuroPallets_ExceedStandardCapacity()
     {
-        var result = PalletCapacityCalculator.Calculate(0, 34);
-        Assert.Equal(103m, result.UtilisationPercent);
+        var result = PalletCapacityCalculator.Calculate(0, 27);
+        Assert.Equal(103.8m, result.UtilisationPercent);
         Assert.Equal("Red", result.Status);
     }
 
@@ -48,10 +48,11 @@ public sealed class PalletCapacityCalculatorTests
     }
 
     [Fact]
-    public void MixedLoad_UsesProportionalFootprint()
+    public void MixedLoad_UsesOneToOneEuroToStandardRatio()
     {
-        var result = PalletCapacityCalculator.Calculate(10, 20);
-        Assert.Equal(99.1m, result.UtilisationPercent);
+        var result = PalletCapacityCalculator.Calculate(10, 10);
+        Assert.Equal(76.9m, result.UtilisationPercent);
+        Assert.Equal(20m, result.StandardEquivalentUsed);
         Assert.Equal("Green", result.Status);
     }
 
@@ -59,7 +60,7 @@ public sealed class PalletCapacityCalculatorTests
     public void MixedOverCapacity_IsRed()
     {
         var result = PalletCapacityCalculator.Calculate(13, 17);
-        Assert.Equal(101.5m, result.UtilisationPercent);
+        Assert.Equal(115.4m, result.UtilisationPercent);
         Assert.Equal("Red", result.Status);
     }
 

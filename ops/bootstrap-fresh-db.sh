@@ -88,7 +88,7 @@ deferred_count="$(docker exec "$container_name" /opt/mssql-tools18/bin/sqlcmd \
 booking_table_count="$(docker exec "$container_name" /opt/mssql-tools18/bin/sqlcmd \
   -S localhost -U sa -P "$sql_password" -C -d "$database_name" -h -1 -W \
   -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.tables WHERE name IN (N'BookingReservations', N'BookingReservationRevisions', N'BookingReservationAllocations', N'OperationalHistoryEvents', N'InvoiceRecords', N'InvoiceRecordLines');" | tr -d '[:space:]')"
-if [[ "$history_count" != "71" || "$latest_version" != "73" || "$deferred_count" != "2" || "$booking_table_count" != "6" ]]; then
+if [[ "$history_count" != "78" || "$latest_version" != "80" || "$deferred_count" != "2" || "$booking_table_count" != "6" ]]; then
   echo "Fresh database migration history/schema is not contiguous: count=$history_count latest=$latest_version deferred_missing=$deferred_count booking_tables=$booking_table_count" >&2
   sed -n '1,800p' "$api_log" >&2
   exit 1

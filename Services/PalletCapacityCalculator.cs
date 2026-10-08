@@ -26,9 +26,13 @@ public static class PalletCapacityCalculator
         var unknown = unknownPallets ?? 0m;
         var trolley = trolleys ?? 0m;
 
-        // Standard and Euro pallets consume trailer footprint proportionally against the
-        // capacity recorded for the allocated trailer (default 26 standard / 33 Euro).
-        var palletUtilisation = (standard / standardCapacity) + (euro / euroCapacity);
+        // SLH planning rule: Euro and Standard pallets each consume one standard pallet
+        // position for utilisation. Therefore 1 Euro leaves 25 Standard positions,
+        // 2 Euros leaves 24, and so on against the normal 26-position trailer capacity.
+        // Keep euroCapacity in the contract for compatibility with trailer master data,
+        // but do not use it to create a separate 33-Euro capacity for mixed loads.
+        var standardEquivalentPallets = standard + euro;
+        var palletUtilisation = standardEquivalentPallets / standardCapacity;
 
         // SLH trolley rule: an otherwise empty trailer carries 41 trolleys. Each pallet position
         // used reduces that trolley allowance by one: 1 pallet => 40 trolleys, 2 => 39, etc.
@@ -38,7 +42,7 @@ public static class PalletCapacityCalculator
         var trolleyUtilisation = trolleyPositionsUsed / trolleyCapacity;
         var utilisation = Math.Max(palletUtilisation, trolleyUtilisation);
         var utilisationPercent = Math.Round(utilisation * 100m, 1, MidpointRounding.AwayFromZero);
-        var standardEquivalentUsed = Math.Round(utilisation * standardCapacity, 2, MidpointRounding.AwayFromZero);
+        var standardEquivalentUsed = Math.Round(standardEquivalentPallets, 2, MidpointRounding.AwayFromZero);
         var trolleyRemaining = Math.Max(trolleyCapacity - standard - euro - trolley, 0m);
 
         var status = unknown > 0
