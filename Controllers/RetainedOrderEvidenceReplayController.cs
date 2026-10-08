@@ -55,7 +55,6 @@ public sealed class RetainedOrderEvidenceReplayController(
         };
 
         var summary = new ReplaySummary();
-        var promotedOrderKeys = await LoadPromotedOrderKeys(ct);
         summary.LegacyMappingExceptionsArchived = await ArchiveLegacyMappingExceptions(
             receivedFromUtc,
             minimumPlanningDate,
@@ -146,10 +145,11 @@ public sealed class RetainedOrderEvidenceReplayController(
             summary.MessagesMatched++;
             summary.EligibleOrders += eligibleOrders.Count;
 
-            var replayableOrders = eligibleOrders
-                .Where(order => !IsPromotedOrder(order.Payload, promotedOrderKeys))
-                .ToList();
-            summary.AlreadyPromoted += eligibleOrders.Count - replayableOrders.Count;
+            // Replay every eligible projection. StageParsedForReplay now updates
+            // an existing promoted/approved row in place when the retained
+            // evidence corrects its operational date, preserving approval and
+            // audit history instead of silently hiding the corrected order.
+            var replayableOrders = eligibleOrders;
 
             // Use all eligible keys when refreshing pending candidates, including
             // already-promoted orders, so stale review copies are archived without
