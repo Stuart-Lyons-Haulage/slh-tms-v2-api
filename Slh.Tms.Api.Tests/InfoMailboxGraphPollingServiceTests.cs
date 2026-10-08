@@ -19,6 +19,22 @@ public sealed class InfoMailboxGraphPollingServiceTests
     }
 
     [Fact]
+    public void GraphHealthState_TracksActiveAndFailedPollStages()
+    {
+        var health = new InfoMailboxGraphHealthState();
+
+        health.BeginAttempt();
+        Assert.True(health.InProgress);
+        Assert.NotNull(health.LastAttemptUtc);
+
+        health.Failure(new InvalidOperationException("Graph timed out"), "Graph mailbox scan");
+
+        Assert.False(health.InProgress);
+        Assert.Equal("Graph mailbox scan", health.LastFailureStage);
+        Assert.Equal("Graph timed out", health.LastError);
+    }
+
+    [Fact]
     public void GraphMessage_IsMappedToCanonicalMailboxRequest()
     {
         using var document = JsonDocument.Parse("""
