@@ -584,7 +584,7 @@ public sealed class SpecialistMailboxOrderParser
 
     internal static EuroPoolPdfConfirmation? ParseEuroPoolConfirmationPdf(string text)
     {
-        if (!Regex.IsMatch(text, @"\bOrder\s*Confirmation", RegexOptions.IgnoreCase) ||
+        if (!Regex.IsMatch(text, @"Sales\s*order\s*number\s*:", RegexOptions.IgnoreCase) ||
             !Regex.IsMatch(text, @"Euro\s*Pool\s*System", RegexOptions.IgnoreCase))
             return null;
 
