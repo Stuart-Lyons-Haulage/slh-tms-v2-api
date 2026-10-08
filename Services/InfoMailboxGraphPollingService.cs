@@ -111,7 +111,7 @@ public sealed class InfoMailboxGraphPollingService(
     private readonly SemaphoreSlim pollGate = new(1, 1);
     private readonly SemaphoreSlim manualPollSignal = new(0);
     private readonly object manualPollGate = new();
-    private DateOnly? queuedManualReceivedDate;
+    private readonly Queue<DateOnly> queuedManualReceivedDates = new();
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -146,8 +146,9 @@ public sealed class InfoMailboxGraphPollingService(
                 DateOnly? manualReceivedDate;
                 lock (manualPollGate)
                 {
-                    manualReceivedDate = queuedManualReceivedDate;
-                    queuedManualReceivedDate = null;
+                    manualReceivedDate = queuedManualReceivedDates.Count > 0
+                        ? queuedManualReceivedDates.Dequeue()
+                        : null;
                 }
                 await PollOnceAsync(stoppingToken, manualReceivedDate);
             }
@@ -174,7 +175,7 @@ public sealed class InfoMailboxGraphPollingService(
     public DateOnly RequestImmediatePoll()
     {
         var receivedDate = CurrentMailboxDate();
-        lock (manualPollGate) queuedManualReceivedDate = receivedDate;
+        lock (manualPollGate) queuedManualReceivedDates.Enqueue(receivedDate);
         manualPollSignal.Release();
         logger.LogInformation("An immediate Info mailbox Graph poll for mailbox-received day {ReceivedDate} was queued.", receivedDate);
         return receivedDate;
