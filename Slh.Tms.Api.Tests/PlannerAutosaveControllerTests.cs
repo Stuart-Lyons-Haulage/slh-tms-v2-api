@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
@@ -36,7 +38,7 @@ public sealed class PlannerAutosaveControllerTests
         });
         await db.SaveChangesAsync();
 
-        var controller = new PlannerAutosaveController(db);
+        var controller = new PlannerAutosaveController(db, new PlanningStopTimingService(db, new SiteTimingRuleStore(db, NullLogger<SiteTimingRuleStore>.Instance)));
         var result = await controller.UpdateStops(loadId, [], CancellationToken.None);
 
         Assert.IsType<OkObjectResult>(result);
@@ -71,7 +73,7 @@ public sealed class PlannerAutosaveControllerTests
         });
         await db.SaveChangesAsync();
 
-        var controller = new PlannerAutosaveController(db);
+        var controller = new PlannerAutosaveController(db, new PlanningStopTimingService(db, new SiteTimingRuleStore(db, NullLogger<SiteTimingRuleStore>.Instance)));
         var result = await controller.UpdateStops(loadId, [], CancellationToken.None);
 
         Assert.IsType<BadRequestObjectResult>(result);
