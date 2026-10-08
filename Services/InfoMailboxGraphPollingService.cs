@@ -403,6 +403,10 @@ public sealed class InfoMailboxGraphPollingService(
                 ex);
         }
 
+        // The Inbox scan includes messages our own team sends to the Info mailbox.
+        // Those are operational plans, not customer orders. Exclude our own sender
+        // domain before attachments are downloaded or messages reach intake.
+        messages.RemoveAll(message => IsInternalSender(message.SenderAddress, options.Mailbox));
         return messages;
     }
 
@@ -799,6 +803,24 @@ public sealed class InfoMailboxGraphPollingService(
         value.TryGetInt64(out var parsed)
             ? parsed
             : null;
+
+    internal static bool IsInternalSender(string? senderAddress, string? mailboxAddress)
+    {
+        var senderDomain = AddressDomain(senderAddress);
+        var mailboxDomain = AddressDomain(mailboxAddress);
+        return senderDomain is not null && mailboxDomain is not null &&
+            (senderDomain.Equals(mailboxDomain, StringComparison.OrdinalIgnoreCase) ||
+             senderDomain.EndsWith("." + mailboxDomain, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? AddressDomain(string? address)
+    {
+        var normalized = address?.Trim().TrimEnd('.');
+        var at = normalized?.LastIndexOf('@') ?? -1;
+        return at < 1 || at == normalized!.Length - 1
+            ? null
+            : normalized[(at + 1)..];
+    }
 
     internal static bool IsCustomerDomain(string? senderAddress, IReadOnlySet<string> domains)
     {
