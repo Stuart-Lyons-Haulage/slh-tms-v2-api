@@ -19,6 +19,16 @@ public sealed class InfoMailboxGraphPollingServiceTests
     }
 
     [Fact]
+    public void ManualMailboxDayWindow_UsesLondonMidnightAndHandlesDst()
+    {
+        var (startUtc, endUtc) = InfoMailboxGraphPollingService.MailboxDayWindow(new DateOnly(2026, 10, 25));
+
+        Assert.Equal(new DateTimeOffset(2026, 10, 24, 23, 0, 0, TimeSpan.Zero), startUtc);
+        Assert.Equal(new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero), endUtc);
+        Assert.Equal(TimeSpan.FromHours(25), endUtc - startUtc);
+    }
+
+    [Fact]
     public void GraphHealthState_TracksActiveAndFailedPollStages()
     {
         var health = new InfoMailboxGraphHealthState();
