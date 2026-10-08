@@ -75,6 +75,34 @@ public sealed class OrderIntakeDuplicateCheckControllerTests
     }
 
     [Fact]
+    public async Task Morrisons_same_po_on_new_service_day_is_new_order()
+    {
+        await using var db = CreateDb();
+        db.TransportOrders.Add(new TransportOrder
+        {
+            Reference = "PORD000676/SITTINGBOURNE",
+            CustomerCode = "MORRISONS",
+            CollectionDate = new DateOnly(2026, 10, 8),
+            DeliveryDate = new DateOnly(2026, 10, 9),
+            SellerName = "NWF Merston",
+            StallNumber = "Morrisons Sittingbourne",
+            Pallets = 12
+        });
+        await db.SaveChangesAsync();
+
+        var controller = Controller(db);
+        var result = await controller.Check(new OrderIntakeDuplicateCheckRequest(
+            "Morrisons", "PORD000676", null, "PORD000676/SITTINGBOURNE",
+            new DateOnly(2026, 10, 9), new DateOnly(2026, 10, 10),
+            "NWF Merston", "Morrisons Sittingbourne", 12), CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("New order", json);
+        Assert.DoesNotContain("Amendment/update", json);
+    }
+
+    [Fact]
     public async Task Different_order_with_weak_overlap_remains_new()
     {
         await using var db = CreateDb();

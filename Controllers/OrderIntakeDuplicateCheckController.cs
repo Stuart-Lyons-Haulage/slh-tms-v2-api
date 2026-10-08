@@ -224,6 +224,14 @@ public sealed class OrderIntakeDuplicateCheckController(
 
         if (strongPoMatch)
         {
+            // Daily-repeat customers may legitimately reuse the same PO/reference
+            // on each service day. A different service day is a new movement, not
+            // an amendment to the prior day's order.
+            if (IsDailyRepeatCustomer(candidate.Customer) &&
+                candidate.CollectionDate is not null && existing.CollectionDate is not null &&
+                candidate.CollectionDate != existing.CollectionDate)
+                return null;
+
             if (CompleteComparable(candidate) && CompleteComparable(existing) && EquivalentCore(candidate, existing))
                 return "Exact duplicate";
             if (HasMaterialConflict(candidate, existing))
@@ -290,6 +298,11 @@ public sealed class OrderIntakeDuplicateCheckController(
         return a.Length == 0 || b.Length == 0 || a == b;
     }
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static bool IsDailyRepeatCustomer(string? customer)
+    {
+        var value = Normalise(customer);
+        return value is "MORRISONS" or "ALDI" or "WAITROSE";
+    }
     private static int Rank(string classification) => classification switch
     {
         "Exact duplicate" => 0,
