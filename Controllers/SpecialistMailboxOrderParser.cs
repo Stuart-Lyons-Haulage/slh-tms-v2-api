@@ -1062,12 +1062,15 @@ public sealed class SpecialistMailboxOrderParser
                             continue;
 
                         var temperature = CellText(row, temperatureIndex);
+                        var rowWarnings = new List<string>();
+                        if (string.IsNullOrWhiteSpace(temperature))
+                            rowWarnings.Add("Barfoots Aldi workbook row has no temperature requirement; confirm before approval.");
+
                         var discriminator = string.Join("|", new[] { collection, temperature }.Where(value => !string.IsNullOrWhiteSpace(value)));
                         var naturalKey = WorkbookNaturalKey(request, "BARFOOTS", collection, destination, date.Value, discriminator);
                         var reference = $"BARFOOTS-ALDI-{date:yyyyMMdd}-{NormaliseKey(destination)}-{NormaliseKey(discriminator)}";
                         if (reference.Length > 120) reference = reference[..120];
 
-                        var rowWarnings = new List<string>();
                         var payload = BuildPayload(
                             request,
                             reference,
