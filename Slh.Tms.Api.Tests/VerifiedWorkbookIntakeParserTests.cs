@@ -30,11 +30,26 @@ public sealed class VerifiedWorkbookIntakeParserTests
         Assert.Contains(result.Orders, order =>
             order.Payload.GetProperty("sellerName").GetString() == "Sefter North" &&
             order.Payload.GetProperty("collectionSite").GetString() == "Sefter North" &&
-            order.Payload.GetProperty("temperatureRequirement").GetString() == "+10℃");
+            order.Payload.GetProperty("temperatureRequirement").GetString() == "+8℃");
         Assert.Contains(result.Orders, order =>
             order.Payload.GetProperty("sellerName").GetString() == "Sefter South" &&
             order.Payload.GetProperty("collectionPoint").GetString() == "Sefter South" &&
             order.Payload.GetProperty("temperatureRequirement").GetString() == "+3℃");
+    }
+
+    [Fact]
+    public void BarfootsAldiWorkbook_MissingTemperatureInAttachment_IsFlaggedForReview()
+    {
+        var result = new IntakeParser().TryParse(
+            BarfootsRequest("barfoots-missing-temp", BuildBarfootsWorkbook(13, "", "")));
+
+        Assert.NotNull(result);
+        var north = Assert.Single(result!.Orders.Where(order =>
+            order.Payload.GetProperty("sellerName").GetString() == "Sefter North"));
+        Assert.Null(north.Payload.GetProperty("temperatureRequirement").GetString());
+        Assert.Equal("Thursday 24.09.2026.xlsx", north.Payload.GetProperty("sourceAttachmentName").GetString());
+        Assert.Contains(north.Warnings, warning =>
+            warning.Contains("temperature requirement", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -270,7 +285,7 @@ public sealed class VerifiedWorkbookIntakeParserTests
                 Convert.ToBase64String(workbook),
                 false)]);
 
-    private static byte[] BuildBarfootsWorkbook(int northPallets)
+    private static byte[] BuildBarfootsWorkbook(int northPallets, string northTemperature = "+8℃", string southTemperature = "+3℃")
     {
         var rows = $"""
             <row r="1"><c r="C1" t="inlineStr"><is><t>ALDI orders depot date:</t></is></c><c r="D1"><v>46289</v></c></row>
@@ -284,12 +299,12 @@ public sealed class VerifiedWorkbookIntakeParserTests
             <row r="4">
               <c r="A4"><v>46289</v></c><c r="B4" t="inlineStr"><is><t>ALDI CHELMSFORD</t></is></c>
               <c r="D4" t="inlineStr"><is><t>Sefter North</t></is></c>
-              <c r="E4" t="inlineStr"><is><t>+10℃</t></is></c><c r="F4"><v>{northPallets}</v></c>
+              <c r="E4" t="inlineStr"><is><t>{northTemperature}</t></is></c><c r="F4"><v>{northPallets}</v></c>
             </row>
             <row r="5">
               <c r="A5"><v>46289</v></c><c r="B5" t="inlineStr"><is><t>ALDI CHELMSFORD</t></is></c>
               <c r="D5" t="inlineStr"><is><t>Sefter South</t></is></c>
-              <c r="E5" t="inlineStr"><is><t>+3℃</t></is></c><c r="F5"><v>5</v></c>
+              <c r="E5" t="inlineStr"><is><t>{southTemperature}</t></is></c><c r="F5"><v>5</v></c>
             </row>
             <row r="6">
               <c r="A6"><v>46289</v></c><c r="B6" t="inlineStr"><is><t>ALDI SHEPPEY</t></is></c>

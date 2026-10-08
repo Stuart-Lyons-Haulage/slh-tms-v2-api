@@ -19,6 +19,32 @@ public sealed class InfoMailboxGraphPollingServiceTests
     }
 
     [Fact]
+    public void ManualMailboxDayWindow_UsesLondonMidnightAndHandlesDst()
+    {
+        var (startUtc, endUtc) = InfoMailboxGraphPollingService.MailboxDayWindow(new DateOnly(2026, 10, 25));
+
+        Assert.Equal(new DateTimeOffset(2026, 10, 24, 23, 0, 0, TimeSpan.Zero), startUtc);
+        Assert.Equal(new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero), endUtc);
+        Assert.Equal(TimeSpan.FromHours(25), endUtc - startUtc);
+    }
+
+    [Fact]
+    public void GraphHealthState_TracksActiveAndFailedPollStages()
+    {
+        var health = new InfoMailboxGraphHealthState();
+
+        health.BeginAttempt();
+        Assert.True(health.InProgress);
+        Assert.NotNull(health.LastAttemptUtc);
+
+        health.Failure(new InvalidOperationException("Graph timed out"), "Graph mailbox scan");
+
+        Assert.False(health.InProgress);
+        Assert.Equal("Graph mailbox scan", health.LastFailureStage);
+        Assert.Equal("Graph timed out", health.LastError);
+    }
+
+    [Fact]
     public void GraphMessage_IsMappedToCanonicalMailboxRequest()
     {
         using var document = JsonDocument.Parse("""
