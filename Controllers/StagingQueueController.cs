@@ -13,6 +13,35 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
 {
+    [HttpGet("date-counts")]
+    public async Task<IActionResult> DateCounts(
+        [FromQuery] DateOnly from,
+        [FromQuery] DateOnly to,
+        CancellationToken ct = default)
+    {
+        if (to < from || to.DayNumber - from.DayNumber > 31)
+            return BadRequest(new { message = "The review date range must be 1 to 32 days." });
+
+        var pending = await db.StagedImports.AsNoTracking()
+            .Where(item => item.Status == StagingStatus.PendingReview && item.EntityType == "order")
+            .Select(item => item.PayloadJson)
+            .ToListAsync(ct);
+
+        var counts = Enumerable.Range(0, to.DayNumber - from.DayNumber + 1)
+            .Select(offset => from.AddDays(offset))
+            .ToDictionary(day => day.ToString("yyyy-MM-dd"), _ => 0);
+        foreach (var payload in pending)
+        {
+            foreach (var day in StagingQueueProjection.PlanningDates(payload))
+            {
+                var key = day.ToString("yyyy-MM-dd");
+                if (counts.ContainsKey(key)) counts[key]++;
+            }
+        }
+
+        return Ok(counts);
+    }
+
     [HttpGet]
     public async Task<IActionResult> List(
         [FromQuery] StagingStatus? status,
@@ -190,6 +219,19 @@ internal static class StagingQueueProjection
         }
     }
 
+    internal static IReadOnlyCollection<DateOnly> PlanningDates(string payloadJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return PlanningDates(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<DateOnly>();
+        }
+    }
+
     internal static string BuildPayloadSummary(string payloadJson)
     {
         try
@@ -290,7 +332,7 @@ internal static class StagingQueueProjection
         return null;
     }
 
-    private static IReadOnlyCollection<DateOnly> PlanningDates(JsonElement root)
+    internal static IReadOnlyCollection<DateOnly> PlanningDates(JsonElement root)
     {
         var dates = new HashSet<DateOnly>();
         var collection = Date(root, "collectionDate");
