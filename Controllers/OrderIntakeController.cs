@@ -114,6 +114,27 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             if (existingByKey.TryGetValue(preparedOrder.IdempotencyKey, out var already) ||
                 createdByKey.TryGetValue(preparedOrder.IdempotencyKey, out already))
             {
+                // A retained replay can correct an order that was previously
+                // promoted with the mailbox received date. Keep its approval
+                // state and identity, but replace the payload when the parser
+                // now extracts a different operational date.
+                if (already.Status is StagingStatus.Promoted or StagingStatus.Approved &&
+                    OperationalDatesDiffer(already.PayloadJson, preparedOrder.Order.Payload))
+                {
+                    var corrected = await db.StagedImports.SingleAsync(item => item.Id == already.Id, ct);
+                    var correctedPayload = EnrichSourceEvidence(preparedOrder.Order.Payload, request);
+                    corrected.PayloadJson = correctedPayload.GetRawText();
+                    corrected.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                    corrected.ReviewedBy = "Retained evidence replay";
+                    corrected.ReviewNote = "Operational date corrected from retained mailbox evidence; approval state preserved.";
+                    db.StagedImportEvents.Add(StagingAudit.Create(
+                        corrected,
+                        "ReplayCorrected",
+                        corrected.Status,
+                        corrected.ReviewNote,
+                        "Retained evidence replay"));
+                    await NwfBookingReservationSync.UpsertAsync(db, corrected, correctedPayload, User.Identity?.Name, ct);
+                }
                 existing++;
                 records.Add(new
                 {
@@ -160,6 +181,20 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+    }
+
+    private static bool OperationalDatesDiffer(string existingJson, JsonElement incomingPayload)
+    {
+        try
+        {
+            using var existing = JsonDocument.Parse(existingJson);
+            return !string.Equals(ReadText(existing.RootElement, "collectionDate"), ReadText(incomingPayload, "collectionDate"), StringComparison.Ordinal) ||
+                   !string.Equals(ReadText(existing.RootElement, "deliveryDate"), ReadText(incomingPayload, "deliveryDate"), StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     [HttpGet("source-email/{stagingId:guid}")]
