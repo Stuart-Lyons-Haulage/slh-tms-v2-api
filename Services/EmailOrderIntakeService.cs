@@ -1127,6 +1127,17 @@ public sealed class EmailOrderIntakeService
                 continue;
             }
 
+            // NWF's daily planner workbook uses a deliberately different schema
+            // from the generic depot booking sheets ("04. Collection Site",
+            // "PalletQty" and "PO REF").  Keep this recognition narrow so an
+            // unrelated workbook cannot be turned into NWF orders accidentally.
+            var nwfRows = ParseNwfPalletRows(request, attachment, rows);
+            if (nwfRows.Count > 0)
+            {
+                results.AddRange(nwfRows);
+                continue;
+            }
+
             var legacyRows = ParseKnownWaitroseWorkbookRows(request, attachment, rows);
             if (legacyRows.Count > 0)
             {
@@ -1251,6 +1262,83 @@ public sealed class EmailOrderIntakeService
         }
         while (reader.NextResult());
 
+        return results;
+    }
+
+    internal static List<ParsedEmailOrder> ParseNwfPalletRows(
+        MailboxEmailIntakeRequest request,
+        MailboxAttachmentRequest attachment,
+        IReadOnlyList<object?[]> rows)
+    {
+        var headerIndex = rows.ToList().FindIndex(row =>
+        {
+            var keys = row.Select(value => NormaliseKey(CellText(value))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return keys.Contains("requestedshipdate") &&
+                   keys.Contains("04collectionsite") &&
+                   keys.Contains("depotdescription") &&
+                   keys.Contains("palletqty") &&
+                   keys.Contains("poref");
+        });
+        if (headerIndex < 0) return [];
+
+        var columns = HeaderMap(rows[headerIndex]);
+        var dateIndex = FindColumn(columns, "requestedshipdate");
+        var collectionIndex = FindColumn(columns, "04collectionsite");
+        var depotIndex = FindColumn(columns, "depotdescription");
+        var palletsIndex = FindColumn(columns, "palletqty");
+        var customerRefIndex = FindColumn(columns, "customerref");
+        var salesOrderIndex = FindColumn(columns, "salesorderid");
+        var poIndex = FindColumn(columns, "poref");
+        var palletNameIndex = FindColumn(columns, "palletname");
+        if (dateIndex < 0 || collectionIndex < 0 || depotIndex < 0 || palletsIndex < 0 || poIndex < 0) return [];
+
+        var results = new List<ParsedEmailOrder>();
+        for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+        {
+            var row = rows[rowIndex];
+            var date = CellDate(row, dateIndex);
+            var collection = CellText(row, collectionIndex);
+            var destination = CellText(row, depotIndex);
+            var pallets = CellInt(row, palletsIndex);
+            var po = CellText(row, poIndex);
+            if (date is null || string.IsNullOrWhiteSpace(collection) || string.IsNullOrWhiteSpace(destination) || pallets is null or <= 0)
+                continue;
+
+            var salesOrder = CellText(row, salesOrderIndex);
+            var customerRef = CellText(row, customerRefIndex);
+            var palletName = CellText(row, palletNameIndex);
+            var warnings = new List<string>();
+            if (string.IsNullOrWhiteSpace(po)) warnings.Add("NWF pallet row has no PO REF; retain for manual matching.");
+            var reference = !string.IsNullOrWhiteSpace(po) ? po : salesOrder ?? customerRef ?? StableEmailReference(request.MessageId);
+            var sourceKey = $"nwf-workbook-{date:yyyyMMdd}-{NormaliseKey(collection)}-{NormaliseKey(destination)}-{NormaliseKey(reference)}-{rowIndex + 1}";
+            var order = BuildStructuredOrder(
+                request,
+                sourceKey,
+                "NWF",
+                reference,
+                date.Value,
+                date.Value,
+                pallets.Value,
+                $"NWF-{collection}",
+                CleanSourceLine(destination),
+                "NWF pallet order",
+                warnings);
+
+            // Preserve the workbook-specific identifiers in the existing source
+            // evidence field without changing the shared order contract.
+            var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                order.Payload.GetRawText(),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            payload["customerPo"] = po;
+            payload["salesOrderId"] = salesOrder;
+            payload["customerRef"] = customerRef;
+            payload["palletType"] = palletName;
+            payload["sourceAttachmentName"] = attachment.Name;
+            payload["sourceSheet"] = "NWF";
+            payload["sourceRow"] = rowIndex + 1;
+            payload["intakeNaturalKey"] = $"NWF|{date:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}|{NormaliseKey(po)}|{NormaliseKey(salesOrder)}";
+            results.Add(new ParsedEmailOrder(sourceKey, (string)payload["intakeNaturalKey"]!, JsonSerializer.SerializeToElement(payload), warnings));
+        }
         return results;
     }
 

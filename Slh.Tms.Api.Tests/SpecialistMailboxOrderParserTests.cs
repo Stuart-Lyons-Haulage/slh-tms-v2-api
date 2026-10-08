@@ -9,6 +9,28 @@ public sealed class SpecialistMailboxOrderParserTests
     private readonly SpecialistMailboxOrderParser parser = new();
 
     [Fact]
+    public void NwfPlannerWorkbookRows_RecogniseSpecificHeadersAndPreserveReferences()
+    {
+        var rows = new List<object?[]>
+        {
+            new object?[] { "Haulier Name", "Requested Ship Date", "04. Collection Site", "Customer Name", "Depot Description", "Sales Order ID", "CustomerRef", "Pallet Name", "PalletQty", "PO REF" },
+            new object?[] { "Stuart Lyons", new DateTime(2026, 10, 9), "Drayton", "Aldi", "Aldi SAWLEY Distribution Centre", "SO000373066", 6513592956L, "IPP Euro", 1d, "PO00506333" },
+        };
+        var request = new MailboxEmailIntakeRequest("message-1", null, null, "planner@example.test", null, "NWF pallet plan", DateTimeOffset.UtcNow, null, null, null, []);
+        var attachment = new MailboxAttachmentRequest("Lyons collections 091026.xlsm", null, null);
+
+        var result = EmailOrderIntakeService.ParseNwfPalletRows(request, attachment, rows);
+
+        var order = Assert.Single(result);
+        Assert.Equal("NWF", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("PO00506333", order.Payload.GetProperty("customerPo").GetString());
+        Assert.Equal("NWF-Drayton", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal(1, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("NWF", order.Payload.GetProperty("sourceSheet").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("sourceRow").GetInt32());
+    }
+
+    [Fact]
     public void WaitrosePdfTable_ExtractsEveryDepotRowAndTemperature()
     {
         const string text = """
