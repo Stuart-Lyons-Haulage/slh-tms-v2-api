@@ -18,6 +18,19 @@ public sealed class InfoMailboxGraphPollingServiceTests
         Assert.Equal(expected, InfoMailboxGraphPollingService.IsCustomerDomain(sender, domains));
     }
 
+    [Theory]
+    [InlineData("joe@lyonshaulage.com", true)]
+    [InlineData("joe@ops.lyonshaulage.com", true)]
+    [InlineData("joe@lyonshaulage.com.evil.example", false)]
+    [InlineData("orders@customer.example", false)]
+    [InlineData(null, false)]
+    public void InternalSender_IsExcludedByMailboxDomain(string? sender, bool expected)
+    {
+        Assert.Equal(expected, InfoMailboxGraphPollingService.IsInternalSender(
+            sender,
+            "info@lyonshaulage.com"));
+    }
+
     [Fact]
     public void ManualMailboxDayWindow_UsesLondonMidnightAndHandlesDst()
     {
