@@ -636,8 +636,16 @@ public sealed class DispatchService(
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(30));
-            for (var date = from; date <= through; date = date.AddDays(1))
-                result.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token));
+            using var gate = new SemaphoreSlim(4, 4);
+            var dutyDates = Enumerable.Range(0, through.DayNumber - from.DayNumber + 1)
+                .Select(offset => from.AddDays(offset));
+            var dutyBatches = await Task.WhenAll(dutyDates.Select(async date =>
+            {
+                await gate.WaitAsync(timeout.Token);
+                try { return await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token); }
+                finally { gate.Release(); }
+            }));
+            result.AddRange(dutyBatches.SelectMany(batch => batch));
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

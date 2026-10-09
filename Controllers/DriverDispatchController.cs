@@ -428,9 +428,16 @@ public sealed class DriverDispatchController(
             var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
             var throughDate = planningDate <= today ? planningDate : today;
             var fromDate = throughDate.AddDays(-8);
-            var duties = new List<TachoDriverDutyStatus>();
-            for (var dutyDate = fromDate; dutyDate <= throughDate; dutyDate = dutyDate.AddDays(1))
-                duties.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token));
+            using var gate = new SemaphoreSlim(4, 4);
+            var dutyDates = Enumerable.Range(0, throughDate.DayNumber - fromDate.DayNumber + 1)
+                .Select(offset => fromDate.AddDays(offset));
+            var dutyBatches = await Task.WhenAll(dutyDates.Select(async dutyDate =>
+            {
+                await gate.WaitAsync(timeout.Token);
+                try { return await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token); }
+                finally { gate.Release(); }
+            }));
+            var duties = dutyBatches.SelectMany(batch => batch).ToList();
 
             var dayNumbers = new Dictionary<Guid, int>();
             foreach (var driver in drivers)
