@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -13,6 +14,7 @@ public sealed class DriverDispatchController(
     TmsDbContext db,
     SageHrClient sageHr,
     TachoMasterClient tachoMaster,
+    IMemoryCache cache,
     ILogger<DriverDispatchController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
@@ -22,6 +24,8 @@ public sealed class DriverDispatchController(
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        var cacheKey = $"driver-dispatch-snapshot:{planningDate:yyyy-MM-dd}";
+        if (cache.TryGetValue<object>(cacheKey, out var cachedSnapshot)) return Ok(cachedSnapshot);
         var weekStart = DriverDispatchAgencyRosterStore.WeekStart(planningDate);
         var weekEnd = weekStart.AddDays(6);
         var sageTask = ReadSageStateAsync(planningDate, ct);
@@ -199,7 +203,7 @@ public sealed class DriverDispatchController(
                 rosterEntry?.ThroughDate));
         }
 
-        return Ok(new
+        var snapshot = new
         {
             planningDate,
             weekStart,
@@ -246,7 +250,9 @@ public sealed class DriverDispatchController(
                     stop.PlannerNote
                 })
             })
-        });
+        };
+        cache.Set(cacheKey, snapshot, TimeSpan.FromSeconds(10));
+        return Ok(snapshot);
     }
 
     [HttpPost("drivers"), Authorize(Policy = "TmsWrite")]
