@@ -636,8 +636,16 @@ public sealed class DispatchService(
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(30));
-            for (var date = from; date <= through; date = date.AddDays(1))
-                result.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token));
+            using var gate = new SemaphoreSlim(4, 4);
+            var dutyDates = Enumerable.Range(0, through.DayNumber - from.DayNumber + 1)
+                .Select(offset => from.AddDays(offset));
+            var dutyBatches = await Task.WhenAll(dutyDates.Select(async date =>
+            {
+                await gate.WaitAsync(timeout.Token);
+                try { return await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token); }
+                finally { gate.Release(); }
+            }));
+            result.AddRange(dutyBatches.SelectMany(batch => batch));
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -750,166 +758,3 @@ public sealed class DispatchService(
 
                 // If Tacho says the duty has ended, don't let a stale driver identity on a
                 // vehicle that was moved later become this driver's current position.
-                return hasOpenDuty || latestCompletedDutyEnd is null || status.LastEventTimeUtc <= latestCompletedDutyEnd.Value.AddMinutes(30);
-            })
-            .OrderByDescending(status => status.LastEventTimeUtc)
-            .FirstOrDefault();
-    }
-
-    private static bool TrailerMatches(Guid? trailerId, IReadOnlyDictionary<Guid, Trailer> trailers, params string[] tokens)
-    {
-        if (trailerId is not Guid id || !trailers.TryGetValue(id, out var trailer)) return false;
-        return tokens.Any(token => trailer.Type?.Contains(token, StringComparison.OrdinalIgnoreCase) == true);
-    }
-
-    private static decimal EstimateDrivingHours(Load load, IReadOnlyList<LoadStop> stops)
-    {
-        if (load.EstimatedDistanceMiles is decimal routeMiles && routeMiles > 0)
-            return Math.Round(routeMiles / 45m, 2);
-
-        decimal miles = 0;
-        for (var index = 1; index < stops.Count; index++)
-        {
-            var leg = DispatchReturnRules.DistanceMiles(
-                stops[index - 1].Latitude,
-                stops[index - 1].Longitude,
-                stops[index].Latitude,
-                stops[index].Longitude);
-            if (leg is null) continue;
-            miles += leg.Value * 1.2m;
-        }
-        return miles > 0 ? Math.Round(miles / 45m, 2) : 0m;
-    }
-
-    private static decimal EstimateDutyHours(IReadOnlyList<LoadStop> stops, decimal estimatedDrivingHours)
-    {
-        var timed = stops.Where(stop => stop.PlannedArrivalUtc is not null).Select(stop => stop.PlannedArrivalUtc!.Value).OrderBy(value => value).ToList();
-        if (timed.Count >= 2)
-        {
-            var span = (decimal)(timed[^1] - timed[0]).TotalHours + 1m;
-            if (span > 0) return Math.Round(span, 2);
-        }
-        return estimatedDrivingHours > 0 ? Math.Round(estimatedDrivingHours + Math.Max(1m, stops.Count * 0.5m), 2) : 0m;
-    }
-
-    private static bool IsHalfTramper(string? value) => Normalise(value).Contains("HALFTRAMP", StringComparison.Ordinal);
-
-    private static DayOfWeek? ParseDayOfWeek(string value)
-    {
-        var token = Normalise(value);
-        return token switch
-        {
-            "SUN" or "SUNDAY" or "0" => DayOfWeek.Sunday,
-            "MON" or "MONDAY" or "1" => DayOfWeek.Monday,
-            "TUE" or "TUESDAY" or "2" => DayOfWeek.Tuesday,
-            "WED" or "WEDNESDAY" or "3" => DayOfWeek.Wednesday,
-            "THU" or "THURSDAY" or "4" => DayOfWeek.Thursday,
-            "FRI" or "FRIDAY" or "5" => DayOfWeek.Friday,
-            "SAT" or "SATURDAY" or "6" => DayOfWeek.Saturday,
-            _ => null
-        };
-    }
-
-    private static IEnumerable<string> Values(JsonElement root, string name)
-    {
-        var property = Property(root, name);
-        if (property is null) return [];
-        if (property.Value.ValueKind == JsonValueKind.Array)
-            return property.Value.EnumerateArray()
-                .Where(item => item.ValueKind is JsonValueKind.String or JsonValueKind.Number)
-                .Select(item => item.ToString().Trim())
-                .Where(item => item.Length > 0)
-                .ToArray();
-        if (property.Value.ValueKind == JsonValueKind.String)
-            return (property.Value.GetString() ?? string.Empty)
-                .Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return [property.Value.ToString()];
-    }
-
-    private static string? Text(JsonElement root, string name)
-    {
-        var property = Property(root, name);
-        if (property is null) return null;
-        return property.Value.ValueKind switch
-        {
-            JsonValueKind.String => string.IsNullOrWhiteSpace(property.Value.GetString()) ? null : property.Value.GetString()!.Trim(),
-            JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => property.Value.ToString(),
-            _ => null
-        };
-    }
-
-    private static JsonElement? Property(JsonElement root, string name)
-    {
-        var target = Normalise(name);
-        foreach (var property in root.EnumerateObject())
-            if (Normalise(property.Name) == target) return property.Value;
-        return null;
-    }
-
-    private static bool ContainsAny(string? value, params string[] tokens) =>
-        !string.IsNullOrWhiteSpace(value) && tokens.Any(token => value.Contains(token, StringComparison.OrdinalIgnoreCase));
-
-    private static string? HumanLocation(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        var text = value.Trim();
-        return text.Equals("moving", StringComparison.OrdinalIgnoreCase) || text.Equals("stopped", StringComparison.OrdinalIgnoreCase)
-            ? null
-            : text;
-    }
-
-    private static string? CleanStopName(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        var text = value.Trim();
-        foreach (var prefix in new[] { "Collect · ", "Collect - ", "Deliver · ", "Deliver - " })
-            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return text[prefix.Length..].Trim();
-        return text;
-    }
-
-    private static string? TachoAvailabilityBlockReason(int driveAvailable, int workAvailable, decimal weeklyWorking, decimal dailyDriving, int dailyDrivingLimitMinutes)
-    {
-        if (driveAvailable <= 0) return "Tacho driving time exhausted";
-        if (workAvailable <= 0) return "Tacho working time exhausted";
-        if (weeklyWorking >= 60m) return "WTD limit reached";
-        if (dailyDrivingLimitMinutes > 0 && dailyDriving >= dailyDrivingLimitMinutes / 60m) return "Daily driving limit reached";
-        return null;
-    }
-
-    private static DateOnly LondonDate(DateTimeOffset value) => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, London).DateTime);
-    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static string NormalisePerson(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
-    private sealed record DriverMasterProfile(
-        string? DriverCode,
-        string? EmploymentType,
-        string? SkillsText,
-        IReadOnlyList<DateOnly> HolidayDates,
-        IReadOnlyList<DayOfWeek> ContractedDays,
-        string? HomeDepot)
-    {
-        public static DriverMasterProfile Fallback(Driver driver) =>
-            new(driver.EmployeeNumber, driver.DriverType, driver.Skills, [], [], null);
-    }
-
-    private sealed record RunProfile(
-        Load Load,
-        DispatchRunDto Dto,
-        decimal? FinalLatitude,
-        decimal? FinalLongitude,
-        decimal EstimatedDutyHours,
-        decimal EstimatedDrivingHours);
-
-    private sealed record DispatchSuggestion(
-        Guid? RunId,
-        string? Reference,
-        decimal? DistanceMiles,
-        bool IsBackload,
-        decimal? DeadheadReductionMiles,
-        string? Message,
-        int? Score = null,
-        IReadOnlyList<string>? Reasons = null)
-    {
-        public static DispatchSuggestion None { get; } = new(null, null, null, false, null, null);
-    }
-}
