@@ -755,29 +755,34 @@ public sealed class SamsaraDispatchController(
             var dispatchState = await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct);
             dispatchState.TryGetValue(load.Id, out var state);
             var orderedStops = OperationalStopOrdering.Order(load.Stops);
-            if (driver is null)
-                return BadRequest(new { message = "Allocate a driver before sending the run to Samsara." });
-            var available = (await dispatch.GetAvailableTimesAsync(
-                new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct))
-                .Single();
-            if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
-                return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
-            var firstScheduled = state?.DriverId == driver.Id && state.PlannedStartUtc is DateTimeOffset persistedStart
-                ? persistedStart
-                : available.AvailableFrom.Value;
-            var legalStart = available.AvailableFrom.Value;
-            var rebasedStart = DispatchTachoRules.RebasePlannedStart(firstScheduled, legalStart);
-            if (state?.DriverId != driver.Id || state.PlannedStartUtc is null || rebasedStart != state.PlannedStartUtc)
+            // A vehicle-only route is valid for Samsara export. Tacho/legal-start
+            // validation applies when a driver has been allocated; without a
+            // driver we use the saved/planned route start and let Samsara carry
+            // the route as vehicle-assigned and unallocated.
+            var firstScheduled = state?.PlannedStartUtc
+                ?? orderedStops[0].PlannedArrivalUtc
+                ?? DateTimeOffset.UtcNow;
+            if (driver is not null)
             {
-                state = await DriverDispatchStateStore.SetPlannedStartAsync(
-                    db, load.Id, rebasedStart, User.Identity?.Name, ct,
-                    rebasedStart != firstScheduled
-                        ? "Rebased on resend to TachoMaster legal start"
-                        : available.RequiredRestPeriod == 9 ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
-                    driver.Id,
-                    state?.UseReducedDailyRest == true);
+                var available = (await dispatch.GetAvailableTimesAsync(
+                    new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct))
+                    .Single();
+                if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
+                    return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
+                var legalStart = available.AvailableFrom.Value;
+                var rebasedStart = DispatchTachoRules.RebasePlannedStart(firstScheduled, legalStart);
+                if (state?.DriverId != driver.Id || state.PlannedStartUtc is null || rebasedStart != state.PlannedStartUtc)
+                {
+                    state = await DriverDispatchStateStore.SetPlannedStartAsync(
+                        db, load.Id, rebasedStart, User.Identity?.Name, ct,
+                        rebasedStart != firstScheduled
+                            ? "Rebased on resend to TachoMaster legal start"
+                            : available.RequiredRestPeriod == 9 ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
+                        driver.Id,
+                        state?.UseReducedDailyRest == true);
+                }
+                firstScheduled = rebasedStart;
             }
-            firstScheduled = rebasedStart;
 
             var firstPlannedStopTime = orderedStops[0].PlannedArrivalUtc;
             if (firstPlannedStopTime is DateTimeOffset firstStopTime && firstStopTime < firstScheduled)

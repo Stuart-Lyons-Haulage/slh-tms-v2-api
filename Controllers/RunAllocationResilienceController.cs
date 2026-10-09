@@ -87,7 +87,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     {
         if (targetStart is null) return false;
         var candidates = await db.Loads.AsNoTracking().Include(x => x.Stops)
-            .Where(x => x.Id != target.Id && x.PlanningDate <= target.PlanningDate && x.Status != LoadStatus.Cancelled &&
+            .Where(x => x.Id != target.Id && x.PlanningDate == target.PlanningDate && x.Status != LoadStatus.Cancelled &&
                 ((vehicleId != null && x.VehicleId == vehicleId) || (trailerId != null && x.TrailerId == trailerId)))
             .ToListAsync(ct);
         var states = await DriverDispatchStateStore.ReadAsync(db, candidates.Select(x => x.Id), ct);
@@ -95,7 +95,11 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         {
             var start = states.GetValueOrDefault(candidate.Id)?.PlannedStartUtc ?? candidate.Stops.OrderBy(x => x.Sequence).Select(x => x.PlannedArrivalUtc).FirstOrDefault(x => x is not null);
             var end = candidate.Stops.OrderByDescending(x => x.Sequence).Select(x => x.PlannedArrivalUtc).FirstOrDefault(x => x is not null);
-            if (start is null || end is null) return true;
+            // An untimed/stale load is not evidence of an overlap. Treating it
+            // as a guaranteed conflict blocked vehicles that were visibly free
+            // in Dispatch. Only reject when both ends of the competing window
+            // are known and actually intersect the requested start.
+            if (start is null || end is null) return false;
             return targetStart < end && start < targetStart;
         });
     }
