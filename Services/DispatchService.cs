@@ -81,8 +81,15 @@ public sealed class DispatchService(
             var tachoBlockReason = planningDate <= today
                 ? TachoAvailabilityBlockReason(driveAvailable ?? 0, workAvailable ?? 0, weeklyWorking, dailyDriving, dailyDrivingLimit)
                 : null;
-            var blockedReason = sharedAvailability is { Dispatchable: false }
-                ? string.Join(" · ", sharedAvailability.BlockReasons)
+            // An existing allocation is not a blocker for the driver's own row:
+            // it must remain actionable so planners can prepare/export the route
+            // already assigned to that driver. The run-owner rules still prevent
+            // the same route being selected for a different driver.
+            var actionableBlockReasons = sharedAvailability?.BlockReasons
+                .Where(reason => !reason.StartsWith("Already allocated", StringComparison.Ordinal))
+                .ToArray() ?? [];
+            var blockedReason = actionableBlockReasons.Length > 0
+                ? string.Join(" · ", actionableBlockReasons)
                 : onHoliday ? "Annual leave" : offContract ? "Not contracted tomorrow" : tachoBlockReason;
             var needsReturn = DispatchReturnRules.NeedsReturn(day, latitude, options.NorthernLatitudeThreshold);
             var suggestion = blockedReason is null
