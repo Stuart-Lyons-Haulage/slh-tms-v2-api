@@ -521,9 +521,12 @@ public sealed class SpecialistMailboxOrderParser
             ? trayWeightKg + palletWeightKg : (int?)null;
         var refId = deliveryRef ?? (order.Success ? order.Groups["ref"].Value : StableEmailReference(request.MessageId));
         var notes = string.Join("; ", new[] { trays is null ? null : $"{trays} IFCO trays", pallets is null ? null : $"{pallets} CHEP pallets", weight is null ? null : $"Total weight {weight} kg" }.Where(value => value is not null));
+        // The e-mail's delivery/order reference is also the verified driver reference
+        // when the confirmation PDF omits a distinct order number.
+        var customerPo = order.Success ? order.Groups["ref"].Value : refId;
         var naturalKey = NaturalKey(request, "IFCO", destination, date.Value, refId);
         var keys = BuildIfcoMatchKeys(date.Value, order.Success ? order.Groups["ref"].Value : null, null, deliveryRef, collection, destination);
-        var payload = BuildIfcoPayload(request, BuildReference(refId, destination), order.Success ? order.Groups["ref"].Value : null,
+        var payload = BuildIfcoPayload(request, BuildReference(refId, destination), customerPo,
             null, deliveryRef, date.Value, date.Value, pallets, collection, destination, notes, warnings, keys);
         var mutable = JsonNode.Parse(payload.GetRawText())!.AsObject();
         mutable["trays"] = trays;
