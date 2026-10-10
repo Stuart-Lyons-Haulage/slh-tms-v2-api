@@ -412,9 +412,34 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal("Coventry", order.GetProperty("sellerName").GetString());
         Assert.Equal("Sefter", order.GetProperty("stallNumber").GetString());
         Assert.Equal("285440540", order.GetProperty("collectionReference").GetString());
+        Assert.Equal("285440540", order.GetProperty("customerPo").GetString());
         Assert.Equal(3420, order.GetProperty("trays").GetInt32());
         Assert.Equal(19, order.GetProperty("pallets").GetInt32());
         Assert.Equal(6072, order.GetProperty("weightKg").GetInt32());
+        Assert.True(order.GetProperty("plannerReady").GetBoolean());
+    }
+
+    [Fact]
+    public void IfcoConfirmationPdf_UsesDeliveryReferenceWhenPdfOmitsOrderNumber()
+    {
+        var pdf = MinimalTextPdf([
+            "IFCO Systems UK Ltd Order confirmation",
+            "Delivery Number: 285440540",
+            "Loading date: 12.10.2026",
+            "IFCO Coventry",
+            "Barfoots Sefter Farm",
+            "CHBA6419 Standard Nesting Tray 3,420 PCS 5,540 KG",
+            "CHEP1210 CHEP Pallet 1210 19 PCS 532 KG"
+        ]);
+        var request = new MailboxEmailIntakeRequest("ifco-pdf-no-order-number", null, "info@lyonshaulage.com", "Kamila.Biohn@barfoots.co.uk", "Kamila Biohn",
+            "Ifco trays collection on 12.10 from Coventry to Sefter, 285440540", DateTimeOffset.Parse("2026-10-09T10:15:26Z"),
+            "Kamila Biohn", null, null,
+            [new MailboxAttachmentRequest("501648_ZOC1028540540_IFP_EN.PDF", "application/pdf", Convert.ToBase64String(pdf))]);
+
+        var result = parser.TryParse(request);
+        Assert.NotNull(result);
+        var order = Assert.Single(result!.Orders).Payload;
+        Assert.Equal("285440540", order.GetProperty("customerPo").GetString());
         Assert.True(order.GetProperty("plannerReady").GetBoolean());
     }
 
