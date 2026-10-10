@@ -327,4 +327,114 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         Assert.Contains(id.ToString(), payload, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("O79001/3564471", payload, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Replay_refreshes_target_projection_without_archiving_other_dates_from_same_email()
+    {
+        var messageId = $"replay-multi-date-{Guid.NewGuid():N}";
+        var targetId = Guid.NewGuid();
+        var otherDateId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "email-evidence",
+                IdempotencyKey = $"email-evidence:{messageId}",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    messageId,
+                    mailbox = "info@lyonshaulage.com",
+                    senderAddress = "chris.benning@primafruit.co.uk",
+                    senderName = "Chris Benning",
+                    subject = "HHP WAITROSE DIRECT DEPOT DELIVERY 19.9.26",
+                    receivedAtUtc = "2026-09-18T08:07:40Z",
+                    bodyText = "Please collect 3 pallets from Hall Hunter today 18/09/2026.\n* Leyland 3 pallets\nFor Delivery date Saturday 19/09/2026.\nPO number: A65681. 95 cases of Strawberries.",
+                    bodyFormat = "text",
+                    attachments = Array.Empty<object>(),
+                    evidenceAvailable = true
+                }),
+                Status = StagingStatus.Archived,
+                Source = "Info mailbox evidence / chris.benning@primafruit.co.uk",
+                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-18T08:07:40Z")
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                Id = targetId,
+                EntityType = "order",
+                IdempotencyKey = $"old-target:{Guid.NewGuid():N}",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = "A65681",
+                    customerCode = "WAITROSE",
+                    collectionDate = "2026-09-18",
+                    deliveryDate = "2026-09-19",
+                    pallets = 3,
+                    sellerName = "Hall Hunter",
+                    stallNumber = "Leyland",
+                    sourceMessageId = messageId
+                }),
+                Status = StagingStatus.PendingReview,
+                Source = "Info mailbox / old-parser@example.test",
+                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-18T08:07:41Z")
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                Id = otherDateId,
+                EntityType = "order",
+                IdempotencyKey = $"old-other-date:{Guid.NewGuid():N}",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = "A65682",
+                    customerCode = "WAITROSE",
+                    collectionDate = "2026-09-18",
+                    deliveryDate = "2026-09-18",
+                    pallets = 2,
+                    sellerName = "Hall Hunter",
+                    stallNumber = "Aylesford",
+                    sourceMessageId = messageId
+                }),
+                Status = StagingStatus.PendingReview,
+                Source = "Info mailbox / old-parser@example.test",
+                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-18T08:07:42Z")
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Approve");
+        var response = await client.PostAsync(
+            "/api/v1/order-intake/replay-retained-evidence",
+            new StringContent(JsonSerializer.Serialize(new
+            {
+                receivedFromUtc = "2026-09-15T00:00:00Z",
+                minimumPlanningDate = "2026-09-19",
+                maximumPlanningDate = "2026-09-19",
+                refreshUnamendedPending = true,
+                maxMessages = 5
+            }), Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var responsePayload = await response.Content.ReadAsStringAsync();
+        using (var result = JsonDocument.Parse(responsePayload))
+        {
+            Assert.Equal(1, result.RootElement.GetProperty("pendingArchivedForRefresh").GetInt32());
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            Assert.Equal(StagingStatus.Archived, (await db.StagedImports.FindAsync(targetId))!.Status);
+            Assert.Equal(StagingStatus.PendingReview, (await db.StagedImports.FindAsync(otherDateId))!.Status);
+
+            var activeForMessage = db.StagedImports
+                .Where(item => item.EntityType == "order" &&
+                               item.Status == StagingStatus.PendingReview &&
+                               item.PayloadJson.Contains(messageId))
+                .ToList();
+            Assert.Equal(2, activeForMessage.Count);
+            Assert.Contains(activeForMessage, item => item.Id == otherDateId);
+            Assert.Contains(activeForMessage, item => item.Id != otherDateId &&
+                                                       item.PayloadJson.Contains("A65681", StringComparison.Ordinal));
+        }
+    }
 }
