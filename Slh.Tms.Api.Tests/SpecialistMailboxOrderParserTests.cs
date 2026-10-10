@@ -405,7 +405,8 @@ public sealed class SpecialistMailboxOrderParserTests
             [new MailboxAttachmentRequest("501648_ZOC10285440540_IFP_EN.PDF", "application/pdf", Convert.ToBase64String(pdf))]);
 
         var result = parser.TryParse(request);
-        var order = Assert.Single(Assert.NotNull(result).Orders).Payload;
+        Assert.NotNull(result);
+        var order = Assert.Single(result!.Orders).Payload;
         Assert.Equal("2026-10-12", order.GetProperty("collectionDate").GetString());
         Assert.Equal("2026-10-12", order.GetProperty("deliveryDate").GetString());
         Assert.Equal("Coventry", order.GetProperty("sellerName").GetString());
