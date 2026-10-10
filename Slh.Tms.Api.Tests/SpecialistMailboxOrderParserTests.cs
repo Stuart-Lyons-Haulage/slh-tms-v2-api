@@ -411,7 +411,7 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal("2026-10-12", order.GetProperty("deliveryDate").GetString());
         Assert.Equal("Coventry", order.GetProperty("sellerName").GetString());
         Assert.Equal("Sefter", order.GetProperty("stallNumber").GetString());
-        Assert.Equal("0285440540", order.GetProperty("collectionReference").GetString());
+        Assert.Equal("285440540", order.GetProperty("collectionReference").GetString());
         Assert.Equal(3420, order.GetProperty("trays").GetInt32());
         Assert.Equal(19, order.GetProperty("pallets").GetInt32());
         Assert.Equal(6072, order.GetProperty("weightKg").GetInt32());

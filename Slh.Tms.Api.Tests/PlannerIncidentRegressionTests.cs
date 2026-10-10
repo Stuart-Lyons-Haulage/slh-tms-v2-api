@@ -60,7 +60,7 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         var driver = payload.GetProperty("drivers").EnumerateArray().Single(item => item.GetProperty("displayName").GetString() == name);
-        Assert.Equal("Unknown", driver.GetProperty("driverType").GetString());
+        Assert.Equal("Subcontractor", driver.GetProperty("driverType").GetString());
         Assert.Equal("Bannisters", driver.GetProperty("driverGroup").GetString());
     }
 
