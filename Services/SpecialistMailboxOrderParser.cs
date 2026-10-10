@@ -3,7 +3,9 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using UglyToad.PdfPig;
 
 namespace Slh.Tms.Api.Services;
 
@@ -56,6 +58,10 @@ public sealed class SpecialistMailboxOrderParser
 
     private static readonly Regex IfcoRowRegex = new(
         @"(?m)^IFCO\s*\|(?<fields>.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex IfcoSubjectRouteRegex = new(
+        @"\bIFCO\s+(?:trays?\s+)?collection\s+(?:on\s+)?(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\s+from\s+(?<from>.+?)\s+to\s+(?<to>.+?)(?:,\s*(?<ref>\d{6,}))?$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex NwfConfirmedCustomerRowRegex = new(
@@ -120,6 +126,12 @@ public sealed class SpecialistMailboxOrderParser
         {
             var ifco = ParseIfcoCollections(request, body);
             if (ifco is not null) return ifco;
+        }
+
+        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase))
+        {
+            var ifcoPdf = ParseIfcoConfirmationPdf(request, subject, body);
+            if (ifcoPdf is not null) return ifcoPdf;
         }
 
         var transfer = TransferSubjectRegex.Match(subject);
@@ -455,6 +467,74 @@ public sealed class SpecialistMailboxOrderParser
 
         if (orders.Count == 0) return null;
         return new EmailIntakeParseResult(orders, warnings, null);
+    }
+
+    private static EmailIntakeParseResult? ParseIfcoConfirmationPdf(MailboxEmailIntakeRequest request, string subject, string body)
+    {
+        var attachment = (request.Attachments ?? []).FirstOrDefault(item => item.IsInline != true &&
+            string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".pdf", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(item.EffectiveContentBase64));
+        if (attachment is null) return null;
+
+        string pdfText;
+        try
+        {
+            var encoded = attachment.EffectiveContentBase64!;
+            var bytes = Convert.FromBase64String(encoded.Contains(',') ? encoded[(encoded.IndexOf(',') + 1)..] : encoded);
+            using var stream = new MemoryStream(bytes);
+            using var document = PdfDocument.Open(stream);
+            pdfText = string.Join("\n", document.GetPages().Select(page => page.Text));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        if (!pdfText.Contains("IFCO", StringComparison.OrdinalIgnoreCase) ||
+            !pdfText.Contains("Order confirmation", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var source = Regex.Replace(pdfText, @"\s+", " ").Trim();
+        var route = IfcoSubjectRouteRegex.Match(subject);
+        var dateMatch = Regex.Match(source, @"\bLoading date\s*:?\s*(?<date>\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", RegexOptions.IgnoreCase);
+        var dateText = dateMatch.Success ? dateMatch.Groups["date"].Value : route.Success ? route.Groups["date"].Value : string.Empty;
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var date = ParseFlexibleNumericDate(dateText, received.Year);
+        if (date is null || !route.Success) return null;
+
+        var delivery = Regex.Match(source, @"\bDelivery Number\s*:?\s*(?<ref>\d{8,})", RegexOptions.IgnoreCase);
+        if (!delivery.Success) delivery = Regex.Match(subject, @"\b(?<ref>\d{8,})\s*$");
+        var order = Regex.Match(source, @"\bOrder Number\s*:?\s*(?<ref>\d{6,})", RegexOptions.IgnoreCase);
+        var pieceQuantities = Regex.Matches(source, @"(?<qty>[\d,]+)\s*PCS", RegexOptions.IgnoreCase);
+        var weights = Regex.Matches(source, @"(?<weight>[\d,]+)\s*KG", RegexOptions.IgnoreCase);
+        var destination = route.Groups["to"].Value.Trim();
+        var collection = route.Groups["from"].Value.Trim();
+        var deliveryRef = delivery.Success ? delivery.Groups["ref"].Value : null;
+        var warnings = new List<string>();
+        if (deliveryRef is null) warnings.Add("IFCO delivery number is missing.");
+        if (pieceQuantities.Count < 1) warnings.Add("IFCO tray quantity was not identified in the confirmation PDF.");
+        if (pieceQuantities.Count < 2) warnings.Add("IFCO pallet quantity was not identified in the confirmation PDF.");
+        var trays = pieceQuantities.Count > 0 && int.TryParse(pieceQuantities[0].Groups["qty"].Value.Replace(",", ""), out var trayCount) ? trayCount : (int?)null;
+        var pallets = pieceQuantities.Count > 1 && int.TryParse(pieceQuantities[1].Groups["qty"].Value.Replace(",", ""), out var palletCount) ? palletCount : (int?)null;
+        var weight = weights.Count > 1 &&
+            int.TryParse(weights[0].Groups["weight"].Value.Replace(",", ""), out var trayWeightKg) &&
+            int.TryParse(weights[1].Groups["weight"].Value.Replace(",", ""), out var palletWeightKg)
+            ? trayWeightKg + palletWeightKg : (int?)null;
+        var refId = deliveryRef ?? (order.Success ? order.Groups["ref"].Value : StableEmailReference(request.MessageId));
+        var notes = string.Join("; ", new[] { trays is null ? null : $"{trays} IFCO trays", pallets is null ? null : $"{pallets} CHEP pallets", weight is null ? null : $"Total weight {weight} kg" }.Where(value => value is not null));
+        var naturalKey = NaturalKey(request, "IFCO", destination, date.Value, refId);
+        var keys = BuildIfcoMatchKeys(date.Value, order.Success ? order.Groups["ref"].Value : null, null, deliveryRef, collection, destination);
+        var payload = BuildIfcoPayload(request, BuildReference(refId, destination), order.Success ? order.Groups["ref"].Value : null,
+            null, deliveryRef, date.Value, date.Value, pallets, collection, destination, notes, warnings, keys);
+        var mutable = JsonNode.Parse(payload.GetRawText())!.AsObject();
+        mutable["trays"] = trays;
+        mutable["pallets"] = pallets;
+        mutable["weightKg"] = weight;
+        mutable["intakeNaturalKey"] = naturalKey;
+        mutable["intakeMatchKeys"] = JsonSerializer.SerializeToNode(keys);
+        mutable["sourceAttachmentName"] = attachment.Name;
+        mutable["intakeParser"] = "IFCO order confirmation PDF";
+        mutable["driverInstructions"] = $"Order type: IFCO tray collection · Delivery number: {deliveryRef ?? "missing"} · {notes} · Source email: {subject}";
+        return new EmailIntakeParseResult([new ParsedEmailOrder("ifco-confirmation-pdf", naturalKey, JsonSerializer.SerializeToElement(mutable), warnings)], [], null);
     }
 
     private static EmailIntakeParseResult ParseTransfer(MailboxEmailIntakeRequest request, Match transfer, string body)

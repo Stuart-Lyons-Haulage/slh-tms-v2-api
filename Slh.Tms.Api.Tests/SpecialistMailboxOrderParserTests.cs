@@ -387,6 +387,69 @@ public sealed class SpecialistMailboxOrderParserTests
     }
 
     [Fact]
+    public void IfcoConfirmationPdf_ParsesCoventryToSefterRouteAndSeparateTrayAndPalletCounts()
+    {
+        var pdf = MinimalTextPdf([
+            "IFCO Systems UK Ltd Order confirmation",
+            "Order Number: 304198872",
+            "Delivery Number: 0285440540",
+            "Loading date: 12.10.2026",
+            "IFCO Coventry",
+            "Barfoots Sefter Farm",
+            "CHBA6419 Standard Nesting Tray 3,420 PCS 5,540 KG",
+            "CHEP1210 CHEP Pallet 1210 19 PCS 532 KG"
+        ]);
+        var request = new MailboxEmailIntakeRequest("ifco-pdf-1", null, "info@lyonshaulage.com", "Kamila.Biohn@barfoots.co.uk", "Kamila Biohn",
+            "Ifco trays collection on 12.10 from Coventry to Sefter, 285440540", DateTimeOffset.Parse("2026-10-09T10:15:26Z"),
+            "Kamila Biohn", null, null,
+            [new MailboxAttachmentRequest("501648_ZOC10285440540_IFP_EN.PDF", "application/pdf", Convert.ToBase64String(pdf))]);
+
+        var result = parser.TryParse(request);
+        Assert.NotNull(result);
+        var order = Assert.Single(result!.Orders).Payload;
+        Assert.Equal("2026-10-12", order.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-10-12", order.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Coventry", order.GetProperty("sellerName").GetString());
+        Assert.Equal("Sefter", order.GetProperty("stallNumber").GetString());
+        Assert.Equal("285440540", order.GetProperty("collectionReference").GetString());
+        Assert.Equal(3420, order.GetProperty("trays").GetInt32());
+        Assert.Equal(19, order.GetProperty("pallets").GetInt32());
+        Assert.Equal(6072, order.GetProperty("weightKg").GetInt32());
+        Assert.True(order.GetProperty("plannerReady").GetBoolean());
+    }
+
+    private static byte[] MinimalTextPdf(IReadOnlyList<string> lines)
+    {
+        var commands = new StringBuilder("BT /F1 10 Tf 40 800 Td 12 TL\n");
+        foreach (var line in lines)
+            commands.Append('(').Append(line.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)")).Append(") Tj T*\n");
+        commands.Append("ET");
+        var stream = Encoding.ASCII.GetBytes(commands.ToString());
+        var objects = new[]
+        {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 840] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            $"<< /Length {stream.Length} >>\nstream\n{Encoding.ASCII.GetString(stream)}\nendstream"
+        };
+        using var output = new MemoryStream();
+        void Write(string value) => output.Write(Encoding.ASCII.GetBytes(value));
+        Write("%PDF-1.4\n");
+        var offsets = new List<long> { 0 };
+        for (var index = 0; index < objects.Length; index++)
+        {
+            offsets.Add(output.Position);
+            Write($"{index + 1} 0 obj\n{objects[index]}\nendobj\n");
+        }
+        var xref = output.Position;
+        Write($"xref\n0 {offsets.Count}\n0000000000 65535 f \n");
+        foreach (var offset in offsets.Skip(1)) Write($"{offset:0000000000} 00000 n \n");
+        Write($"trailer\n<< /Size {offsets.Count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF");
+        return output.ToArray();
+    }
+
+    [Fact]
     public void WaitroseHallHunterBody_StagesSingleCollectionAndDeliveryMovement()
     {
         var result = parser.TryParse(new MailboxEmailIntakeRequest(
