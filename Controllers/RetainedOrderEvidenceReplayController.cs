@@ -185,13 +185,14 @@ public sealed class RetainedOrderEvidenceReplayController(
                 // planning dates. Match by deterministic key first; use message ID
                 // only when it identifies one unambiguous stale projection for this
                 // replay window (or the message has only one pending projection).
-                var unambiguousMessageMatches = eligibleOrders.Count == 1
-                    ? messagePending.Count == 1
-                        ? messagePending
-                        : messagePendingInWindow.Count == 1
-                            ? messagePendingInWindow
-                            : []
-                    : [];
+                var unambiguousMessageMatches = new List<StagedImport>();
+                if (eligibleOrders.Count == 1)
+                {
+                    if (messagePending.Count == 1)
+                        unambiguousMessageMatches = messagePending;
+                    else if (messagePendingInWindow.Count == 1)
+                        unambiguousMessageMatches = messagePendingInWindow;
+                }
                 var existingPending = pendingCandidates
                     .Where(item => item.Status == StagingStatus.PendingReview &&
                                    (keys.Contains(item.IdempotencyKey) || unambiguousMessageMatches.Contains(item)))
