@@ -504,21 +504,27 @@ public sealed class SpecialistMailboxOrderParser
         var delivery = Regex.Match(source, @"\bDelivery Number\s*:?\s*(?<ref>\d{8,})", RegexOptions.IgnoreCase);
         if (!delivery.Success) delivery = Regex.Match(subject, @"\b(?<ref>\d{8,})\s*$");
         var order = Regex.Match(source, @"\bOrder Number\s*:?\s*(?<ref>\d{6,})", RegexOptions.IgnoreCase);
-        var tray = Regex.Match(source, @"\b(?<code>CHBA\w*)\b.*?\btray\b.*?(?<qty>[\d,]+)\s*PCS.*?(?<weight>[\d,]+)\s*KG", RegexOptions.IgnoreCase);
-        var pallet = Regex.Match(source, @"\b(?<code>CHEP\w*)\s+CHEP Pallet\s+\d+\s+(?<qty>[\d,]+)\s+PCS", RegexOptions.IgnoreCase);
+        var trayStart = source.IndexOf("CHBA", StringComparison.OrdinalIgnoreCase);
+        var palletStart = source.IndexOf("CHEP", trayStart < 0 ? 0 : trayStart + 4, StringComparison.OrdinalIgnoreCase);
+        var trayText = trayStart < 0 ? string.Empty : source[trayStart..(palletStart > trayStart ? palletStart : source.Length)];
+        var palletText = palletStart < 0 ? string.Empty : source[palletStart..];
+        var trayQuantity = Regex.Match(trayText, @"(?<qty>[\d,]+)\s*PCS", RegexOptions.IgnoreCase);
+        var trayWeight = Regex.Match(trayText, @"PCS.*?(?<weight>[\d,]+)\s*KG", RegexOptions.IgnoreCase);
+        var palletQuantity = Regex.Match(palletText, @"(?<qty>[\d,]+)\s*PCS", RegexOptions.IgnoreCase);
+        var palletWeight = Regex.Match(palletText, @"PCS.*?(?<weight>[\d,]+)\s*KG", RegexOptions.IgnoreCase);
         var destination = route.Groups["to"].Value.Trim();
         var collection = route.Groups["from"].Value.Trim();
         var deliveryRef = delivery.Success ? delivery.Groups["ref"].Value : null;
         var warnings = new List<string>();
         if (deliveryRef is null) warnings.Add("IFCO delivery number is missing.");
-        if (!tray.Success) warnings.Add("IFCO tray quantity was not identified in the confirmation PDF.");
-        if (!pallet.Success) warnings.Add("IFCO pallet quantity was not identified in the confirmation PDF.");
-        var trays = tray.Success && int.TryParse(tray.Groups["qty"].Value.Replace(",", ""), out var trayCount) ? trayCount : (int?)null;
-        var pallets = pallet.Success && int.TryParse(pallet.Groups["qty"].Value.Replace(",", ""), out var palletCount) ? palletCount : (int?)null;
-        var weight = tray.Success && pallet.Success &&
-            int.TryParse(tray.Groups["weight"].Value.Replace(",", ""), out var trayWeight) &&
-            int.TryParse(Regex.Match(source, @"\bCHEP\w*\s+CHEP Pallet\s+\d+\s+[\d,]+\s+PCS\s+(?<weight>[\d,]+)\s+KG", RegexOptions.IgnoreCase).Groups["weight"].Value.Replace(",", ""), out var palletWeight)
-            ? trayWeight + palletWeight : (int?)null;
+        if (!trayQuantity.Success) warnings.Add("IFCO tray quantity was not identified in the confirmation PDF.");
+        if (!palletQuantity.Success) warnings.Add("IFCO pallet quantity was not identified in the confirmation PDF.");
+        var trays = trayQuantity.Success && int.TryParse(trayQuantity.Groups["qty"].Value.Replace(",", ""), out var trayCount) ? trayCount : (int?)null;
+        var pallets = palletQuantity.Success && int.TryParse(palletQuantity.Groups["qty"].Value.Replace(",", ""), out var palletCount) ? palletCount : (int?)null;
+        var weight = trayWeight.Success && palletWeight.Success &&
+            int.TryParse(trayWeight.Groups["weight"].Value.Replace(",", ""), out var trayWeightKg) &&
+            int.TryParse(palletWeight.Groups["weight"].Value.Replace(",", ""), out var palletWeightKg)
+            ? trayWeightKg + palletWeightKg : (int?)null;
         var refId = deliveryRef ?? (order.Success ? order.Groups["ref"].Value : StableEmailReference(request.MessageId));
         var notes = string.Join("; ", new[] { trays is null ? null : $"{trays} IFCO trays", pallets is null ? null : $"{pallets} CHEP pallets", weight is null ? null : $"Total weight {weight} kg" }.Where(value => value is not null));
         var naturalKey = NaturalKey(request, "IFCO", destination, date.Value, refId);
