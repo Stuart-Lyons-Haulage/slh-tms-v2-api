@@ -83,9 +83,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         var staged = 0;
         var existing = 0;
+        var updatedExisting = 0;
         var records = new List<object>();
 
-        var prepared = parsed.Orders.Select(order =>
+        var prepared = DeduplicateParsedOrders(parsed.Orders).Select(order =>
         {
             var key = $"email:{CompactKey(request.MessageId)}:{order.SourceKey}";
             if (key.Length > 200) key = key[..200];
@@ -107,7 +108,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             .Where(item => !existingByKey.ContainsKey(item.IdempotencyKey))
             .Select(item => item.Order)
             .ToList();
-        var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct, allowSameMessageId: true);
+        var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct);
         var createdByKey = new Dictionary<string, StagedImport>(StringComparer.Ordinal);
 
         foreach (var preparedOrder in prepared)
@@ -119,7 +120,27 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 // promoted with the mailbox received date. Keep its approval
                 // state and identity, but replace the payload when the parser
                 // now extracts a different operational date.
-                if (already.Status is StagingStatus.Promoted or StagingStatus.Approved &&
+                if (already.Status == StagingStatus.PendingReview &&
+                    PendingProjectionImproved(already.PayloadJson, preparedOrder.Order))
+                {
+                    var amended = await db.StagedImports.SingleAsync(item => item.Id == already.Id, ct);
+                    var amendedPayload = EnrichSourceEvidence(preparedOrder.Order.Payload, request);
+                    amended.PayloadJson = amendedPayload.GetRawText();
+                    amended.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                    amended.ReviewedBy = "Mailbox amendment deduplication";
+                    amended.ReviewNote = "Improved parse replaced the duplicate pending projection; the original source email remains in evidence history.";
+                    db.StagedImportEvents.Add(StagingAudit.Create(
+                        amended,
+                        "Amended",
+                        amended.Status,
+                        amended.ReviewNote,
+                        "Mailbox amendment deduplication"));
+                    await NwfBookingReservationSync.UpsertAsync(db, amended, amendedPayload, User.Identity?.Name, ct);
+                    existingByKey[preparedOrder.IdempotencyKey] = amended;
+                    already = amended;
+                    updatedExisting++;
+                }
+                else if (already.Status is StagingStatus.Promoted or StagingStatus.Approved &&
                     OperationalDatesDiffer(already.PayloadJson, preparedOrder.Order.Payload))
                 {
                     var corrected = await db.StagedImports.SingleAsync(item => item.Id == already.Id, ct);
@@ -172,7 +193,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             });
         }
 
-        if (staged > 0 || superseded > 0)
+        if (staged > 0 || superseded > 0 || updatedExisting > 0)
             await db.SaveChangesAsync(ct);
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order");
@@ -182,6 +203,71 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+    }
+
+    internal static List<ParsedEmailOrder> DeduplicateParsedOrders(IReadOnlyCollection<ParsedEmailOrder> orders)
+    {
+        return orders
+            .Select((order, index) => (Order: order, Index: index))
+            .GroupBy(item => ParsedBusinessIdentity(item.Order), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderBy(item => item.Order.Warnings.Count).ThenBy(item => item.Index).First())
+            .OrderBy(item => item.Index)
+            .Select(item => item.Order)
+            .ToList();
+    }
+
+    private static string ParsedBusinessIdentity(ParsedEmailOrder order)
+    {
+        var payload = order.Payload;
+        var reference = FirstText(payload, "amendmentMatchKey", "customerPo", "transportPo", "cratePo", "collectionReference", "customerReference");
+        var customer = FirstText(payload, "customerCode", "customer", "supplier");
+        var collectionDate = ReadText(payload, "collectionDate") ?? string.Empty;
+        var deliveryDate = ReadText(payload, "deliveryDate") ?? string.Empty;
+        var collection = FirstText(payload, "collectionSite", "collectionPoint", "sellerName", "collectionLocation");
+        var destination = FirstText(payload, "destination", "deliverySite", "deliveryLocation", "stallNumber");
+        var quantity = ReadQuantity(payload);
+        var meaningful = new[] { reference, customer, collectionDate, deliveryDate, collection, destination, quantity }
+            .Any(value => !string.IsNullOrWhiteSpace(value));
+        if (!meaningful) return $"SOURCE|{order.SourceKey}";
+        return string.Join('|', new[] { reference, customer, collectionDate, deliveryDate, collection, destination, quantity }
+            .Select(value => (value ?? string.Empty).Trim().ToUpperInvariant()));
+    }
+
+    internal static bool PendingProjectionImproved(string existingJson, ParsedEmailOrder incoming)
+    {
+        try
+        {
+            using var existing = JsonDocument.Parse(existingJson);
+            var oldPayload = existing.RootElement;
+            return ProjectionCompleteness(incoming.Payload) > ProjectionCompleteness(oldPayload) ||
+                   (ReadBool(incoming.Payload, "plannerReady") == true && ReadBool(oldPayload, "plannerReady") != true);
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
+    }
+
+    private static int ProjectionCompleteness(JsonElement payload)
+    {
+        var fields = new[] { "collectionDate", "deliveryDate", "sellerName", "collectionSite", "destination", "deliverySite", "stallNumber" };
+        var score = fields.Count(field => !string.IsNullOrWhiteSpace(ReadText(payload, field)));
+        if (ReadQuantity(payload) is { Length: > 0 } quantity &&
+            int.TryParse(quantity, out var parsedQuantity) && parsedQuantity > 0) score += 2;
+        if (!string.IsNullOrWhiteSpace(FirstText(payload, "customerPo", "transportPo", "cratePo", "collectionReference"))) score++;
+        if (ReadBool(payload, "plannerReady") == true) score += 2;
+        return score;
+    }
+
+    private static string? ReadQuantity(JsonElement payload)
+    {
+        foreach (var field in new[] { "pallets", "palletQty", "handlingUnitQuantity", "cases" })
+        {
+            if (!TryGetProperty(payload, field, out var value)) continue;
+            if (value.ValueKind == JsonValueKind.Number) return value.GetRawText();
+            if (value.ValueKind == JsonValueKind.String) return value.GetString()?.Trim();
+        }
+        return null;
     }
 
     private static bool OperationalDatesDiffer(string existingJson, JsonElement incomingPayload)
@@ -263,7 +349,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var existing = 0;
         var records = new List<object>();
 
-        var prepared = parsed.Orders.Select(order =>
+        var prepared = DeduplicateParsedOrders(parsed.Orders).Select(order =>
         {
             // Replays are projections of the same retained mailbox evidence, not new
             // messages. Keep the source key stable so a second click updates/returns
