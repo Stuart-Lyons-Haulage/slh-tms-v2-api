@@ -83,6 +83,10 @@ public sealed class SpecialistMailboxOrderParser
         @"\bBarfoots\s+(?<site>Sefter|Leythorne)(?:\s+Farm)?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex EuroPoolSummerBerryDestinationRegex = new(
+        @"\bSummer\s+Berry\s+Company\b[^\r\n]{0,100}?(?<site>Groves\s+Farm|Chichester)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex EuroPoolLineItemRegex = new(
         @"(?<!\d)(?<material>\d{6,})\s+(?<description>.+?)\s+(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)\s+(?<quality>.+?)\s+(?<variant>.+?)\s+(?<carrierQty>\d{1,6})\s+(?<unitsPerCarrier>\d{1,6})\s+(?<totalQty>\d[\d.,]*)(?![\d.,])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -468,10 +472,9 @@ public sealed class SpecialistMailboxOrderParser
     {
         var sender = request.SenderAddress ?? string.Empty;
         var subject = request.Subject ?? string.Empty;
-        if (!sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("EUROPOOL", StringComparison.OrdinalIgnoreCase))
-            return null;
 
+        // Euro Pool confirmations are sent by both Barfoots and pool customers such
+        // as Summer Berry; identify the document by its contents, not sender/subject.
         var pdfAttachments = (request.Attachments ?? [])
             .Where(item => item.IsInline != true &&
                            !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
@@ -494,6 +497,12 @@ public sealed class SpecialistMailboxOrderParser
                 if (parsed is null)
                     continue;
 
+                var isEuroPoolConfirmation =
+                    pdfText.Contains("Euro Pool System", StringComparison.OrdinalIgnoreCase) ||
+                    pdfText.Contains("Load carrier", StringComparison.OrdinalIgnoreCase);
+                if (!isEuroPoolConfirmation)
+                    continue;
+
                 recognisedConfirmation = true;
                 if (parsed.SalesOrderNumber is null || parsed.LoadingDate is null ||
                     string.IsNullOrWhiteSpace(parsed.CollectionSite) ||
@@ -510,8 +519,10 @@ public sealed class SpecialistMailboxOrderParser
                 };
                 var totalQuantity = parsed.LineItems.Sum(row => row.TotalQuantity);
                 var carrierQuantity = parsed.LineItems.Sum(row => row.CarrierQuantity);
+                var isBarfoots = parsed.Destination.StartsWith("Barfoots ", StringComparison.OrdinalIgnoreCase);
+                var customerCode = isBarfoots ? "BARFOOTS" : "SUMMERBERRY";
                 var reference = BuildReference(parsed.SalesOrderNumber, parsed.Destination);
-                var naturalKey = $"BARFOOTS|EUROPOOL|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyy-MM-dd}";
+                var naturalKey = $"{customerCode}|EUROPOOL|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyy-MM-dd}";
                 var instructions = string.Join(" · ", new[]
                 {
                     "Order type: Euro Pool tray collection",
@@ -526,10 +537,12 @@ public sealed class SpecialistMailboxOrderParser
                 {
                     ["poNumber"] = reference,
                     ["customerPo"] = parsed.SalesOrderNumber,
-                    ["customerCode"] = "BARFOOTS",
+                    ["customerCode"] = customerCode,
                     ["collectionDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
                     ["deliveryDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                    ["pallets"] = null,
+                    // Euro Pool order quantity is load-carrier quantity; retain the
+                    // tray total separately so mapping has a usable handling-unit count.
+                    ["pallets"] = carrierQuantity,
                     ["unitType"] = "Euro Pool Trays",
                     ["handlingUnitType"] = "Euro Pool Trays",
                     ["handlingUnitQuantity"] = totalQuantity,
@@ -541,7 +554,7 @@ public sealed class SpecialistMailboxOrderParser
                     ["collectionPoint"] = parsed.CollectionSite,
                     ["stallNumber"] = parsed.Destination,
                     ["destination"] = parsed.Destination,
-                    ["marketName"] = "BARFOOTS",
+                    ["marketName"] = customerCode,
                     ["jobType"] = "Euro Pool tray collection",
                     ["orderType"] = "Delivery",
                     ["driverInstructions"] = instructions,
@@ -555,10 +568,10 @@ public sealed class SpecialistMailboxOrderParser
                     ["sourceWebLink"] = request.WebLink,
                     ["sourceAttachmentName"] = attachment.Name,
                     ["intakeNaturalKey"] = naturalKey,
-                    ["amendmentMatchKey"] = $"BARFOOTS|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}",
-                    ["intakeMatchKeys"] = new[] { $"BARFOOTS|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}" },
-                    ["intakeParser"] = "Barfoots Euro Pool confirmation PDF",
-                    ["intakeProfile"] = "BARFOOTS_EUROPOOL_CONFIRMATION_PDF",
+                    ["amendmentMatchKey"] = $"{customerCode}|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}",
+                    ["intakeMatchKeys"] = new[] { $"{customerCode}|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}" },
+                    ["intakeParser"] = "Euro Pool confirmation PDF",
+                    ["intakeProfile"] = isBarfoots ? "BARFOOTS_EUROPOOL_CONFIRMATION_PDF" : "SUMMERBERRY_EUROPOOL_CONFIRMATION_PDF",
                     ["intakeConfidence"] = "Medium",
                     ["intakeWarnings"] = rowWarnings,
                     ["plannerReady"] = false,
@@ -599,6 +612,7 @@ public sealed class SpecialistMailboxOrderParser
             : null;
         var collectionMatch = EuroPoolCollectionRegex.Match(text);
         var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(text);
+        var summerBerryDestinationMatch = EuroPoolSummerBerryDestinationRegex.Match(text);
         var totalQuantityHeaderIndex = text.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
         var itemText = totalQuantityHeaderIndex < 0
             ? text
@@ -619,7 +633,9 @@ public sealed class SpecialistMailboxOrderParser
             collectionMatch.Success ? collectionMatch.Groups["site"].Value.Trim() : null,
             destinationMatch.Success
                 ? $"Barfoots {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(destinationMatch.Groups["site"].Value.ToLowerInvariant())}"
-                : null,
+                : summerBerryDestinationMatch.Success
+                    ? $"Summer Berry {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(summerBerryDestinationMatch.Groups["site"].Value.ToLowerInvariant())}"
+                    : null,
             lineItems);
     }
 
