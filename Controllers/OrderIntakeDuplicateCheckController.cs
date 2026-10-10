@@ -68,6 +68,52 @@ public sealed class OrderIntakeDuplicateCheckController(
         }
     }
 
+    [HttpDelete("staging/{stagingId:guid}")]
+    [Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> DeleteExactStagedDuplicate(Guid stagingId, CancellationToken ct)
+    {
+        var staged = await db.StagedImports.SingleOrDefaultAsync(
+            item => item.Id == stagingId && item.EntityType == "order" && item.Status == StagingStatus.PendingReview, ct);
+        if (staged is null) return NotFound(new { message = "Pending staged order not found." });
+
+        OrderSnapshot incoming;
+        try
+        {
+            using var document = JsonDocument.Parse(staged.PayloadJson);
+            incoming = OrderSnapshot.FromPayload(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return Conflict(new { message = "The staged order payload cannot be safely compared and was not deleted." });
+        }
+
+        var reference = incoming.OrderReference ?? incoming.Po;
+        if (string.IsNullOrWhiteSpace(reference))
+            return Conflict(new { message = "The order has no reliable reference for an exact duplicate check." });
+
+        var liveOrders = await db.TransportOrders.AsNoTracking()
+            .Where(order => order.Reference == reference && order.Status != OrderStatus.Cancelled)
+            .ToListAsync(ct);
+        var exactMatch = liveOrders.Any(order =>
+            Classify(incoming, OrderSnapshot.FromLive(order)) == "Exact duplicate");
+        if (!exactMatch)
+            return Conflict(new { message = "This staged order is not an exact match to a live order and was not deleted." });
+
+        var hasLinkedOrder = await db.TransportOrders.AnyAsync(order => order.SourceStagedImportId == stagingId, ct);
+        var hasLinkedRevision = await db.OrderRevisions.AnyAsync(revision => revision.StagedImportId == stagingId, ct);
+        var hasLinkedReservation = await db.BookingReservations.AnyAsync(reservation => reservation.SourceStagedImportId == stagingId, ct);
+        if (hasLinkedOrder || hasLinkedRevision || hasLinkedReservation)
+            return Conflict(new { message = "This duplicate has linked operational records. It was not deleted." });
+
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        var events = await db.StagedImportEvents.Where(item => item.StagedImportId == stagingId).ToListAsync(ct);
+        db.StagedImportEvents.RemoveRange(events);
+        db.StagedImports.Remove(staged);
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+        return Ok(new { deleted = true, stagingId, removedEvents = events.Count, classification = "Exact duplicate" });
+    }
+
     [HttpPost]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Check([FromBody] OrderIntakeDuplicateCheckRequest request, CancellationToken ct)

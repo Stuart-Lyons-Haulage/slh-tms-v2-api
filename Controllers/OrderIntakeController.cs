@@ -170,6 +170,18 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
             var order = preparedOrder.Order;
             var stagedPayload = EnrichSourceEvidence(order.Payload, request);
+            if (await IsExactLiveOrderDuplicate(stagedPayload, ct))
+            {
+                existing++;
+                records.Add(new
+                {
+                    stagingId = (Guid?)null,
+                    status = "ExactDuplicateSuppressed",
+                    existing = true,
+                    reviewUrl = (string?)null
+                });
+                continue;
+            }
             var item = stagingService.Create(new StageImportRequest(
                 "order",
                 preparedOrder.IdempotencyKey,
@@ -203,6 +215,21 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+    }
+
+    private async Task<bool> IsExactLiveOrderDuplicate(JsonElement payload, CancellationToken ct)
+    {
+        var incoming = OrderIntakeDuplicateCheckController.OrderSnapshot.FromPayload(payload);
+        var reference = incoming.OrderReference ?? incoming.Po;
+        if (string.IsNullOrWhiteSpace(reference)) return false;
+
+        var liveOrders = await db.TransportOrders.AsNoTracking()
+            .Where(order => order.Reference == reference && order.Status != OrderStatus.Cancelled)
+            .ToListAsync(ct);
+        return liveOrders.Any(order =>
+            OrderIntakeDuplicateCheckController.Classify(
+                incoming,
+                OrderIntakeDuplicateCheckController.OrderSnapshot.FromLive(order)) == "Exact duplicate");
     }
 
     internal static List<ParsedEmailOrder> DeduplicateParsedOrders(IReadOnlyCollection<ParsedEmailOrder> orders)
