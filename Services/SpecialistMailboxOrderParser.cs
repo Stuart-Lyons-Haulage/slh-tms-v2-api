@@ -504,7 +504,7 @@ public sealed class SpecialistMailboxOrderParser
         var delivery = Regex.Match(source, @"\bDelivery Number\s*:?\s*(?<ref>\d{8,})", RegexOptions.IgnoreCase);
         if (!delivery.Success) delivery = Regex.Match(subject, @"\b(?<ref>\d{8,})\s*$");
         var order = Regex.Match(source, @"\bOrder Number\s*:?\s*(?<ref>\d{6,})", RegexOptions.IgnoreCase);
-        var tray = Regex.Match(source, @"\b(?<code>CHBA\w*)\s+Standard Nesting Tray\s+(?<qty>[\d,]+)\s+PCS\s+(?<weight>[\d,]+)\s+KG", RegexOptions.IgnoreCase);
+        var tray = Regex.Match(source, @"\b(?<code>CHBA\w*)\b.*?\btray\b.*?(?<qty>[\d,]+)\s*PCS.*?(?<weight>[\d,]+)\s*KG", RegexOptions.IgnoreCase);
         var pallet = Regex.Match(source, @"\b(?<code>CHEP\w*)\s+CHEP Pallet\s+\d+\s+(?<qty>[\d,]+)\s+PCS", RegexOptions.IgnoreCase);
         var destination = route.Groups["to"].Value.Trim();
         var collection = route.Groups["from"].Value.Trim();
