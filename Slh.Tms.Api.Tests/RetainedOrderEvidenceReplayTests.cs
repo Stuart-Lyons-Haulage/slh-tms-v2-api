@@ -335,6 +335,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         var messageId = $"replay-multi-date-{Guid.NewGuid():N}";
         var targetId = Guid.NewGuid();
         var otherDateId = Guid.NewGuid();
+        var receivedAt = DateTimeOffset.UtcNow;
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
@@ -349,7 +350,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
                     senderAddress = "chris.benning@primafruit.co.uk",
                     senderName = "Chris Benning",
                     subject = "HHP WAITROSE DIRECT DEPOT DELIVERY 19.9.26",
-                    receivedAtUtc = "2026-09-18T08:07:40Z",
+                    receivedAtUtc = receivedAt.ToString("O"),
                     bodyText = "Please collect 3 pallets from Hall Hunter today 18/09/2026.\n* Leyland 3 pallets\nFor Delivery date Saturday 19/09/2026.\nPO number: A65681. 95 cases of Strawberries.",
                     bodyFormat = "text",
                     attachments = Array.Empty<object>(),
@@ -357,7 +358,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
                 }),
                 Status = StagingStatus.Archived,
                 Source = "Info mailbox evidence / chris.benning@primafruit.co.uk",
-                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-18T08:07:40Z")
+                ReceivedAtUtc = receivedAt
             });
             db.StagedImports.Add(new StagedImport
             {
@@ -377,7 +378,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
                 }),
                 Status = StagingStatus.PendingReview,
                 Source = "Info mailbox / old-parser@example.test",
-                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-18T08:07:41Z")
+                ReceivedAtUtc = receivedAt.AddSeconds(1)
             });
             db.StagedImports.Add(new StagedImport
             {
@@ -397,7 +398,7 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
                 }),
                 Status = StagingStatus.PendingReview,
                 Source = "Info mailbox / old-parser@example.test",
-                ReceivedAtUtc = DateTimeOffset.Parse("2026-09-18T08:07:42Z")
+                ReceivedAtUtc = receivedAt.AddSeconds(2)
             });
             await db.SaveChangesAsync();
         }
@@ -407,8 +408,8 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
             "/api/v1/order-intake/replay-retained-evidence",
             new StringContent(JsonSerializer.Serialize(new
             {
-                receivedFromUtc = "2026-09-18T00:00:00Z",
-                receivedToUtc = "2026-09-19T00:00:00Z",
+                receivedFromUtc = receivedAt.AddSeconds(-1),
+                receivedToUtc = receivedAt.AddSeconds(5),
                 minimumPlanningDate = "2026-09-19",
                 maximumPlanningDate = "2026-09-19",
                 refreshUnamendedPending = true,
