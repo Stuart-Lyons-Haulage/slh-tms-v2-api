@@ -68,4 +68,59 @@ public sealed class OrderIntakeSourceEvidenceTests
             firstEvidence.GetProperty("sourceEvidenceKey").GetString(),
             secondEvidence.GetProperty("sourceEvidenceKey").GetString());
     }
+    [Fact]
+    public void DeduplicateParsedOrders_KeepsTheCleanProjectionForDuplicateOrderRows()
+    {
+        var warningPayload = JsonSerializer.SerializeToElement(new
+        {
+            customerCode = "NWF",
+            customerPo = "PO-123",
+            collectionDate = "2026-10-12",
+            deliveryDate = "2026-10-12",
+            sellerName = "Ham Farm",
+            stallNumber = "NWF-Selsey",
+            pallets = 6,
+            plannerReady = false
+        });
+        var cleanPayload = JsonSerializer.SerializeToElement(new
+        {
+            customerCode = "NWF",
+            customerPo = "PO-123",
+            collectionDate = "2026-10-12",
+            deliveryDate = "2026-10-12",
+            sellerName = "Ham Farm",
+            stallNumber = "NWF-Selsey",
+            pallets = 6,
+            plannerReady = true
+        });
+        var warning = new ParsedEmailOrder("duplicate-1", "same-order", warningPayload, ["Missing load ref"]);
+        var clean = new ParsedEmailOrder("duplicate-2", "same-order", cleanPayload, []);
+
+        var unique = OrderIntakeController.DeduplicateParsedOrders([warning, clean]);
+
+        var result = Assert.Single(unique);
+        Assert.Equal("duplicate-2", result.SourceKey);
+        Assert.True(result.Payload.GetProperty("plannerReady").GetBoolean());
+    }
+
+    [Fact]
+    public void PendingProjectionImproved_RecognisesAResolvedMappingPlaceholder()
+    {
+        const string existing = """{"customerCode":"IFCO","pallets":0,"collectionDate":"2026-10-12","deliveryDate":"2026-10-12","plannerReady":false}""";
+        var payload = JsonSerializer.SerializeToElement(new
+        {
+            customerCode = "IFCO",
+            customerPo = "304198872",
+            collectionDate = "2026-10-12",
+            deliveryDate = "2026-10-12",
+            sellerName = "IFCO Coventry",
+            stallNumber = "Barfoots Sefter",
+            pallets = 19,
+            plannerReady = true
+        });
+        var incoming = new ParsedEmailOrder("ifco-pdf", "ifco-order", payload, []);
+
+        Assert.True(OrderIntakeController.PendingProjectionImproved(existing, incoming));
+    }
+
 }
