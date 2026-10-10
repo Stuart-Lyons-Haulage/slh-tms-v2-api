@@ -548,4 +548,27 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.NotNull(result.IgnoredReason);
         Assert.Contains("attachment", result.IgnoredReason, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void IfcoRouteSubject_IsRetainedForReviewWhenConfirmationPdfIsUnavailable()
+    {
+        var request = new MailboxEmailIntakeRequest("ifco-route-no-pdf", null, "info@lyonshaulage.com",
+            "Kamila.Biohn@barfoots.co.uk", "Kamila Biohn",
+            "Ifco trays collection on 12.10 from Coventry to Sefter, 285440540",
+            DateTimeOffset.Parse("2026-10-09T10:15:26Z"),
+            "Please arrange the collection.", null, null, null);
+
+        var result = parser.TryParse(request);
+
+        Assert.NotNull(result);
+        var order = Assert.Single(result!.Orders).Payload;
+        Assert.Equal("2026-10-12", order.GetProperty("collectionDate").GetString());
+        Assert.Equal("Coventry", order.GetProperty("sellerName").GetString());
+        Assert.Equal("Sefter", order.GetProperty("stallNumber").GetString());
+        Assert.Equal("285440540", order.GetProperty("collectionReference").GetString());
+        Assert.Equal("IFCO subject route fallback", order.GetProperty("intakeParser").GetString());
+        Assert.False(order.GetProperty("plannerReady").GetBoolean());
+        Assert.Contains(result.Orders.Single().Warnings, warning => warning.Contains("quantities", StringComparison.OrdinalIgnoreCase));
+    }
+
 }

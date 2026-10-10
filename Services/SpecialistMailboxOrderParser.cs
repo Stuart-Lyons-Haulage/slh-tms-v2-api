@@ -132,6 +132,12 @@ public sealed class SpecialistMailboxOrderParser
         {
             var ifcoPdf = ParseIfcoConfirmationPdf(request, subject, body);
             if (ifcoPdf is not null) return ifcoPdf;
+
+            // A clear route/reference in the subject is still usable source data
+            // when a confirmation PDF is missing, unreadable, or not an IFCO PDF.
+            // Keep it in review because item quantities cannot be safely inferred.
+            var ifcoRoute = ParseIfcoSubjectRoute(request, subject);
+            if (ifcoRoute is not null) return ifcoRoute;
         }
 
         var transfer = TransferSubjectRegex.Match(subject);
@@ -467,6 +473,51 @@ public sealed class SpecialistMailboxOrderParser
 
         if (orders.Count == 0) return null;
         return new EmailIntakeParseResult(orders, warnings, null);
+    }
+
+    private static EmailIntakeParseResult? ParseIfcoSubjectRoute(MailboxEmailIntakeRequest request, string subject)
+    {
+        var route = IfcoSubjectRouteRegex.Match(subject);
+        if (!route.Success) return null;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var date = ParseFlexibleNumericDate(route.Groups["date"].Value, received.Year);
+        if (date is null) return null;
+
+        var collection = CleanDropName(route.Groups["from"].Value);
+        var destination = CleanDropName(route.Groups["to"].Value);
+        var reference = route.Groups["ref"].Success
+            ? CleanReference(route.Groups["ref"].Value)
+            : StableEmailReference(request.MessageId);
+        var delivery = Regex.Match(subject, @"\b(?<ref>\d{8,})\s*$");
+        var deliveryRef = delivery.Success ? delivery.Groups["ref"].Value : reference;
+        var warnings = new List<string>
+        {
+            "IFCO confirmation details were unavailable; confirm tray and pallet quantities before approval."
+        };
+        var keys = BuildIfcoMatchKeys(date.Value, reference, null, deliveryRef, collection, destination);
+        var payload = BuildIfcoPayload(
+            request,
+            BuildReference(reference, destination),
+            reference,
+            null,
+            deliveryRef,
+            date.Value,
+            date.Value,
+            null,
+            collection,
+            destination,
+            "Route and reference were read from the email subject.",
+            warnings,
+            keys);
+        var mutable = JsonNode.Parse(payload.GetRawText())!.AsObject();
+        mutable["trays"] = null;
+        mutable["weightKg"] = null;
+        mutable["intakeParser"] = "IFCO subject route fallback";
+        return new EmailIntakeParseResult(
+            [new ParsedEmailOrder("ifco-subject-route", NaturalKey(request, "IFCO", destination, date.Value, reference), JsonSerializer.SerializeToElement(mutable), warnings)],
+            [],
+            null);
     }
 
     private static EmailIntakeParseResult? ParseIfcoConfirmationPdf(MailboxEmailIntakeRequest request, string subject, string body)
