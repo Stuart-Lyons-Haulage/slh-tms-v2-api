@@ -138,8 +138,7 @@ public sealed class RetainedOrderEvidenceReplayController(
             }
 
             var eligibleOrders = parsed.Orders
-                .Where(order => IsOnOrAfter(order.Payload, minimumPlanningDate) &&
-                                (maximumPlanningDate is null || IsOnOrBefore(order.Payload, maximumPlanningDate.Value)))
+                .Where(order => IsWithinPlanningWindow(order.Payload, minimumPlanningDate, maximumPlanningDate))
                 .ToList();
 
             if (eligibleOrders.Count == 0)
@@ -175,18 +174,28 @@ public sealed class RetainedOrderEvidenceReplayController(
                 // source key. Match retained message evidence in memory after a
                 // bounded pending-review query so replay always replaces the stale
                 // import without relying on provider-specific JSON string translation.
+                var messagePending = pendingCandidates
+                    .Where(item => item.Status == StagingStatus.PendingReview &&
+                                   item.PayloadJson.Contains(mailboxRequest.MessageId, StringComparison.Ordinal))
+                    .ToList();
+                var messagePendingInWindow = messagePending
+                    .Where(item => PayloadIsWithinPlanningWindow(item.PayloadJson, minimumPlanningDate, maximumPlanningDate))
+                    .ToList();
+                // A message can project several legitimate orders across different
+                // planning dates. Match by deterministic key first; use message ID
+                // only when it identifies one unambiguous stale projection for this
+                // replay window (or the message has only one pending projection).
+                var unambiguousMessageMatches = new List<StagedImport>();
+                if (eligibleOrders.Count == 1)
+                {
+                    if (messagePending.Count == 1)
+                        unambiguousMessageMatches = messagePending;
+                    else if (messagePendingInWindow.Count == 1)
+                        unambiguousMessageMatches = messagePendingInWindow;
+                }
                 var existingPending = pendingCandidates
-                    .Where(item =>
-                    {
-                        if (item.Status != StagingStatus.PendingReview) return false;
-                        // Refresh every unamended pending projection for this retained
-                        // message, including one with the current deterministic key.
-                        // The source evidence is authoritative: a parser correction or
-                        // amended attachment must replace the old payload rather than
-                        // being mistaken for an idempotent no-op.
-                        return (keys.Contains(item.IdempotencyKey) ||
-                                item.PayloadJson.Contains(mailboxRequest.MessageId, StringComparison.Ordinal));
-                    })
+                    .Where(item => item.Status == StagingStatus.PendingReview &&
+                                   (keys.Contains(item.IdempotencyKey) || unambiguousMessageMatches.Contains(item)))
                     .ToList();
 
                 foreach (var pending in existingPending)
@@ -332,8 +341,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         var archived = 0;
         foreach (var item in candidates)
         {
-            if (!PayloadIsOnOrAfter(item.PayloadJson, minimumPlanningDate)) continue;
-            if (maximumPlanningDate is not null && !PayloadIsOnOrBefore(item.PayloadJson, maximumPlanningDate.Value)) continue;
+            if (!PayloadIsWithinPlanningWindow(item.PayloadJson, minimumPlanningDate, maximumPlanningDate)) continue;
             var manuallyAmended = await db.StagedImportEvents.AsNoTracking()
                 .AnyAsync(evt => evt.StagedImportId == item.Id && evt.EventType == "Amended", ct);
             if (manuallyAmended) continue;
@@ -396,25 +404,15 @@ public sealed class RetainedOrderEvidenceReplayController(
     private static string NormaliseKey(string value) =>
         new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
-    private static bool PayloadIsOnOrAfter(string payloadJson, DateOnly minimumPlanningDate)
+    private static bool PayloadIsWithinPlanningWindow(
+        string payloadJson,
+        DateOnly minimumPlanningDate,
+        DateOnly? maximumPlanningDate)
     {
         try
         {
             using var document = JsonDocument.Parse(payloadJson);
-            return IsOnOrAfter(document.RootElement, minimumPlanningDate);
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static bool PayloadIsOnOrBefore(string payloadJson, DateOnly maximumPlanningDate)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(payloadJson);
-            return IsOnOrBefore(document.RootElement, maximumPlanningDate);
+            return IsWithinPlanningWindow(document.RootElement, minimumPlanningDate, maximumPlanningDate);
         }
         catch (JsonException)
         {
@@ -470,14 +468,14 @@ public sealed class RetainedOrderEvidenceReplayController(
             Text(root, "correlationId"));
     }
 
-    private static bool IsOnOrAfter(JsonElement payload, DateOnly minimumPlanningDate)
+    private static bool IsWithinPlanningWindow(
+        JsonElement payload,
+        DateOnly minimumPlanningDate,
+        DateOnly? maximumPlanningDate)
     {
-        return OperationalDates(payload).Any(value => value >= minimumPlanningDate);
-    }
-
-    private static bool IsOnOrBefore(JsonElement payload, DateOnly maximumPlanningDate)
-    {
-        return OperationalDates(payload).Any(value => value <= maximumPlanningDate);
+        return OperationalDates(payload).Any(value =>
+            value >= minimumPlanningDate &&
+            (maximumPlanningDate is null || value <= maximumPlanningDate.Value));
     }
 
     private static IEnumerable<DateOnly> OperationalDates(JsonElement payload)
