@@ -33,6 +33,6 @@ public sealed class DriverDispatchEmploymentClassificationTests
 
         Assert.Equal("Agency", DriverDispatchVisibilityStore.EmploymentType(agency, roster));
         Assert.Equal("Agency", DriverDispatchVisibilityStore.EmploymentType(agency, roster, rosteredAgency: true));
-        Assert.Equal("Unknown", DriverDispatchVisibilityStore.EmploymentType(subcontractor, roster));
+        Assert.Equal("Subcontractor", DriverDispatchVisibilityStore.EmploymentType(subcontractor, roster));
     }
 }

@@ -194,6 +194,7 @@ public static class DriverAvailabilityService
             "Agency" when !confirmed => "Agency unconfirmed",
             "Casual" when confirmed && dispatchable => "Casual confirmed",
             "Casual" when !confirmed => "Casual unconfirmed",
+            "Subcontractor" when dispatchable => "Subcontractor available",
             _ => "Unavailable/blocked"
         };
         if (!dispatchable && confirmed) group = "Unavailable/blocked";
@@ -235,6 +236,7 @@ public static class DriverAvailabilityService
     {
         var token = Normalise($"{value} {fallback}");
         if (token.Contains("AGENCY", StringComparison.Ordinal)) return "Agency";
+        if (token.Contains("SUBCONTRACT", StringComparison.Ordinal) || token.Contains("SUBBIE", StringComparison.Ordinal) || token.Contains("SUBCON", StringComparison.Ordinal)) return "Subcontractor";
         if (token.Contains("CASUAL", StringComparison.Ordinal) || token.Contains("ZEROHOUR", StringComparison.Ordinal)) return "Casual";
         if (token.Contains("EMPLOY", StringComparison.Ordinal) || token.Contains("DRIVER", StringComparison.Ordinal) || token.Contains("TRAMP", StringComparison.Ordinal)) return "Employed";
         return "Unknown";
