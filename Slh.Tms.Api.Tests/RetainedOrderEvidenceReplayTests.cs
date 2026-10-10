@@ -73,7 +73,8 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Approve");
         var request = JsonSerializer.Serialize(new
         {
-            receivedFromUtc = "2026-09-15T00:00:00Z",
+            receivedFromUtc = "2026-09-18T00:00:00Z",
+            receivedToUtc = "2026-09-19T00:00:00Z",
             minimumPlanningDate = "2026-09-19",
             maximumPlanningDate = "2026-09-19",
             refreshUnamendedPending = true,
@@ -406,7 +407,8 @@ public sealed class RetainedOrderEvidenceReplayTests : IClassFixture<CustomWebFa
             "/api/v1/order-intake/replay-retained-evidence",
             new StringContent(JsonSerializer.Serialize(new
             {
-                receivedFromUtc = "2026-09-15T00:00:00Z",
+                receivedFromUtc = "2026-09-18T00:00:00Z",
+                receivedToUtc = "2026-09-19T00:00:00Z",
                 minimumPlanningDate = "2026-09-19",
                 maximumPlanningDate = "2026-09-19",
                 refreshUnamendedPending = true,
