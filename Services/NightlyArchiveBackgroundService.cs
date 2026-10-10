@@ -16,8 +16,6 @@ public sealed class NightlyArchiveOptions
     public string RootPath { get; set; } = string.Empty;
     public int AuditOutboxRetentionDays { get; set; } = 7;
     public int TelemetryRetentionDays { get; set; } = 90;
-    public int GeofenceRetentionDays { get; set; } = 180;
-    public int EtaRetentionDays { get; set; } = 90;
     public int SyncReceiptRetentionDays { get; set; } = 30;
     public int BatchSize { get; set; } = 500;
     public int MaxRowsPerTablePerRun { get; set; } = 10000;
@@ -85,8 +83,6 @@ public sealed class NightlyArchiveBackgroundService(
         var now = DateTimeOffset.UtcNow;
         await ArchiveAuditOutboxAsync(db, dayRoot, now.AddDays(-Math.Max(1, cfg.AuditOutboxRetentionDays)), cfg, ct);
         await ArchiveTrackingAsync(db, dayRoot, now.AddDays(-Math.Max(7, cfg.TelemetryRetentionDays)), cfg, ct);
-        await ArchiveGeofenceVisitsAsync(db, dayRoot, now.AddDays(-Math.Max(30, cfg.GeofenceRetentionDays)), cfg, ct);
-        await ArchiveEtaAsync(db, dayRoot, now.AddDays(-Math.Max(7, cfg.EtaRetentionDays)), cfg, ct);
         await ArchiveSyncReceiptsAsync(db, dayRoot, now.AddDays(-Math.Max(7, cfg.SyncReceiptRetentionDays)), cfg, ct);
     }
 
@@ -114,32 +110,6 @@ public sealed class NightlyArchiveBackgroundService(
                 .Where(x => x.EventTimeUtc < cutoff).OrderBy(x => x.EventTimeUtc).Take(take).ToListAsync(ct),
             rows => rows.Select(x => x.Id).ToArray(),
             async ids => await db.VehicleTrackingEvents.Where(x => ids.Contains(x.Id)).ExecuteDeleteAsync(ct),
-            ct);
-    }
-
-    private async Task ArchiveGeofenceVisitsAsync(TmsDbContext db, string root, DateTimeOffset cutoff, NightlyArchiveOptions cfg, CancellationToken ct)
-    {
-        await ArchiveInBatchesAsync(
-            "GeofenceVisits",
-            root,
-            cfg,
-            async take => await db.GeofenceVisits.AsNoTracking()
-                .Where(x => x.UpdatedAtUtc < cutoff).OrderBy(x => x.UpdatedAtUtc).Take(take).ToListAsync(ct),
-            rows => rows.Select(x => x.Id).ToArray(),
-            async ids => await db.GeofenceVisits.Where(x => ids.Contains(x.Id)).ExecuteDeleteAsync(ct),
-            ct);
-    }
-
-    private async Task ArchiveEtaAsync(TmsDbContext db, string root, DateTimeOffset cutoff, NightlyArchiveOptions cfg, CancellationToken ct)
-    {
-        await ArchiveInBatchesAsync(
-            "EtaSnapshots",
-            root,
-            cfg,
-            async take => await db.EtaSnapshots.AsNoTracking()
-                .Where(x => x.CapturedAtUtc < cutoff).OrderBy(x => x.CapturedAtUtc).Take(take).ToListAsync(ct),
-            rows => rows.Select(x => x.Id).ToArray(),
-            async ids => await db.EtaSnapshots.Where(x => ids.Contains(x.Id)).ExecuteDeleteAsync(ct),
             ct);
     }
 

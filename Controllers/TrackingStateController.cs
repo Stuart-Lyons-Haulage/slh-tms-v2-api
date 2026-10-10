@@ -10,14 +10,11 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class TrackingStateController(
     DotTrackingClient trackingClient,
     DotTrackingOptions options,
-    IConfiguration configuration,
     ILogger<TrackingStateController> logger) : ControllerBase
 {
-    [HttpGet, AllowAnonymous]
+    [HttpGet]
     public async Task<IActionResult> Get(CancellationToken ct)
     {
-        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
-
         var checkedAtUtc = DateTimeOffset.UtcNow;
         try
         {

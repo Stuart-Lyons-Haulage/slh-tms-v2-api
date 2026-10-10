@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
@@ -11,7 +12,7 @@ namespace Slh.Tms.Api.Tests;
 public sealed class TachoContinuousEnrichmentTests
 {
     [Fact]
-    public async Task Falcon_identity_is_merged_when_TachoMaster_already_has_some_vehicle_duties()
+    public async Task Current_driver_status_does_not_make_live_tracking_lookup()
     {
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         var now = DateTimeOffset.UtcNow;
@@ -42,25 +43,26 @@ public sealed class TachoContinuousEnrichmentTests
                 Password = "secret"
             },
             NullLogger<TachoMasterClient>.Instance,
-            dotClient);
+            dotClient,
+            new MemoryCache(new MemoryCacheOptions()));
 
         var statuses = await client.GetCurrentDriverStatusesByVehicleAsync(today);
+        _ = await client.GetCurrentDriverStatusesByVehicleAsync(today);
 
-        Assert.Equal(2, statuses.Count);
+        Assert.Single(statuses);
         Assert.Equal("Jane Duty", statuses["AB12CDE"].DriverName);
         Assert.Equal(90, statuses["AB12CDE"].DriveMinutes);
-        Assert.Equal("Sam Falcon", statuses["XY34ZTT"].DriverName);
-        Assert.Equal("CARD20000002", statuses["XY34ZTT"].CardNumber);
-        Assert.Equal("FalconLiveCard", statuses["XY34ZTT"].EvidenceSource);
-        Assert.Equal(0, statuses["XY34ZTT"].DriveMinutes);
-        Assert.Equal(420, statuses["XY34ZTT"].DriveAvailableTodayMinutes);
-        Assert.Contains("/api/Falcon/GetCurrentTelemetry", falconHandler.Paths);
+        Assert.DoesNotContain("/api/Falcon/GetCurrentTelemetry", falconHandler.Paths);
+        Assert.Equal(1, tachoHandler.LoginCount);
     }
 
     private sealed class PartialDutyHandler(DateOnly today) : HttpMessageHandler
     {
+        public int LoginCount { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath == "/api/auth/login") LoginCount++;
             var start = today.ToDateTime(new TimeOnly(6, 0), DateTimeKind.Utc);
             var payload = request.RequestUri!.AbsolutePath switch
             {

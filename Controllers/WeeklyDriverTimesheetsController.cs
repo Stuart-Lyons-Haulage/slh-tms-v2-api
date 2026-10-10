@@ -197,7 +197,7 @@ public sealed class WeeklyDriverTimesheetsController(
         var legacyFallbackDays = 0;
 
         // RoadTech deliberately remains the owner of breadcrumb history. The operational SQL
-        // database stores current state/geofence visits rather than every GPS point, so timesheets
+        // database stores current driver state rather than every GPS point, so timesheets
         // must read the provider's historical endpoint instead of expecting VehicleTrackingEvents
         // to contain a complete journey trail.
         for (var day = from; day <= to.AddDays(1); day = day.AddDays(1))
@@ -253,42 +253,6 @@ public sealed class WeeklyDriverTimesheetsController(
                     trackingByDate[day] = [];
                 }
             }
-        }
-
-        IReadOnlyList<DepotPoint> depotPoints = [];
-        try
-        {
-            depotPoints = await db.MasterDepots.AsNoTracking()
-                .Where(x => x.IsActive && x.Latitude != null && x.Longitude != null)
-                .Select(x => new DepotPoint(x.Latitude!.Value, x.Longitude!.Value, x.GeofenceRadiusMetres ?? 500))
-                .ToListAsync(ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Depot geofences were unavailable for timesheet night-out inference; uncertain events remain possible night outs.");
-        }
-
-        IReadOnlyList<LorryParkEvidence> lorryParkEvidence = [];
-        try
-        {
-            var evidenceFrom = StartOfUkDay(from).AddDays(-1);
-            var evidenceTo = StartOfUkDay(to.AddDays(2));
-            lorryParkEvidence = await db.GeofenceVisits.AsNoTracking()
-                .Join(db.SiteGeofences.AsNoTracking().Where(fence => fence.Active &&
-                    (EF.Functions.Like(fence.Category ?? "", "%lorry%park%") ||
-                     EF.Functions.Like(fence.Name, "%lorry park%") ||
-                     EF.Functions.Like(fence.Name, "%truck stop%") ||
-                     EF.Functions.Like(fence.Name, "%truckstop%"))),
-                    visit => visit.GeofenceId,
-                    fence => fence.Id,
-                    (visit, fence) => new { visit, fence })
-                .Where(item => item.visit.EnteredAtUtc < evidenceTo && item.visit.LastInsideAtUtc >= evidenceFrom)
-                .Select(item => new LorryParkEvidence(item.visit.VehicleIdentifier, item.visit.EnteredAtUtc, item.visit.LastInsideAtUtc, item.fence.Name))
-                .ToListAsync(ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Lorry-park geofence evidence was unavailable for timesheet night-out inference; tracker/depot evidence remains in use.");
         }
 
         var driverRows = new List<object>();
@@ -429,6 +393,8 @@ public sealed class WeeklyDriverTimesheetsController(
                 }
                 movement = movement.DistinctBy(item => item.ProviderEventId).OrderBy(item => item.EventTimeUtc).ToList();
 
+                var lastMovementEvent = movement.LastOrDefault();
+
                 var firstMovement = movement.Count > 0 ? movement.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var lastMovement = movement.Count > 0 ? movement.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var movementSpanMinutes = firstMovement is not null && lastMovement is not null
@@ -467,9 +433,8 @@ public sealed class WeeklyDriverTimesheetsController(
                 }
 
                 var nextDuty = allDriverDuties.FirstOrDefault(item => tachoEnd is not null && item.DutyStartUtc > tachoEnd.Value);
-                var lastMovementEvent = movement.LastOrDefault();
                 var sameVehicle = nextDuty is not null && string.Equals(Normalise(nextDuty.VehicleCode), Normalise(duties.LastOrDefault()?.VehicleCode), StringComparison.OrdinalIgnoreCase);
-                var nightOut = TimesheetEvidenceRules.AssessNightOut(tachoEnd, nextDuty?.DutyStartUtc, lastMovementEvent?.EventTimeUtc, lastMovementEvent?.Latitude, lastMovementEvent?.Longitude, depotPoints, sameVehicle, lorryParkEvidence, trackingKeys);
+                var nightOut = TimesheetEvidenceRules.AssessNightOut(tachoEnd, nextDuty?.DutyStartUtc, sameVehicle);
                 if (nightOut.Status == "Possible Night Out") reviewReasons.Add(nightOut.Reason);
                 var reviewKey = ReviewKey(driver.Id, day, tachoStart);
                 manualReviews.TryGetValue(reviewKey, out var manualReview);

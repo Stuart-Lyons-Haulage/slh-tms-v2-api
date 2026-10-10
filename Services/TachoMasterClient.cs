@@ -4,23 +4,32 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Models.Tracking;
  
 namespace Slh.Tms.Api.Services;
  
 public sealed class TachoMasterClient
 {
+    private sealed record DutyContextSnapshot(
+        Dictionary<string, List<TachoDuty>> DutiesByVehicle,
+        Dictionary<int, TachoMember> Members,
+        Dictionary<int, TachoMemberMetric> Metrics,
+        IReadOnlyList<TachoMember> MemberList);
+
     private readonly HttpClient httpClient;
     private readonly TachoMasterOptions options;
     private readonly ILogger<TachoMasterClient> logger;
-    private readonly DotTrackingClient? dotTrackingClient;
+    private readonly IMemoryCache? cache;
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> cacheGates = new(StringComparer.Ordinal);
  
-    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null)
+    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null, IMemoryCache? cache = null)
     {
         this.httpClient = httpClient;
         this.options = options;
         this.logger = logger;
-        this.dotTrackingClient = dotTrackingClient;
+        this.cache = cache;
         this.httpClient.Timeout = TimeSpan.FromSeconds(30);
         this.httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
     }
@@ -45,6 +54,11 @@ public sealed class TachoMasterClient
     public async Task<IReadOnlyList<TachoDriverProfile>> GetDriverProfilesAsync(CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return [];
+        return await GetHourlyCachedAsync("tachomaster:driver-profiles", () => LoadDriverProfilesAsync(cancellationToken), cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<TachoDriverProfile>> LoadDriverProfilesAsync(CancellationToken cancellationToken)
+    {
         var sid = await LoginAsync(cancellationToken);
         var membersTask = GetMembersAsync(sid, cancellationToken);
         var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
@@ -74,6 +88,11 @@ public sealed class TachoMasterClient
     public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return [];
+        return await GetHourlyCachedAsync($"tachomaster:driver-duties:{date:yyyy-MM-dd}", () => LoadDriverDutyStatusesAsync(date, cancellationToken), cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<TachoDriverDutyStatus>> LoadDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken)
+    {
  
         var sid = await LoginAsync(cancellationToken);
         var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
@@ -263,11 +282,28 @@ public sealed class TachoMasterClient
         return result;
     }
  
-    private async Task<(
-        Dictionary<string, List<TachoDuty>> DutiesByVehicle,
-        Dictionary<int, TachoMember> Members,
-        Dictionary<int, TachoMemberMetric> Metrics,
-        IReadOnlyList<TachoMember> MemberList)> LoadDutyContextAsync(DateOnly date, CancellationToken cancellationToken)
+    private async Task<DutyContextSnapshot> LoadDutyContextAsync(DateOnly date, CancellationToken cancellationToken)
+    {
+        return await GetHourlyCachedAsync($"tachomaster:duty-context:{date:yyyy-MM-dd}", () => LoadDutyContextFromProviderAsync(date, cancellationToken), cancellationToken);
+    }
+
+    private async Task<T> GetHourlyCachedAsync<T>(string key, Func<Task<T>> load, CancellationToken ct) where T : class
+    {
+        if (cache is null) return await load();
+        if (cache.TryGetValue(key, out T? existing) && existing is not null) return existing;
+        var gate = cacheGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (cache.TryGetValue(key, out existing) && existing is not null) return existing;
+            var value = await load();
+            cache.Set(key, value, TimeSpan.FromHours(1));
+            return value;
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<DutyContextSnapshot> LoadDutyContextFromProviderAsync(DateOnly date, CancellationToken cancellationToken)
     {
         var sid = await LoginAsync(cancellationToken);
         var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
@@ -286,7 +322,7 @@ public sealed class TachoMasterClient
  
         var members = memberList.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
         var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
-        return (dutiesByVehicle, members, metrics, memberList);
+        return new DutyContextSnapshot(dutiesByVehicle, members, metrics, memberList);
     }
  
     private static TachoVehicleDriverStatus? BuildStatus(string vehicle, int memberCode, List<TachoDuty> vehicleDuties, Dictionary<int, TachoMember> members, Dictionary<int, TachoMemberMetric> metrics)
@@ -338,67 +374,14 @@ public sealed class TachoMasterClient
             .Where(pair => pair.Duties.Count > 0)
             .ToDictionary(pair => pair.Key, pair => pair.Duties);
  
-    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(
+    private Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(
         IReadOnlyList<TachoMember> members,
         IReadOnlyDictionary<int, TachoMemberMetric> metrics,
         CancellationToken cancellationToken)
     {
-        if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
-        try
-        {
-            // GetCurrentTelemetry itself is the receipt-freshness evidence. Do not discard a
-            // driver merely because the last movement event timestamp has not changed while the
-            // vehicle is stationary at a customer site.
-            var telemetry = await dotTrackingClient.GetLatestVehicleEventsAsync(cancellationToken);
-            var records = telemetry.Select(DotTelemetryRecord.FromProvider)
-                .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
-                .Where(record => !string.IsNullOrWhiteSpace(record.DriverName) || !string.IsNullOrWhiteSpace(record.DriverCardNumber))
-                .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
-                .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
-                .ToList();
- 
-            var result = new Dictionary<string, TachoVehicleDriverStatus>();
-            foreach (var record in records)
-            {
-                var member = FindMemberByCard(members, record.DriverCardNumber);
-                var resolvedName = !string.IsNullOrWhiteSpace(record.DriverName)
-                    ? record.DriverName!.Trim()
-                    : member is null
-                        ? string.IsNullOrWhiteSpace(record.DriverCardNumber) ? null : "Driver card observed"
-                        : DriverName(member);
-                if (string.IsNullOrWhiteSpace(resolvedName)) continue;
-                var metric = member is null || !metrics.TryGetValue(member.MemCode, out var matchedMetric) ? null : matchedMetric;
- 
-                var vehicle = NormaliseIdentifier(record.VehicleIdentifier);
-                result[vehicle] = new TachoVehicleDriverStatus(
-                    vehicle,
-                    member?.MemCode ?? 0,
-                    resolvedName,
-                    member?.CardNoShort ?? record.DriverCardNumber,
-                    member?.EmployeeNumber,
-                    record.EventTimeUtc,
-                    null,
-                    0, 0, 0, 0, 0,
-                    null,
-                    metric?.DateTimeWhenValid,
-                    metric?.DailyDriverPeriodsAvaiable,
-                    metric?.DriveAvailableToday,
-                    metric?.DriveAvailableTomorrow,
-                    metric?.DriveAvailableWeek,
-                    metric?.DriveAvailableFortnight,
-                    metric?.LongDaysWorkedThisWeek,
-                    metric?.ShortDailyRestTakenThisWeek,
-                    metric?.WorkAvaiableWeek,
-                    "FalconLiveCard");
-            }
- 
-            return result;
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogWarning(exception, "Falcon live driver enrichment was unavailable.");
-            return new Dictionary<string, TachoVehicleDriverStatus>();
-        }
+        // Route assignment and stop progress come from Samsara. Do not make a second
+        // live-position provider call while building Tacho evidence.
+        return Task.FromResult<IReadOnlyDictionary<string, TachoVehicleDriverStatus>>(new Dictionary<string, TachoVehicleDriverStatus>());
     }
  
     private static bool SameIdentity(TachoVehicleDriverStatus duty, TachoVehicleDriverStatus falcon)

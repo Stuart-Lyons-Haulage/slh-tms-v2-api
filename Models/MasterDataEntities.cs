@@ -19,7 +19,6 @@ public sealed class MasterDepot : ActiveMasterRow
     public string? Postcode { get; set; }
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
-    public int? GeofenceRadiusMetres { get; set; }
 }
 
 public sealed class MasterCustomer : ActiveMasterRow
@@ -126,7 +125,6 @@ public sealed class MasterSite : ActiveMasterRow
     public string? Postcode { get; set; }
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
-    public int? GeofenceRadiusMetres { get; set; }
     public string? SiteType { get; set; }
     public TimeSpan? OpenTime { get; set; }
     public TimeSpan? CloseTime { get; set; }

@@ -53,7 +53,7 @@ public sealed class MasterDataBulkDeleteTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Bulk_delete_blocks_site_linked_to_geofence()
+    public async Task Bulk_delete_does_not_use_legacy_boundary_links_as_site_usage()
     {
         var siteId = Guid.NewGuid();
         await using (var scope = _factory.Services.CreateAsyncScope())
@@ -81,14 +81,14 @@ public sealed class MasterDataBulkDeleteTests : IClassFixture<CustomWebFactory>
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
-        Assert.Contains("\"blocked\":1", body);
+        Assert.Contains("\"deleted\":1", body);
         await using var verifyScope = _factory.Services.CreateAsyncScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.True(verifyDb.Sites.Any(site => site.Id == siteId));
+        Assert.False(verifyDb.Sites.Any(site => site.Id == siteId));
     }
 
     [Fact]
-    public async Task Bulk_force_delete_site_detaches_geofence_and_preserves_visit_history()
+    public async Task Bulk_force_delete_site_does_not_run_boundary_link_maintenance()
     {
         var siteId = Guid.NewGuid();
         var geofenceId = Guid.NewGuid();
@@ -132,8 +132,7 @@ public sealed class MasterDataBulkDeleteTests : IClassFixture<CustomWebFactory>
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
         Assert.False(verifyDb.Sites.Any(site => site.Id == siteId));
         var geofence = Assert.Single(verifyDb.SiteGeofences.Where(item => item.Id == geofenceId));
-        Assert.Null(geofence.SiteId);
-        Assert.Null(geofence.SiteNumber);
+        Assert.Equal(siteId, geofence.SiteId);
         Assert.True(verifyDb.GeofenceVisits.Any(visit => visit.Id == visitId));
     }
 }

@@ -238,8 +238,8 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
     {
         string? warning = !site.SiteMatched
             ? $"{runRef}: site '{label}' did not resolve uniquely to Site Master."
-            : !site.GeofenceLinked
-                ? $"{runRef}: Site {site.SiteNumber} ({site.SiteName}) has no active linked geofence."
+            : site.Latitude is null || site.Longitude is null
+                ? $"{runRef}: Site {site.SiteNumber} ({site.SiteName}) needs coordinates before it can be sent to Samsara."
                 : null;
         if (warning is not null && !warnings.Contains(warning)) warnings.Add(warning);
     }

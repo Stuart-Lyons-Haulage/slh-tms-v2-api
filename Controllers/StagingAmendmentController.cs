@@ -110,33 +110,6 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
                 await MasterDetailStore.SaveAsync(db, "site", selected.ExternalCode, JsonSerializer.Serialize(selected), "Order Review delivery-site match", User.Identity?.Name, ct);
             }
 
-            SiteGeofence? geofence = null;
-            Guid? previousGeofenceSiteId = null;
-            if (request.GeofenceId is Guid geofenceId)
-            {
-                geofence = await db.SiteGeofences.FirstOrDefaultAsync(fence => fence.Id == geofenceId && fence.Active, ct);
-                if (geofence is null) return NotFound(new { message = "The selected active geofence no longer exists." });
-                previousGeofenceSiteId = geofence.SiteId;
-                geofence.SiteId = selected.Id;
-                geofence.SiteNumber = selected.ExternalCode;
-                geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                db.MasterDataAudits.Add(new MasterDataAudit
-                {
-                    EntityType = "Geofence",
-                    EntityId = geofence.Id,
-                    Action = "DeliveryImportSiteConfirmed",
-                    ChangedBy = User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "authorised user",
-                    ChangesJson = JsonSerializer.Serialize(new
-                    {
-                        geofence = geofence.Name,
-                        importedDeliveryName = importedName,
-                        previousSiteId = previousGeofenceSiteId,
-                        siteId = selected.Id,
-                        siteCode = selected.ExternalCode
-                    })
-                });
-            }
-
             item.ReviewNote = string.Join(" | ", new[]
             {
                 item.ReviewNote,
@@ -155,10 +128,7 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
                 siteName = selected.Name,
                 siteCode = selected.ExternalCode,
                 importedDeliveryName = importedName,
-                aliasAdded = changed,
-                geofenceLinked = geofence is not null,
-                geofenceName = geofence?.Name,
-                previousGeofenceSiteId
+                aliasAdded = changed
             });
         }
     }
@@ -195,4 +165,4 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
 }
 
 public sealed record StagedPayloadAmendment(JsonElement Payload, string? Note);
-public sealed record DeliverySiteMatchRequest(Guid SiteId, Guid? GeofenceId = null);
+public sealed record DeliverySiteMatchRequest(Guid SiteId);

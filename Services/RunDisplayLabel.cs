@@ -1,61 +1,7 @@
 using System.Text.RegularExpressions;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
-using Slh.Tms.Api.Services;
 
-namespace Slh.Tms.Api.Controllers;
-
-[ApiController]
-[Route("api/v1/tv-display/run-labels")]
-public sealed class TvDisplayRunLabelsController(TmsDbContext db, IConfiguration configuration) : ControllerBase
-{
-    [HttpGet, AllowAnonymous]
-    public async Task<IActionResult> Get(
-        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
-        [FromQuery] DateOnly? date,
-        CancellationToken ct)
-    {
-        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
-        var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
-        if (!pairedKeyAllowed && !legacyKeyAllowed)
-            return Unauthorized(new { message = "This TV display is not authorised." });
-
-        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
-        var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
-            .Where(load => load.Status != LoadStatus.Cancelled)
-            .ToList();
-        await LoadCommercialStore.EnrichAsync(db, loads, ct);
-        foreach (var load in loads) OvernightRunContinuity.Apply(load);
-
-        return Ok(new
-        {
-            planningDate = day,
-            labels = loads
-                .OrderBy(load => load.Stops.Where(stop => stop.PlannedArrivalUtc is not null).Select(stop => stop.PlannedArrivalUtc).Min() ?? DateTimeOffset.MaxValue)
-                .ThenBy(load => load.Reference)
-                .Select(load => new
-                {
-                    loadId = load.Id,
-                    reference = load.Reference,
-                    displayReference = RunDisplayLabel.For(load)
-                }).ToList()
-        });
-    }
-
-    private static DateOnly UkOperatingDate(DateTimeOffset value)
-    {
-        try
-        {
-            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
-        }
-        catch (TimeZoneNotFoundException)
-        {
-            return DateOnly.FromDateTime(value.UtcDateTime);
-        }
-    }
-}
+namespace Slh.Tms.Api.Services;
 
 internal static partial class RunDisplayLabel
 {
@@ -79,9 +25,6 @@ internal static partial class RunDisplayLabel
         var runType = NoteValue(load.PlannerNotes, "Run type");
         var source = string.IsNullOrWhiteSpace(plannerRun) ? StripInternalReference(load.Reference) : plannerRun.Trim();
         var plannedPeriod = PeriodFromFirstStop(load);
-
-        // Sequence is operational truth. A stale imported "AM" must not override a run whose
-        // first actual planned movement is the previous evening at 17:00.
         if (plannedPeriod is not null && NumericRunRegex().IsMatch(source))
             source = PeriodRegex().Replace(source, string.Empty).Trim();
 
@@ -132,8 +75,7 @@ internal static partial class RunDisplayLabel
         foreach (var part in notes.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
             var prefix = $"{key}:";
-            if (part.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                return part[prefix.Length..].Trim();
+            if (part.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return part[prefix.Length..].Trim();
         }
         return null;
     }

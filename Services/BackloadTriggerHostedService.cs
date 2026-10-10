@@ -23,7 +23,6 @@ public sealed class BackloadTriggerHostedService(
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                await ProcessGeofenceDeparturesAsync(stoppingToken);
                 await ProcessScheduledWindowAsync(stoppingToken);
                 await Task.Delay(WatchInterval, timeProvider, stoppingToken);
             }
@@ -31,51 +30,6 @@ public sealed class BackloadTriggerHostedService(
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // Normal host shutdown.
-        }
-    }
-
-    private async Task ProcessGeofenceDeparturesAsync(CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        var operations = scope.ServiceProvider.GetRequiredService<BackloadOperationsService>();
-        var since = timeProvider.GetUtcNow().AddHours(-2);
-        var visits = await db.GeofenceVisits.AsNoTracking()
-            .Where(visit => visit.Status == "Departed" && visit.ConfirmedAtUtc != null && visit.ExitedAtUtc >= since && visit.LoadId != null && visit.LoadStopId != null)
-            .OrderBy(visit => visit.ExitedAtUtc)
-            .Take(100)
-            .ToListAsync(ct);
-
-        foreach (var visit in visits)
-        {
-            var key = $"backload-geofence:{visit.Id:N}";
-            if (await db.StagedImports.AsNoTracking().AnyAsync(row => row.IdempotencyKey == key, ct)) continue;
-
-            var load = await PlanningRegisterStore.GetLoadAsync(db, visit.LoadId!.Value, ct)
-                ?? await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == visit.LoadId.Value, ct);
-            if (load is null || !IsDeliveryStop(load, visit.LoadStopId!.Value))
-            {
-                await WriteReceiptAsync(db, key, new { visit.Id, skipped = true, reason = "not-delivery-stop" }, ct);
-                continue;
-            }
-
-            var live = await db.VehicleLiveStatuses.AsNoTracking()
-                .OrderByDescending(item => item.LastEventTimeUtc)
-                .FirstOrDefaultAsync(item => item.VehicleIdentifier == visit.VehicleIdentifier, ct);
-            if (live is null)
-            {
-                await WriteReceiptAsync(db, key, new { visit.Id, skipped = true, reason = "live-position-unavailable" }, ct);
-                continue;
-            }
-
-            var notification = await operations.EvaluateLoadAsync(load.Id, new MatrixPoint(live.Latitude, live.Longitude), ct);
-            await WriteReceiptAsync(db, key, new
-            {
-                visit.Id,
-                loadId = load.Id,
-                evaluatedAtUtc = timeProvider.GetUtcNow(),
-                matchCount = notification?.Matches.Count ?? 0
-            }, ct);
         }
     }
 
@@ -120,13 +74,6 @@ public sealed class BackloadTriggerHostedService(
                 matchCount = notification?.Matches.Count ?? 0
             }, ct);
         }
-    }
-
-    private static bool IsDeliveryStop(Load load, Guid stopId)
-    {
-        var stop = load.Stops.SingleOrDefault(item => item.Id == stopId);
-        if (stop?.OrderId is not Guid orderId) return false;
-        return stop.Sequence == load.Stops.Where(item => item.OrderId == orderId).Max(item => item.Sequence);
     }
 
     private static async Task WriteReceiptAsync(TmsDbContext db, string key, object payload, CancellationToken ct)

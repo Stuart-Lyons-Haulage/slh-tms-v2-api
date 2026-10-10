@@ -52,9 +52,7 @@ public class CustomWebFactory : WebApplicationFactory<Program>
             var operationalWorkers = services.Where(descriptor =>
                 descriptor.ServiceType == typeof(IHostedService) &&
                 descriptor.ImplementationType is Type implementation &&
-                (implementation == typeof(BackloadTriggerHostedService) ||
-                 implementation == typeof(LiveEtaService) ||
-                 implementation == typeof(EtaAccuracyService))).ToList();
+                implementation == typeof(BackloadTriggerHostedService)).ToList();
             foreach (var registration in operationalWorkers) services.Remove(registration);
 
             // Replace authentication with test scheme

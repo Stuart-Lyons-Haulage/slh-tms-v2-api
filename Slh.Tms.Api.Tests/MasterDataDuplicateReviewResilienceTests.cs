@@ -64,7 +64,7 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
     }
 
     [Fact]
-    public async Task Site_scan_surfaces_same_geofence_boundary_without_auto_merging_different_sites()
+    public async Task Site_scan_does_not_use_boundary_data_to_match_different_sites()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var firstId = Guid.NewGuid();
@@ -86,10 +86,8 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var candidates = await response.Content.ReadFromJsonAsync<List<MasterDataDuplicateCandidate>>();
-        var candidate = Assert.Single(candidates!.Where(x =>
-            x.Canonical.Id == firstId || x.Canonical.Id == secondId));
-        Assert.False(candidate.CanAutoMerge);
-        Assert.Contains("geofence boundary", candidate.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(candidates!, candidate =>
+            candidate.Canonical.Id == firstId || candidate.Canonical.Id == secondId || candidate.Duplicates.Any(row => row.Id == firstId || row.Id == secondId));
     }
 
     [Fact]

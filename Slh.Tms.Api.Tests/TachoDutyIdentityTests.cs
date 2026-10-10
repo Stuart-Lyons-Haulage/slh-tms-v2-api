@@ -1,4 +1,3 @@
-using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using Xunit;
@@ -26,8 +25,6 @@ public sealed class TachoDutyIdentityTests
             ExecutionIdentityResolver.VehicleAliasVariants("AB12 CDE"), driver, statuses);
 
         Assert.Same(duty, match);
-        var assessment = OperationsController.TachoAssessment(match, 90, 0);
-        Assert.Equal("DutyMatchedHoursUnavailable", assessment.Status);
     }
 
     [Fact]
@@ -79,11 +76,8 @@ public sealed class TachoDutyIdentityTests
             ExecutionIdentityResolver.VehicleAliasVariants("AB12CDE"), driver, statuses);
         var liveIdentity = ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(
             ExecutionIdentityResolver.VehicleAliasVariants("AB12CDE"), driver, statuses);
-        var assessment = OperationsController.TachoAssessment(liveIdentity, 90, 0);
-
         Assert.Null(legalDuty);
         Assert.Same(falconCard, liveIdentity);
-        Assert.Equal("CardConfirmedWithinDriveTime", assessment.Status);
     }
 
     private static TachoVehicleDriverStatus Duty(

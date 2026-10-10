@@ -1,4 +1,3 @@
-using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using Xunit;
@@ -27,7 +26,6 @@ public sealed class LiveDriverEvidenceRulesTests
         Assert.Null(evidence.TachoDuty);
         Assert.Same(card, evidence.EtaAuthority);
         Assert.Equal("LiveCardOnly", evidence.CardDutyStatus);
-        Assert.Equal("CardConfirmedWithinDriveTime", OperationsController.TachoAssessment(evidence.EtaAuthority, 120, 0).Status);
     }
 
     [Fact]

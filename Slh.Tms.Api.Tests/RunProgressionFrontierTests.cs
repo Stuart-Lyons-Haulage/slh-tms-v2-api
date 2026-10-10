@@ -1,5 +1,4 @@
 using Slh.Tms.Api.Models;
-using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -35,48 +34,6 @@ public sealed class RunProgressionFrontierTests
         Assert.True(RunProgressionFrontier.FinalStopCompleted(stops, completed));
         Assert.Null(RunProgressionFrontier.NextOperationalStop(stops, completed));
         Assert.Equal(first.Id, Assert.Single(RunProgressionFrontier.EvidenceGapsBeforeFrontier(stops, completed)).Id);
-    }
-
-    [Fact]
-    public void Fresh_roadtech_position_rebases_eta_from_now_not_old_departure()
-    {
-        var departedAt = DateTimeOffset.Parse("2026-08-26T06:30:00Z");
-        var now = DateTimeOffset.Parse("2026-08-26T08:30:00Z");
-        var live = new VehicleLiveStatus
-        {
-            VehicleIdentifier = "YG72CTF",
-            LastEventTimeUtc = now.AddSeconds(-30),
-            LastReceivedAtUtc = now.AddSeconds(-10),
-            Longitude = -1.20m,
-            Latitude = 52.10m
-        };
-
-        var anchor = RunTimingLiveAnchor.BetweenStops(now, departedAt, (-0.70m, 50.80m), live);
-
-        Assert.Equal(now, anchor.AnchorUtc);
-        Assert.Equal((-1.20m, 52.10m), anchor.Origin);
-        Assert.Equal("RoadTech live position", anchor.Source);
-    }
-
-    [Fact]
-    public void Stale_roadtech_position_keeps_geofence_departure_fallback()
-    {
-        var departedAt = DateTimeOffset.Parse("2026-08-26T06:30:00Z");
-        var now = DateTimeOffset.Parse("2026-08-26T08:30:00Z");
-        var live = new VehicleLiveStatus
-        {
-            VehicleIdentifier = "YG72CTF",
-            LastEventTimeUtc = now.AddMinutes(-20),
-            LastReceivedAtUtc = now.AddMinutes(-20),
-            Longitude = -1.20m,
-            Latitude = 52.10m
-        };
-
-        var anchor = RunTimingLiveAnchor.BetweenStops(now, departedAt, (-0.70m, 50.80m), live);
-
-        Assert.Equal(departedAt, anchor.AnchorUtc);
-        Assert.Equal((-0.70m, 50.80m), anchor.Origin);
-        Assert.Equal("Geofence departure fallback", anchor.Source);
     }
 
     private static LoadStop Stop(int sequence, string name) => new()

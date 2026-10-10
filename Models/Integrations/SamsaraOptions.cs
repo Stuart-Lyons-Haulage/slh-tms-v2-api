@@ -13,7 +13,6 @@ public sealed class SamsaraOptions
     public string SiteExternalIdKey { get; set; } = "slhTmsSite";
     public string AssetExternalIdKey { get; set; } = "slhTmsAsset";
 
-    public int StopRadiusMeters { get; set; } = 250;
     public int WalkaroundMinutes { get; set; } = 10;
     public int DefaultStopDwellMinutes { get; set; } = 30;
 

@@ -1,13 +1,16 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Models.Integrations;
 
 namespace Slh.Tms.Api.Services;
 
 /// <summary>Read-only Sage HR employee and leave client. Credentials are runtime-only Key Vault values.</summary>
-public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, ILogger<SageHrClient> logger)
+public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, ILogger<SageHrClient> logger, IMemoryCache? cache = null)
 {
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> cacheGates = new(StringComparer.Ordinal);
     public bool IsConfigured => options.Enabled && !string.IsNullOrWhiteSpace(options.BaseUrl) && !string.IsNullOrWhiteSpace(options.ApiKey);
     public bool IsEnabled => options.Enabled;
     public string DriverTeamName => options.DriverTeamName;
@@ -27,6 +30,11 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
     public async Task<IReadOnlyList<SageHrEmployee>> GetActiveEmployeesAsync(CancellationToken cancellationToken = default)
     {
         EnsureConfigured();
+        return await GetHourlyCachedAsync("sagehr:active-employees", () => LoadActiveEmployeesAsync(cancellationToken), cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<SageHrEmployee>> LoadActiveEmployeesAsync(CancellationToken cancellationToken)
+    {
         var employees = new List<SageHrEmployee>();
         for (var page = 1; page <= 100; page++)
         {
@@ -54,6 +62,11 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
     public async Task<IReadOnlyList<SageHrOutOfOffice>> GetOutOfOfficeAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         EnsureConfigured();
+        return await GetHourlyCachedAsync($"sagehr:leave:{date:yyyy-MM-dd}", () => LoadOutOfOfficeAsync(date, cancellationToken), cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<SageHrOutOfOffice>> LoadOutOfOfficeAsync(DateOnly date, CancellationToken cancellationToken)
+    {
         using var request = Request(HttpMethod.Get, $"leave-management/out-of-office-today?date={Uri.EscapeDataString(date.ToString("yyyy-MM-dd"))}");
         using var response = await httpClient.SendAsync(request, cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -73,6 +86,22 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         if (!options.Enabled) throw new InvalidOperationException("Sage HR integration is disabled.");
         if (string.IsNullOrWhiteSpace(options.BaseUrl) || string.IsNullOrWhiteSpace(options.ApiKey))
             throw new InvalidOperationException("Sage HR runtime settings are incomplete.");
+    }
+
+    private async Task<T> GetHourlyCachedAsync<T>(string key, Func<Task<T>> load, CancellationToken ct) where T : class
+    {
+        if (cache is null) return await load();
+        if (cache.TryGetValue(key, out T? existing) && existing is not null) return existing;
+        var gate = cacheGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (cache.TryGetValue(key, out existing) && existing is not null) return existing;
+            var value = await load();
+            cache.Set(key, value, TimeSpan.FromHours(1));
+            return value;
+        }
+        finally { gate.Release(); }
     }
 
     private HttpRequestMessage Request(HttpMethod method, string path)

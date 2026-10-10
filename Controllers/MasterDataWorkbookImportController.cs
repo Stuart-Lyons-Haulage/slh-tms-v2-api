@@ -54,7 +54,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         result.Warnings.Add("Vehicles are update-only from this workbook. Fleet remains the authority for vehicle identity and registrations.");
         result.Warnings.Add("Sites with weak or conflicting matches are held for review and are not created during commit.");
         result.Warnings.Add("Collection Sites, Customers For Deliveries, Site Cutoffs and Run Times are imported as master detail records for intake/planner matching.");
-        result.Warnings.Add("Timing rules now retain latestCollectionTime for wall boards. Dispatch can still set an earlier planned start; once the first geofence is hit live ETA/ETO takes over for downstream stops.");
+        result.Warnings.Add("Timing rules retain the latest collection time for planning displays. Samsara reports stop progress and ETAs after dispatch; the TMS keeps the planned start and route.");
         return result;
     }
 
@@ -219,8 +219,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 collectTo,
                 latestCollectionTime,
                 depotDeadline,
-                dispatchPlanningMode = "Manual planned start may be earlier; latestCollectionTime is the wall-board risk/deadline until first geofence hit updates live ETO/ETA.",
-                firstGeofenceResetsLiveEtos = true,
+                dispatchPlanningMode = "Latest collection time is planning context; Samsara reports job progress after dispatch.",
                 sourceWorkbookSheet = row.SheetName,
                 sourceWorkbookRow = row.RowNumber
             };
@@ -274,8 +273,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     collectTo,
                     depotDeadline = row.Time("depot delivery deadline", "depot delivery - no later than", "depot deadline", "depotdelivery", "depotdeliverynolaterthan"),
                     wallBoardDeadline = latestCollectionTime,
-                    dispatchPlanningMode = "Manual planned start can be earlier; latestCollectionTime is used as wall-board risk time until live geofence tracking takes over.",
-                    firstGeofenceResetsLiveEtos = true,
+                    dispatchPlanningMode = "Latest collection time is planning context; Samsara reports job progress after dispatch.",
                     sourceWorkbookSheet = row.SheetName,
                     sourceWorkbookRow = row.RowNumber
                 }, "SLH master workbook site cutoffs", ct);
