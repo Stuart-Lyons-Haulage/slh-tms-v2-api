@@ -529,6 +529,8 @@ public sealed class SpecialistMailboxOrderParser
         mutable["trays"] = trays;
         mutable["pallets"] = pallets;
         mutable["weightKg"] = weight;
+        mutable["intakeNaturalKey"] = naturalKey;
+        mutable["intakeMatchKeys"] = keys;
         mutable["sourceAttachmentName"] = attachment.Name;
         mutable["intakeParser"] = "IFCO order confirmation PDF";
         mutable["driverInstructions"] = $"Order type: IFCO tray collection · Delivery number: {deliveryRef ?? "missing"} · {notes} · Source email: {subject}";
