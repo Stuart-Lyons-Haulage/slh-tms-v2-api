@@ -14,8 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AZURE_WEBAPP_NAME: slh-tms-api-prod
+  AZURE_CONTAINERAPP_NAME: slh-tms-api-prod
   AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+  ACR_NAME: slhtmsacrprod
+  ACR_LOGIN_SERVER: slhtmsacrprod.azurecr.io
+  API_HEALTH_URL: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/v1/health
 
 jobs:
   test-and-deploy:
@@ -38,12 +41,6 @@ jobs:
       - name: Test API
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
 
-      - name: Publish API
-        run: dotnet publish Slh.Tms.Api.csproj --configuration Release --no-restore --output ./publish
-
-      - name: Package published API
-        run: cd publish && zip -r ../api-publish.zip .
-
       - name: Sign in to Azure with GitHub OIDC
         uses: azure/login@v2
         with:
@@ -51,28 +48,28 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy ZIP to App Service
-        uses: azure/cli@v2
-        with:
-          inlineScript: |
-            az webapp deploy \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_WEBAPP_NAME" \
-              --src-path api-publish.zip \
-              --type zip \
-              --clean true
-
-      - name: Verify anonymous health endpoint
+      - name: Build and push immutable API image
         run: |
-          for attempt in {1..12}; do
-            response=$(curl -fsS https://slh-tms-api-prod.azurewebsites.net/api/v1/health || true)
+          az acr login --name "$ACR_NAME"
+          docker build --pull --tag "$ACR_LOGIN_SERVER/slh-tms-api:${{ github.sha }}" .
+          docker push "$ACR_LOGIN_SERVER/slh-tms-api:${{ github.sha }}"
+
+      - name: Deploy image to Azure Container Apps
+        run: |
+          az containerapp update \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_CONTAINERAPP_NAME" \
+            --image "$ACR_LOGIN_SERVER/slh-tms-api:${{ github.sha }}"
+
+      - name: Verify production health and deployed revision
+        run: |
+          for attempt in {1..18}; do
+            response=$(curl -fsS "$API_HEALTH_URL" || true)
             if echo "$response" | grep -qi 'healthy'; then
               echo "$response"
               exit 0
             fi
             sleep 10
           done
-          echo "API health check failed" >&2
+          echo "Container App health check failed after deployment" >&2
           exit 1
-
-# Production deployment is triggered from main after validated merges.

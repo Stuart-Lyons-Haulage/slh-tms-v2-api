@@ -682,6 +682,7 @@ public sealed class NwfWorkbookSnapshotParser
     {
         var value = $"{customer} {depotDescription}".Trim();
         if (value.Contains("GOLDTHORPE", StringComparison.OrdinalIgnoreCase)) return "Aldi-Goldthorpe";
+        if (value.Contains("ALDI", StringComparison.OrdinalIgnoreCase) && value.Contains("NESTON", StringComparison.OrdinalIgnoreCase)) return "Aldi-Neston";
         if (value.Contains("DARLINGTON", StringComparison.OrdinalIgnoreCase)) return "Aldi-Darlington";
         if (value.Contains("SITTINGBOURNE", StringComparison.OrdinalIgnoreCase)) return "Morrisons-Sittingbourne";
         if (value.Contains("LATIMER", StringComparison.OrdinalIgnoreCase)) return "Morrisons-LatimerPark";

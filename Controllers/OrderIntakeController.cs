@@ -467,6 +467,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // allowing Intake() to link them to the existing staged order as evidence.
         // The generic parser is used here only for its explicit operational-message
         // classification; any generic orders it may infer are deliberately ignored.
+        // Our own outbound planner snapshots are comparison evidence, not inbound orders.
+        // This guard runs before the NWF-transfer exception so Lyons Collections and SB plans
+        // cannot be promoted back into the TMS as fresh work.
+        if (IsInternalPlannerSnapshot(request))
+            return new EmailIntakeParseResult(
+                [],
+                [],
+                "Internal Lyons Collections/SB planner snapshot retained as source evidence; it was not converted into a transport order.");
+
         var nwfTransfer = IsNwfTransferSource(request);
         var operationalSignal = new EmailOrderIntakeService().Parse(request);
         if (operationalSignal.Orders.Count == 0 &&
@@ -682,6 +691,30 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                               body.Contains("Collect from", StringComparison.OrdinalIgnoreCase);
 
         return barfootsWaitroseWave || summerBerryCoop;
+    }
+
+    internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)
+    {
+        if (!IsInternalSender(request.SenderAddress)) return false;
+
+        var subject = request.Subject?.Trim() ?? string.Empty;
+        if (subject.Contains("LYONS COLLECTIONS", StringComparison.OrdinalIgnoreCase)) return true;
+        if (subject.StartsWith("SB ", StringComparison.OrdinalIgnoreCase) ||
+            subject.StartsWith("SB-", StringComparison.OrdinalIgnoreCase) ||
+            subject.StartsWith("SB_", StringComparison.OrdinalIgnoreCase) ||
+            subject.StartsWith("SOUTHBOUND", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return (request.Attachments ?? [])
+            .Where(item => item.IsInline != true)
+            .Select(item => Path.GetFileName(item.Name ?? string.Empty))
+            .Any(name =>
+                (name.StartsWith("SB ", StringComparison.OrdinalIgnoreCase) ||
+                 name.StartsWith("SB-", StringComparison.OrdinalIgnoreCase) ||
+                 name.StartsWith("SB_", StringComparison.OrdinalIgnoreCase) ||
+                 name.StartsWith("SOUTHBOUND", StringComparison.OrdinalIgnoreCase)) &&
+                (name.Contains("BOOKING", StringComparison.OrdinalIgnoreCase) ||
+                 name.Contains("LOAD PLAN", StringComparison.OrdinalIgnoreCase)));
     }
 
     internal static bool IsInternalSender(string? senderAddress)

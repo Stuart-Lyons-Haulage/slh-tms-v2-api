@@ -7,6 +7,21 @@ public sealed class EmailOrderIntakeHardeningTests
 {
     private readonly EmailOrderIntakeService service = new();
 
+    [Theory]
+    [InlineData("planner@lyonshaulage.com", "Lyons Collections-12102026", "orders.xlsx", true)]
+    [InlineData("planner@lyonshaulage.com", "SB for 12.10.2026", "SB - Morrisons & Aldi Bookings.xlsm", true)]
+    [InlineData("planner@lyonshaulage.com", "NWF transfer", "transfer.xlsx", false)]
+    [InlineData("orders@customer.example", "Lyons Collections-12102026", "orders.xlsx", false)]
+    public void InternalPlannerSnapshots_AreClassifiedAsComparisonEvidence(string sender, string subject, string attachment, bool expected)
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "internal-plan", null, "info@lyonshaulage.com", sender, "Planner", subject,
+            DateTimeOffset.UtcNow, null, null, null,
+            [new MailboxAttachmentRequest(attachment, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", null, false)]);
+
+        Assert.Equal(expected, Slh.Tms.Api.Controllers.OrderIntakeController.IsInternalPlannerSnapshot(request));
+    }
+
     [Fact]
     public void LangmeadSubdomainSender_MatchesVerifiedRootDomain()
     {
