@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 23850)
+Total output lines: 1852
+
 using ExcelDataReader;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -600,8 +603,13 @@ public sealed class SpecialistMailboxOrderParser
         if (!text.Contains("Order", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        var orderMatch = EuroPoolSalesOrderRegex.Match(text);
-        var dateMatch = EuroPoolLoadingDateRegex.Match(text);
+        // PdfPig may return address cells on separate lines when a PDF column wraps.
+        // These route patterns describe one logical address, so match against a
+        // whitespace-normalised copy while retaining the original for diagnostics.
+        var searchableText = Regex.Replace(text, @"\s+", " ").Trim();
+
+        var orderMatch = EuroPoolSalesOrderRegex.Match(searchableText);
+        var dateMatch = EuroPoolLoadingDateRegex.Match(searchableText);
         DateOnly? loadingDate = DateOnly.TryParseExact(
             dateMatch.Groups["date"].Value,
             ["d/M/yyyy", "dd/MM/yyyy"],
@@ -610,13 +618,13 @@ public sealed class SpecialistMailboxOrderParser
             out var date)
             ? date
             : null;
-        var collectionMatch = EuroPoolCollectionRegex.Match(text);
-        var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(text);
-        var summerBerryDestinationMatch = EuroPoolSummerBerryDestinationRegex.Match(text);
-        var totalQuantityHeaderIndex = text.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
+        var collectionMatch = EuroPoolCollectionRegex.Match(searchableText);
+        var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(searchableText);
+        var summerBerryDestinationMatch = EuroPoolSummerBerryDestinationRegex.Match(searchableText);
+        var totalQuantityHeaderIndex = searchableText.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
         var itemText = totalQuantityHeaderIndex < 0
-            ? text
-            : text[(totalQuantityHeaderIndex + "Total Qty".Length)..];
+            ? searchableText
+            : searchableText[(totalQuantityHeaderIndex + "Total Qty".Length)..];
         var lineItems = EuroPoolLineItemRegex.Matches(itemText).Cast<Match>()
             .Select(match => new EuroPoolPdfLineItem(
                 match.Groups["material"].Value,
@@ -738,301 +746,7 @@ public sealed class SpecialistMailboxOrderParser
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Waitrose PDF table parser: {ex.GetBaseException().Message}");
-            }
-        }
-
-        if (orders.Count > 0)
-            return new EmailIntakeParseResult(orders, warnings, null);
-
-        return recognisedPdf
-            ? new EmailIntakeParseResult([], warnings, "Waitrose booking PDF could not be parsed into usable order rows; source evidence retained for manual review.")
-            : null;
-    }
-
-    private static string WaitroseCollectionSite(string sourceCode) =>
-        sourceCode.Equals("LEYCHI", StringComparison.OrdinalIgnoreCase)
-            ? "Barfoots Leythorne"
-            : sourceCode.Equals("BARBOG", StringComparison.OrdinalIgnoreCase)
-                ? "Barfoots Sefter"
-                : sourceCode;
-
-    internal static IReadOnlyList<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? PalletType, string? Temperature, int RowNumber)> ParseWaitrosePdfRows(string text)
-    {
-        // PdfPig can vary whitespace and may retain column separators. The header is
-        // identified by names, never by a fixed column index; row parsing then keeps
-        // Cases Ordered separate from Number of Base Pallets.
-        var normalisedText = text.Replace('\u00A0', ' ').Replace('|', ' ');
-        _ = WaitrosePdfHeaderRegex.IsMatch(Regex.Replace(normalisedText, @"\s+", " "));
-        var rows = new List<(string Collection, string Destination, DateOnly? Date, string References, int Cases, int Pallets, string? PalletType, string? Temperature, int RowNumber)>();
-        var rowNumber = 0;
-        foreach (Match match in WaitrosePdfRowRegex.Matches(normalisedText))
-        {
-            rowNumber++;
-            var date = DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yy", "dd/MM/yy", "d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
-                ? parsedDate
-                : (DateOnly?)null;
-            if (!int.TryParse(match.Groups["cases"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cases) ||
-                !int.TryParse(match.Groups["pallets"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pallets))
-                continue;
-            rows.Add((
-                match.Groups["collection"].Value.Trim().ToUpperInvariant(),
-                match.Groups["destination"].Value.Trim(),
-                date,
-                match.Groups["references"].Value.Trim(),
-                cases,
-                pallets,
-                string.IsNullOrWhiteSpace(match.Groups["palletType"].Value) ? null : match.Groups["palletType"].Value.Trim(),
-                string.IsNullOrWhiteSpace(match.Groups["temperature"].Value) ? null : match.Groups["temperature"].Value.Trim(),
-                rowNumber));
-        }
-        var compactReadingOrder = text.Contains("Waitrose Ltd  (", StringComparison.OrdinalIgnoreCase);
-        if (compactReadingOrder) rows.Clear();
-        if (rows.Count == 0)
-        {
-            // PdfPig can return this supplier PDF as a compact reading-order
-            // stream, with the column separators removed. The row still has
-            // stable anchors: cases -> collection code -> depot -> wave ->
-            // pallet count -> date -> references -> next customer name. PdfPig
-            // joins the temperature and pallet columns, so +8 followed by 2
-            // becomes +82, while +10 followed by 3 becomes +103.
-            var compact = new Regex(
-                @"(?<cases>\d{1,6})(?<collection>LEYCHI|BARBOG)Waitrose\s+Ltd\s+\((?<destination>[^)\r\n]+)\)\s+AM/Group1\s+\d+(?<temperature>\+(?:10|\d))(?<pallets>\d{1,2})\s+(?<date>\d{1,2}/\d{1,2}/(?:\d{4}|\d{2}))(?<references>[A-Z0-9][A-Z0-9/& -]*?)(?=Waitrose\s+Ltd\s+\(A/C|$)",
-                RegexOptions.IgnoreCase | RegexOptions.Compiled);
-            foreach (Match match in compact.Matches(normalisedText))
-            {
-                rowNumber++;
-                var date = DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yy", "dd/MM/yy", "d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
-                    ? parsedDate
-                    : (DateOnly?)null;
-                if (!int.TryParse(match.Groups["cases"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cases) ||
-                    !int.TryParse(match.Groups["pallets"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pallets))
-                    continue;
-                rows.Add((
-                    match.Groups["collection"].Value.Trim().ToUpperInvariant(),
-                    match.Groups["destination"].Value.Trim(),
-                    date,
-                    match.Groups["references"].Value.Trim(),
-                    cases,
-                    pallets,
-                    null,
-                    match.Groups["temperature"].Value.Trim(),
-                    rowNumber));
-            }
-        }
-        return rows;
-    }
-
-    private static EmailIntakeParseResult? TryParseSummerBerryMorrisonsAldi(MailboxEmailIntakeRequest request)
-    {
-        var sender = request.SenderAddress ?? string.Empty;
-        var subject = request.Subject ?? string.Empty;
-        var attachments = (request.Attachments ?? [])
-            .Where(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))
-            .Where(item => IsExcel(item.Name))
-            .ToList();
-
-        if (!sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("Morrisons", StringComparison.OrdinalIgnoreCase) ||
-            attachments.Count == 0)
-            return null;
-
-        var planningDate = ExtractPlanningDate(request);
-        if (planningDate is null)
-            return null;
-
-        var rawPo = Match(PurchaseOrderRegex, $"{request.Subject}\n{request.BodyText}\n{request.BodyHtml}", "po");
-        var orders = new List<ParsedEmailOrder>();
-        var globalWarnings = new List<string>();
-
-        foreach (var attachment in attachments)
-        {
-            try
-            {
-                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
-                using var reader = ExcelReaderFactory.CreateReader(stream);
-                var sheetNumber = 0;
-                do
-                {
-                    sheetNumber++;
-                    var rows = ReadRows(reader);
-                    var headerIndex = rows.FindIndex(IsSummerBerryBookingHeader);
-                    if (headerIndex < 0)
-                    {
-                        globalWarnings.Add($"Attachment '{attachment.Name}' sheet '{reader.Name}' did not contain the expected Summer Berry booking headers.");
-                        continue;
-                    }
-
-                    var headers = HeaderMap(rows[headerIndex]);
-                    var collectionIndex = FindColumn(headers, "collectionsite", "collection", "collectfrom");
-                    var dateIndex = FindColumn(headers, "date", "deliverydate", "bookingdate");
-                    var depotIndex = FindColumn(headers, "depotdescription", "depot", "destination", "deliverysite");
-                    var palletsIndex = FindColumn(headers, "pallets", "pallet", "qty", "quantity");
-                    var requestTimeIndex = FindColumn(headers, "requesttime", "requestedtime", "bookingtime", "deliverytime");
-                    var availableTimeIndex = FindColumn(headers, "availabletime", "collectiontime", "readytime");
-
-                    if (depotIndex < 0 || palletsIndex < 0)
-                        continue;
-
-                    var staleRows = 0;
-                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
-                    {
-                        var row = rows[rowIndex];
-                        var depot = CellText(row, depotIndex);
-                        var pallets = CellInt(row, palletsIndex);
-                        if (string.IsNullOrWhiteSpace(depot) || pallets is null or <= 0)
-                            continue;
-
-                        var rowDate = CellDate(row, dateIndex) ?? planningDate;
-                        if (rowDate is null)
-                            continue;
-
-                        // The source email/attachment planning date is authoritative.
-                        // Permit adjacent-day overnight work only. This blocks stale
-                        // historical tabs such as the 02/12/2024 Orders sheet inside
-                        // the 29/08/2026 Summer Berry booking workbook.
-                        if (Math.Abs(rowDate.Value.DayNumber - planningDate.Value.DayNumber) > 1)
-                        {
-                            staleRows++;
-                            continue;
-                        }
-
-                        var identity = SummerBerryIdentity(depot);
-                        if (identity is null)
-                            continue;
-
-                        var collection = Regex.Replace(
-                                CellText(row, collectionIndex) ?? "SB-Groves Farm",
-                                @"^SB[- ]",
-                                string.Empty,
-                                RegexOptions.IgnoreCase)
-                            .Trim();
-                        var destination = depot.Trim();
-                        var requestedTime = CellTime(row, requestTimeIndex);
-                        var availableTime = CellTime(row, availableTimeIndex);
-                        var warnings = new List<string>();
-                        if (string.IsNullOrWhiteSpace(rawPo))
-                            warnings.Add("No customer PO/reference was found in the email.");
-
-                        var baseReference = rawPo ?? StableEmailReference(request.MessageId);
-                        var reference = BuildReference(baseReference, destination);
-                        var naturalKey = NaturalKey(request, identity.Value.CustomerCode, collection, destination, rowDate.Value, pallets.Value);
-                        var payload = BuildPayload(
-                            request,
-                            reference,
-                            rawPo,
-                            identity.Value.CustomerCode,
-                            rowDate.Value,
-                            rowDate.Value,
-                            pallets.Value,
-                            collection,
-                            destination,
-                            requestedTime,
-                            availableTime,
-                            attachment.Name,
-                            reader.Name,
-                            rowIndex + 1,
-                            "Summer Berry Morrisons/Aldi workbook",
-                            warnings,
-                            identity.Value.RetailerCode);
-
-                        orders.Add(new ParsedEmailOrder(
-                            $"summerberry-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}",
-                            naturalKey,
-                            payload,
-                            warnings));
-                    }
-
-                    if (staleRows > 0)
-                    {
-                        globalWarnings.Add($"Skipped {staleRows} stale workbook row(s) on sheet '{reader.Name}' because their dates did not match the source planning date {planningDate:dd/MM/yyyy}.");
-                    }
-                }
-                while (reader.NextResult());
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                globalWarnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Summer Berry workbook guard: {ex.GetBaseException().Message}");
-            }
-        }
-
-        if (orders.Count == 0 && globalWarnings.Count > 0)
-            return new EmailIntakeParseResult([], globalWarnings, "Summer Berry workbook could not be interpreted; retain for planner review.");
-        if (orders.Count == 0)
-            return null;
-
-        return new EmailIntakeParseResult(orders, globalWarnings, null);
-    }
-
-    internal static (string CustomerCode, string RetailerCode)? SummerBerryIdentity(string depot)
-    {
-        if (depot.StartsWith("ALDI", StringComparison.OrdinalIgnoreCase))
-            return ("SUMMERBERRY", "ALDI");
-        if (depot.StartsWith("MORRISONS", StringComparison.OrdinalIgnoreCase))
-            return ("SUMMERBERRY", "MORRISONS");
-        return null;
-    }
-
-    private static EmailIntakeParseResult? TryParseLangmeadAldiWorkbook(MailboxEmailIntakeRequest request)
-    {
-        var sender = request.SenderAddress ?? string.Empty;
-        var subject = request.Subject ?? string.Empty;
-        if (!sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        var planningDate = ExtractPlanningDate(request);
-        if (planningDate is null)
-            return null;
-
-        var attachments = (request.Attachments ?? [])
-            .Where(item => item.IsInline != true &&
-                           !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
-                           IsExcel(item.Name))
-            .ToList();
-        if (attachments.Count == 0)
-            return null;
-
-        var orders = new List<ParsedEmailOrder>();
-        var warnings = new List<string>();
-        foreach (var attachment in attachments)
-        {
-            try
-            {
-                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
-                using var reader = ExcelReaderFactory.CreateReader(stream);
-                var sheetNumber = 0;
-                var foundOrdersSheet = false;
-                do
-                {
-                    sheetNumber++;
-                    var sheetName = reader.Name;
-                    var rows = ReadRows(reader);
-                    if (!string.Equals(sheetName, "Orders", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    foundOrdersSheet = true;
-                    var headerIndex = rows.FindIndex(row =>
-                        RowContains(row, "Collection Site") &&
-                        RowContains(row, "Date") &&
-                        RowContains(row, "Depot Description") &&
-                        RowContains(row, "Pallets") &&
-                        RowContains(row, "Temperature") &&
-                        RowContains(row, "Pallet Type"));
-                    if (headerIndex < 0)
-                    {
-                        warnings.Add($"Langmead workbook sheet '{sheetName}' did not contain the expected Orders headers.");
-                        continue;
-                    }
-
-                    var headers = HeaderMap(rows[headerIndex]);
-                    var collectionIndex = FindColumn(headers, "collectionsite");
-                    var dateIndex = FindColumn(headers, "date");
-                    var depotIndex = FindColumn(headers, "depotdescription");
-                    var palletsIndex = FindColumn(headers, "pallets");
-                    var temperatureIndex = FindColumn(headers, "temperature");
-                    var palletTypeIndex = FindColumn(headers, "pallettype");
+                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Waitrose PDF table p…3850 tokens truncated… = FindColumn(headers, "pallettype");
                     if (collectionIndex < 0 || dateIndex < 0 || depotIndex < 0 || palletsIndex < 0)
                         continue;
 
