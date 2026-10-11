@@ -600,8 +600,13 @@ public sealed class SpecialistMailboxOrderParser
         if (!text.Contains("Order", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        var orderMatch = EuroPoolSalesOrderRegex.Match(text);
-        var dateMatch = EuroPoolLoadingDateRegex.Match(text);
+        // PdfPig may return address cells on separate lines when a PDF column wraps.
+        // These route patterns describe one logical address, so match against a
+        // whitespace-normalised copy while retaining the original for diagnostics.
+        var searchableText = Regex.Replace(text, @"\s+", " ").Trim();
+
+        var orderMatch = EuroPoolSalesOrderRegex.Match(searchableText);
+        var dateMatch = EuroPoolLoadingDateRegex.Match(searchableText);
         DateOnly? loadingDate = DateOnly.TryParseExact(
             dateMatch.Groups["date"].Value,
             ["d/M/yyyy", "dd/MM/yyyy"],
@@ -610,13 +615,13 @@ public sealed class SpecialistMailboxOrderParser
             out var date)
             ? date
             : null;
-        var collectionMatch = EuroPoolCollectionRegex.Match(text);
-        var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(text);
-        var summerBerryDestinationMatch = EuroPoolSummerBerryDestinationRegex.Match(text);
-        var totalQuantityHeaderIndex = text.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
+        var collectionMatch = EuroPoolCollectionRegex.Match(searchableText);
+        var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(searchableText);
+        var summerBerryDestinationMatch = EuroPoolSummerBerryDestinationRegex.Match(searchableText);
+        var totalQuantityHeaderIndex = searchableText.IndexOf("Total Qty", StringComparison.OrdinalIgnoreCase);
         var itemText = totalQuantityHeaderIndex < 0
-            ? text
-            : text[(totalQuantityHeaderIndex + "Total Qty".Length)..];
+            ? searchableText
+            : searchableText[(totalQuantityHeaderIndex + "Total Qty".Length)..];
         var lineItems = EuroPoolLineItemRegex.Matches(itemText).Cast<Match>()
             .Select(match => new EuroPoolPdfLineItem(
                 match.Groups["material"].Value,
