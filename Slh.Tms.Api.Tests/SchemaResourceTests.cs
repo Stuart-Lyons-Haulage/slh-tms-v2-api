@@ -43,6 +43,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.080_Invoice_Line_Booking_Reservation.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.081_Booking_Allocation_Unmatch.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.084_Canonical_Summer_Berry_Customer.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.087_TachoMaster_Shared_Snapshot.sql", resources);
     }
 
     [Fact]
@@ -100,7 +101,8 @@ public sealed class SchemaResourceTests
             "083_Site_Samsara_Identity.sql",
             "084_Canonical_Summer_Berry_Customer.sql",
             "085_Fleetio_Trailer_Status.sql",
-            "086_Driver_Availability_Windows.sql"
+            "086_Driver_Availability_Windows.sql",
+            "087_TachoMaster_Shared_Snapshot.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }

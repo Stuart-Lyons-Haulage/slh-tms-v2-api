@@ -1,10 +1,13 @@
+using System.Data;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
  
 namespace Slh.Tms.Api.Services;
@@ -16,15 +19,17 @@ public sealed class TachoMasterClient
     private readonly ILogger<TachoMasterClient> logger;
     private readonly DotTrackingClient? dotTrackingClient;
     private readonly IMemoryCache? memoryCache;
+    private readonly TmsDbContext? db;
     private const string SnapshotCacheKeyPrefix = "tachomaster:shared-snapshot:";
  
-    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null, IMemoryCache? memoryCache = null)
+    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null, IMemoryCache? memoryCache = null, TmsDbContext? db = null)
     {
         this.httpClient = httpClient;
         this.options = options;
         this.logger = logger;
         this.dotTrackingClient = dotTrackingClient;
         this.memoryCache = memoryCache;
+        this.db = db;
         this.httpClient.Timeout = TimeSpan.FromSeconds(30);
         this.httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
     }
@@ -49,7 +54,7 @@ public sealed class TachoMasterClient
     /// <summary>
     /// The scheduled refresh is the sole owner of TachoMaster reads. It retrieves one
     /// 31-day duty window plus the member and metrics directories, then publishes the
-    /// completed snapshot for all operational readers in this process.
+    /// completed snapshot to SQL for all API instances and warms this process cache.
     /// </summary>
     public async Task<bool> RefreshSnapshotAsync(DateOnly fromDate, DateOnly toDate, CancellationToken cancellationToken = default)
     {
@@ -75,11 +80,86 @@ public sealed class TachoMasterClient
             members,
             metrics.Values.ToList(),
             falconDrivers);
+        await SaveSharedSnapshotAsync(snapshot, cancellationToken);
         memoryCache.Set(SnapshotCacheKey, snapshot, TimeSpan.FromMinutes(35));
         logger.LogInformation(
             "Published shared TachoMaster snapshot for {FromDate} to {ToDate}: {DutyCount} duties, {MemberCount} members, {MetricCount} metrics.",
             fromDate, toDate, snapshot.Duties.Count, snapshot.Members.Count, snapshot.Metrics.Count);
         return true;
+    }
+
+    /// <summary>Loads the latest completed snapshot from SQL into this process cache.</summary>
+    public async Task<bool> LoadSharedSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        if (db is null || memoryCache is null) return TryGetSnapshot(out _);
+
+        var connection = db.Database.GetDbConnection();
+        var openedHere = connection.State != ConnectionState.Open;
+        if (openedHere) await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT Payload, RefreshedAtUtc FROM dbo.TachoMasterSnapshot WHERE SnapshotId = 1;";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return false;
+
+            var payload = reader.GetString(0);
+            var refreshedAtUtc = reader.GetFieldValue<DateTimeOffset>(1);
+            if (DateTimeOffset.UtcNow - refreshedAtUtc > TimeSpan.FromMinutes(35)) return false;
+            if (TryGetSnapshot(out var local) && local.RefreshedAtUtc >= refreshedAtUtc) return true;
+
+            var snapshot = JsonSerializer.Deserialize<TachoSnapshot>(payload, JsonOptions);
+            if (snapshot is null) return false;
+            memoryCache.Set(SnapshotCacheKey, snapshot, TimeSpan.FromMinutes(35));
+            logger.LogInformation("Loaded shared TachoMaster snapshot from SQL, refreshed at {RefreshedAtUtc}.", refreshedAtUtc);
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Could not load the shared TachoMaster snapshot from SQL.");
+            return false;
+        }
+        finally
+        {
+            if (openedHere) await connection.CloseAsync();
+        }
+    }
+
+    private async Task SaveSharedSnapshotAsync(TachoSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (db is null) return;
+        var connection = db.Database.GetDbConnection();
+        var openedHere = connection.State != ConnectionState.Open;
+        if (openedHere) await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+SET XACT_ABORT ON;
+UPDATE dbo.TachoMasterSnapshot
+SET Payload = @payload, RefreshedAtUtc = @refreshedAtUtc
+WHERE SnapshotId = 1;
+IF @@ROWCOUNT = 0
+    INSERT dbo.TachoMasterSnapshot (SnapshotId, Payload, RefreshedAtUtc)
+    VALUES (1, @payload, @refreshedAtUtc);
+""";
+            var payload = command.CreateParameter();
+            payload.ParameterName = "@payload";
+            payload.DbType = DbType.String;
+            payload.Size = -1;
+            payload.Value = JsonSerializer.Serialize(snapshot, JsonOptions);
+            command.Parameters.Add(payload);
+            var refreshed = command.CreateParameter();
+            refreshed.ParameterName = "@refreshedAtUtc";
+            refreshed.DbType = DbType.DateTimeOffset;
+            refreshed.Value = snapshot.RefreshedAtUtc;
+            command.Parameters.Add(refreshed);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            if (openedHere) await connection.CloseAsync();
+        }
     }
 
     public DateTimeOffset? SnapshotRefreshedAtUtc => TryGetSnapshot(out var snapshot) ? snapshot.RefreshedAtUtc : null;

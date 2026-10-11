@@ -49,18 +49,17 @@ public sealed class TachoDriverHoursRefreshService(
 
         if (lease is null)
         {
-            // Driver Master writes are distributed-lease protected. Each API process still
-            // warms its local shared snapshot on the same scheduled path so its readers never
-            // fall back to provider calls or wait for another process-local cache.
-            var now = DateTimeOffset.UtcNow;
-            var refreshedAt = tachoMaster.SnapshotRefreshedAtUtc;
-            if (refreshedAt is null || now - refreshedAt.Value >= TimeSpan.FromMinutes(15))
+            // Only the lease holder reads TachoMaster. Other instances load the SQL snapshot.
+            var loaded = await tachoMaster.LoadSharedSnapshotAsync(ct);
+            for (var attempt = 0; !loaded && attempt < 12; attempt++)
             {
-                var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, London).DateTime);
-                await tachoMaster.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2), ct);
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                loaded = await tachoMaster.LoadSharedSnapshotAsync(ct);
             }
+
             logger.LogInformation(
-                "TachoMaster Driver Master write skipped because another instance holds the integration lease; local shared snapshot was warmed on the scheduled refresh path.");
+                "TachoMaster refresh skipped because another instance holds the SQL lease; shared SQL snapshot load result: {Loaded}.",
+                loaded);
             return 0;
         }
 
