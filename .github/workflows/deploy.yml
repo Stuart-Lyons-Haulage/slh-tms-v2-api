@@ -52,6 +52,12 @@ jobs:
           match_count=$(jq 'length' <<<"$matches")
           if [[ "$match_count" != "1" ]]; then
             echo "Expected exactly one production Container App for $EXPECTED_CONTAINERAPP_FQDN; found $match_count." >&2
+            echo "Related SLH Container Apps:"
+            az containerapp list --output json | jq '[.[] | select((.name | ascii_downcase | contains("slh-tms-api"))) | {name, resourceGroup, fqdn: .properties.configuration.ingress.fqdn, image: .properties.template.containers[0].image}]'
+            echo "Related SLH App Services:"
+            az webapp list --output json | jq '[.[] | select((.name | ascii_downcase | contains("slh-tms-api"))) | {name, resourceGroup, host: .defaultHostName}]'
+            echo "Related SLH registries:"
+            az acr list --output json | jq '[.[] | select((.name | ascii_downcase | contains("slh-tms"))) | {name, resourceGroup, loginServer}]'
             exit 1
           fi
 
