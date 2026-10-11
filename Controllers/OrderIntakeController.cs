@@ -467,6 +467,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // allowing Intake() to link them to the existing staged order as evidence.
         // The generic parser is used here only for its explicit operational-message
         // classification; any generic orders it may infer are deliberately ignored.
+        // Our own outbound planner snapshots are comparison evidence, not inbound orders.
+        // This guard runs before the NWF-transfer exception so Lyons Collections and SB plans
+        // cannot be promoted back into the TMS as fresh work.
+        if (IsInternalPlannerSnapshot(request))
+            return new EmailIntakeParseResult(
+                [],
+                [],
+                "Internal Lyons Collections/SB planner snapshot retained as source evidence; it was not converted into a transport order.");
+
         var nwfTransfer = IsNwfTransferSource(request);
         var operationalSignal = new EmailOrderIntakeService().Parse(request);
         if (operationalSignal.Orders.Count == 0 &&
@@ -682,6 +691,22 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                               body.Contains("Collect from", StringComparison.OrdinalIgnoreCase);
 
         return barfootsWaitroseWave || summerBerryCoop;
+    }
+
+    internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)
+    {
+        if (!IsInternalSender(request.SenderAddress)) return false;
+
+        var subject = request.Subject ?? string.Empty;
+        var attachmentNames = string.Join("\\n", (request.Attachments ?? [])
+            .Where(item => item.IsInline != true)
+            .Select(item => item.Name));
+        var plannerEvidence = $"{subject}\\n{attachmentNames}";
+        if (plannerEvidence.Contains("LYONS COLLECTIONS", StringComparison.OrdinalIgnoreCase)) return true;
+        if (Regex.IsMatch(subject.Trim(), @"^(?:SB|SOUTHBOUND)(?:\\b|\\s|[-_])", RegexOptions.IgnoreCase)) return true;
+        return Regex.IsMatch(attachmentNames, @"(?:^|[\\\\/])(?:SB|SOUTHBOUND)(?:\\b|[ _-])", RegexOptions.IgnoreCase) &&
+               (attachmentNames.Contains("BOOKING", StringComparison.OrdinalIgnoreCase) ||
+                attachmentNames.Contains("LOAD PLAN", StringComparison.OrdinalIgnoreCase));
     }
 
     internal static bool IsInternalSender(string? senderAddress)
