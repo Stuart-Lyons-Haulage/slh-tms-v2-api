@@ -129,6 +129,30 @@ public sealed class OrderIntakeDuplicateCheckControllerTests
         Assert.Contains("New order", json);
     }
 
+    [Fact]
+    public void Nwf_merston_alias_is_exact_duplicate_when_only_site_label_differs()
+    {
+        var incoming = new OrderIntakeDuplicateCheckController.OrderSnapshot(
+            "NWF", "PO-22222", "PO-22222",
+            new DateOnly(2026, 10, 11), new DateOnly(2026, 10, 11),
+            "Merston", "Tesco Andover", 5);
+        var existing = incoming with { CollectionLocation = "NWF-Merston" };
+
+        Assert.Equal("Exact duplicate", OrderIntakeDuplicateCheckController.Classify(incoming, existing));
+    }
+
+    [Fact]
+    public void Nwf_site_alias_does_not_merge_merston_with_selsey()
+    {
+        var incoming = new OrderIntakeDuplicateCheckController.OrderSnapshot(
+            "NWF", "PO-33333", "PO-33333",
+            new DateOnly(2026, 10, 11), new DateOnly(2026, 10, 11),
+            "Merston", "Tesco Andover", 5);
+        var existing = incoming with { CollectionLocation = "NWF-Selsey" };
+
+        Assert.Equal("Amendment/update", OrderIntakeDuplicateCheckController.Classify(incoming, existing));
+    }
+
     private static TmsDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()
