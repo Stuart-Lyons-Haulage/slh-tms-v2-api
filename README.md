@@ -95,4 +95,4 @@ dotnet build Slh.Tms.Api.csproj -c Release
 dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release
 ```
 
-Production changes are complete only when CI and CodeQL pass, the tested image is deployed, SQL readiness is healthy and the production health endpoint reports the deployed revision.
+Production changes are complete only when CI and CodeQL pass, the tested API package is deployed, SQL readiness is healthy and the production health endpoint reports the deployed revision.

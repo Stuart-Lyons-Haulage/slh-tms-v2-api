@@ -17,6 +17,7 @@ env:
   AZURE_WEBAPP_NAME: slh-tms-api-prod
   AZURE_RESOURCE_GROUP: slh-tms-prod-rg
   API_HEALTH_URL: https://slh-tms-api-prod.azurewebsites.net/api/v1/health
+  API_READY_URL: https://slh-tms-api-prod.azurewebsites.net/api/v1/health/ready
 
 jobs:
   test-and-deploy:
@@ -75,15 +76,29 @@ jobs:
               --type zip \
               --clean true
 
-      - name: Verify production API health
+      - name: Stamp deployed revision
+        run: |
+          az webapp config appsettings set \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_WEBAPP_NAME" \
+            --settings "Deployment__Revision=$GITHUB_SHA" \
+            --output none
+
+      - name: Verify deployed revision and SQL readiness
         run: |
           for attempt in {1..18}; do
             response=$(curl -fsS "$API_HEALTH_URL" || true)
-            if echo "$response" | grep -qi 'healthy'; then
-              echo "$response"
+            readiness=$(curl -fsS "$API_READY_URL" || true)
+            if echo "$response" | grep -qi 'healthy' &&
+               echo "$response" | grep -Fq "$GITHUB_SHA" &&
+               echo "$readiness" | grep -q 'Healthy'; then
+              echo "API health: $response"
+              echo "SQL readiness: $readiness"
               exit 0
             fi
             sleep 10
           done
-          echo "App Service API health check failed after deployment" >&2
+          echo "App Service revision or readiness verification failed after deployment" >&2
+          echo "API health: $response" >&2
+          echo "SQL readiness: $readiness" >&2
           exit 1
