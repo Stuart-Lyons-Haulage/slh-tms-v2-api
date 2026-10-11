@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -53,14 +54,58 @@ public sealed record DriverAvailabilitySnapshot(
     DateTimeOffset GeneratedAtUtc,
     DriverAvailabilitySummary Summary,
     IReadOnlyList<DriverAvailabilityItem> Drivers,
-    int ClassificationMismatchCount);
+    int ClassificationMismatchCount,
+    bool SageRosterAvailable = false);
 
 public static class DriverAvailabilityService
 {
     private const string DriverDetailType = "masterdetail:driver";
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+    private static readonly SemaphoreSlim[] SnapshotGates = Enumerable.Range(0, 32).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    private static long cacheVersion;
+    private static readonly TimeSpan SnapshotCacheDuration = TimeSpan.FromSeconds(15);
 
-    public static async Task<DriverAvailabilitySnapshot> ReadAsync(TmsDbContext db, DateOnly planningDate, CancellationToken ct, SageHrClient? sageHr = null, ILogger? logger = null)
+    public static async Task<DriverAvailabilitySnapshot> ReadAsync(
+        TmsDbContext db,
+        DateOnly planningDate,
+        CancellationToken ct,
+        SageHrClient? sageHr = null,
+        ILogger? logger = null,
+        IMemoryCache? cache = null,
+        bool forceRefresh = false)
+    {
+        if (cache is null) return await ReadCoreAsync(db, planningDate, ct, sageHr, logger);
+
+        var key = CacheKey(planningDate);
+        if (!forceRefresh && cache.TryGetValue(key, out DriverAvailabilitySnapshot? cached) && cached is not null)
+            return cached;
+
+        var gate = SnapshotGates[planningDate.DayNumber % SnapshotGates.Length];
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (!forceRefresh && cache.TryGetValue(key, out cached) && cached is not null)
+                return cached;
+
+            var snapshot = await ReadCoreAsync(db, planningDate, ct, sageHr, logger);
+            cache.Set(key, snapshot, SnapshotCacheDuration);
+            return snapshot;
+        }
+        finally { gate.Release(); }
+    }
+
+    public static void Invalidate(IMemoryCache cache)
+    {
+        Interlocked.Increment(ref cacheVersion);
+    }
+
+    private static string CacheKey(DateOnly date)
+    {
+        var version = Interlocked.Read(ref cacheVersion);
+        return $"driver-availability:{version}:{date:yyyy-MM-dd}";
+    }
+
+    private static async Task<DriverAvailabilitySnapshot> ReadCoreAsync(TmsDbContext db, DateOnly planningDate, CancellationToken ct, SageHrClient? sageHr, ILogger? logger)
     {
         var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
@@ -112,7 +157,7 @@ public static class DriverAvailabilityService
             available,
             available - driversRequired);
 
-        return new DriverAvailabilitySnapshot(planningDate, DateTimeOffset.UtcNow, summary, items, items.Count(item => item.ClassificationMismatch));
+        return new DriverAvailabilitySnapshot(planningDate, DateTimeOffset.UtcNow, summary, items, items.Count(item => item.ClassificationMismatch), sageRoster.Available);
     }
 
     internal static int RequiredDriverCount(IReadOnlyCollection<Load> loads)
