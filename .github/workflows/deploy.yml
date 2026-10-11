@@ -14,10 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AZURE_CONTAINERAPP_NAME: slh-tms-api-prod
-  AZURE_RESOURCE_GROUP: slh-tms-prod-rg
-  ACR_NAME: slhtmsacrprod
-  ACR_LOGIN_SERVER: slhtmsacrprod.azurecr.io
+  EXPECTED_CONTAINERAPP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
   API_HEALTH_URL: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/v1/health
 
 jobs:
@@ -48,18 +45,27 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Resolve registry from the currently deployed app image
+      - name: Locate the production Container App and registry
         run: |
-          current_image=$(az containerapp show \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_CONTAINERAPP_NAME" \
-            --query "properties.template.containers[0].image" \
-            --output tsv)
-          registry_server="${current_image%%/*}"
-          if [[ "$registry_server" != *.azurecr.io ]]; then
-            echo "The production app is not using an Azure Container Registry image: $current_image" >&2
+          apps=$(az containerapp list --output json)
+          matches=$(jq --arg fqdn "$EXPECTED_CONTAINERAPP_FQDN" '[.[] | select(.properties.configuration.ingress.fqdn == $fqdn)]' <<<"$apps")
+          match_count=$(jq 'length' <<<"$matches")
+          if [[ "$match_count" != "1" ]]; then
+            echo "Expected exactly one production Container App for $EXPECTED_CONTAINERAPP_FQDN; found $match_count." >&2
             exit 1
           fi
+
+          app_name=$(jq -r '.[0].name' <<<"$matches")
+          resource_group=$(jq -r '.[0].resourceGroup' <<<"$matches")
+          current_image=$(jq -r '.[0].properties.template.containers[0].image // empty' <<<"$matches")
+          registry_server="${current_image%%/*}"
+          if [[ -z "$app_name" || -z "$resource_group" || "$registry_server" != *.azurecr.io ]]; then
+            echo "Production app metadata is incomplete or its image is not in Azure Container Registry: $current_image" >&2
+            exit 1
+          fi
+
+          printf 'AZURE_CONTAINERAPP_NAME=%s\n' "$app_name" >> "$GITHUB_ENV"
+          printf 'AZURE_RESOURCE_GROUP=%s\n' "$resource_group" >> "$GITHUB_ENV"
           printf 'ACR_LOGIN_SERVER=%s\n' "$registry_server" >> "$GITHUB_ENV"
           printf 'ACR_NAME=%s\n' "${registry_server%.azurecr.io}" >> "$GITHUB_ENV"
 
