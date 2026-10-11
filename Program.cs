@@ -303,6 +303,7 @@ builder.Services.AddHostedService<IntegrationSyncSchedulerBackgroundService>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();
+builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();

@@ -42,68 +42,118 @@ public sealed class SharePointOrderArchiveService(
     ILogger<SharePointOrderArchiveService> logger)
 {
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
-    private static readonly TimeSpan ApprovalArchiveBudget = TimeSpan.FromSeconds(8);
-
-    public async Task ArchiveApprovedOrderAsync(StagedImport order, JsonElement orderPayload, string? actor, CancellationToken ct)
+    /// <summary>
+    /// Archives source attachments once their 72-hour SQL retention window has elapsed.
+    /// The evidence row is only trimmed after every customer archive upload succeeds.
+    /// </summary>
+    public async Task<bool> ArchiveExpiredEvidenceAsync(StagedImport evidence, CancellationToken ct)
     {
-        if (!options.IsConfigured || !string.Equals(order.EntityType, "order", StringComparison.OrdinalIgnoreCase)) return;
+        if (!options.IsConfigured || !options.RemoveAttachmentPayloadAfterVerifiedExport ||
+            !string.Equals(evidence.EntityType, "email-evidence", StringComparison.OrdinalIgnoreCase)) return false;
 
-        using var archiveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        archiveCts.CancelAfter(ApprovalArchiveBudget);
-        try
+        JsonObject source;
+        try { source = JsonNode.Parse(evidence.PayloadJson)?.AsObject() ?? throw new JsonException("Evidence payload is not an object."); }
+        catch (JsonException ex)
         {
-            await ArchiveApprovedOrderCoreAsync(order, orderPayload, actor, archiveCts.Token);
+            logger.LogWarning(ex, "Expired email evidence {EvidenceId} could not be parsed; bytes were retained in SQL.", evidence.Id);
+            return false;
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+
+        var attachments = source["attachments"] as JsonArray ?? [];
+        var hasBytes = attachments.OfType<JsonObject>().Any(item => !Bool(item, "isInline") && !string.IsNullOrWhiteSpace(Text(item, "contentBase64")));
+        if (!hasBytes) return false;
+
+        var messageId = Text(source, "messageId") ?? Text(source, "internetMessageId");
+        var matchingOrders = await FindRelatedOrdersAsync(evidence, messageId, ct);
+        if (matchingOrders.Count == 0)
         {
-            db.StagedImportEvents.Add(ArchiveEvent(order, "SharePointArchiveTimedOut", actor, new
+            logger.LogWarning("Expired email evidence {EvidenceId} has no linked order/customer; bytes were retained in SQL.", evidence.Id);
+            return false;
+        }
+
+        var customerOrders = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (var payload in matchingOrders)
+        {
+            var customer = SafeSegment(Text(payload, "customerCode") ?? Text(payload, "customerName") ?? "Unassigned customer");
+            customerOrders.TryAdd(customer, payload);
+        }
+
+        using var exportCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        exportCts.CancelAfter(TimeSpan.FromMinutes(5));
+        var archived = new List<object>();
+        foreach (var (customer, payload) in customerOrders)
+        {
+            using var orderDocument = JsonDocument.Parse(payload.ToJsonString());
+            var result = await ExportAsync(evidence, orderDocument.RootElement, exportCts.Token);
+            if (!result.Success)
             {
-                timeoutSeconds = (int)ApprovalArchiveBudget.TotalSeconds,
-                message = "Approval was completed without waiting for the optional SharePoint archive."
-            }));
-            logger.LogWarning("SharePoint archive timed out for approved order {OrderId}; approval will continue without blocking.", order.Id);
-        }
-    }
-
-    private async Task ArchiveApprovedOrderCoreAsync(StagedImport order, JsonElement orderPayload, string? actor, CancellationToken ct)
-    {
-
-        var evidence = await FindEvidenceAsync(orderPayload, ct);
-        if (evidence is null) return;
-
-        var result = await ExportAsync(evidence, orderPayload, ct);
-        if (!result.Success)
-        {
-            db.StagedImportEvents.Add(ArchiveEvent(order, "SharePointArchiveFailed", actor, new
-            {
-                result.Error,
-                result.CustomerFolder,
-                result.AttachmentCount,
-                result.ArchiveUrl
-            }));
-            logger.LogWarning("Approved order {OrderId} was retained in SQL because SharePoint archiving failed: {Error}", order.Id, result.Error);
-            return;
+                logger.LogWarning("Expired email evidence {EvidenceId} was retained in SQL because SharePoint archive failed: {Error}", evidence.Id, result.Error);
+                db.StagedImportEvents.Add(new StagedImportEvent
+                {
+                    StagedImportId = evidence.Id,
+                    EventType = "SharePointArchiveFailed",
+                    NewStatus = evidence.Status,
+                    PayloadJson = JsonSerializer.Serialize(new { result.Error, customerFolder = customer, retentionHours = 72 }),
+                    Note = "Expired source evidence remains in Azure SQL until its SharePoint archive succeeds.",
+                    Actor = "system:sharepoint-retention"
+                });
+                await db.SaveChangesAsync(ct);
+                return false;
+            }
+            archived.Add(new { result.ArchiveUrl, customerFolder = customer, result.AttachmentCount });
         }
 
-        if (options.RemoveAttachmentPayloadAfterVerifiedExport && result.AttachmentCount > 0)
-            evidence.PayloadJson = RemoveAttachmentBytes(evidence.PayloadJson);
-
-        db.StagedImportEvents.Add(ArchiveEvent(order, "SharePointArchived", actor, new
-        {
-            result.ArchiveUrl,
-            result.CustomerFolder,
-            result.AttachmentCount,
-            attachmentPayloadRemoved = options.RemoveAttachmentPayloadAfterVerifiedExport && result.AttachmentCount > 0
-        }));
+        evidence.PayloadJson = RemoveAttachmentBytes(evidence.PayloadJson);
+        evidence.ReviewNote = ClipNote(evidence.ReviewNote, "Source attachment bytes archived to SharePoint after 72 hours; metadata retained in Azure SQL.");
         db.StagedImportEvents.Add(new StagedImportEvent
         {
             StagedImportId = evidence.Id,
-            EventType = "EvidenceArchived",
+            EventType = "EvidenceArchivedAfter72Hours",
             NewStatus = evidence.Status,
-            PayloadJson = JsonSerializer.Serialize(new { orderId = order.Id, result.ArchiveUrl, result.CustomerFolder, result.AttachmentCount }),
-            Note = "Evidence exported to SharePoint and verified before attachment cleanup.",
-            Actor = actor
+            PayloadJson = JsonSerializer.Serialize(new { retentionHours = 72, customerArchives = archived }),
+            Note = "SharePoint accepted the source attachments and manifests. Attachment bytes were then removed from Azure SQL; evidence metadata was retained.",
+            Actor = "system:sharepoint-retention"
         });
+        await db.SaveChangesAsync(ct);
+        logger.LogInformation("Archived expired source evidence {EvidenceId} to {CustomerCount} SharePoint customer folder(s); SQL attachment bytes removed.", evidence.Id, archived.Count);
+        return true;
+    }
+
+    private async Task<List<JsonObject>> FindRelatedOrdersAsync(StagedImport evidence, string? messageId, CancellationToken ct)
+    {
+        var candidates = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "order" && item.PayloadJson.Contains(evidence.IdempotencyKey))
+            .OrderByDescending(item => item.ReceivedAtUtc)
+            .Take(100)
+            .Select(item => item.PayloadJson)
+            .ToListAsync(ct);
+
+        if (candidates.Count == 0 && !string.IsNullOrWhiteSpace(messageId))
+            candidates = await db.StagedImports.AsNoTracking()
+                .Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId))
+                .OrderByDescending(item => item.ReceivedAtUtc)
+                .Take(100)
+                .Select(item => item.PayloadJson)
+                .ToListAsync(ct);
+
+        var result = new List<JsonObject>();
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var payload = JsonNode.Parse(candidate)?.AsObject();
+                if (payload is not null && (!string.IsNullOrWhiteSpace(Text(payload, "customerCode")) || !string.IsNullOrWhiteSpace(Text(payload, "customerName"))))
+                    result.Add(payload);
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
+
+    private static string ClipNote(string? existing, string note)
+    {
+        var combined = string.IsNullOrWhiteSpace(existing) ? note : $"{existing} {note}";
+        return combined.Length <= 1000 ? combined : combined[..1000];
     }
 
     internal static string RemoveAttachmentBytes(string evidencePayload)
@@ -113,22 +163,6 @@ public sealed class SharePointOrderArchiveService(
             foreach (var attachment in attachments.OfType<JsonObject>())
                 attachment.Remove("contentBase64");
         return root.ToJsonString();
-    }
-
-    private async Task<StagedImport?> FindEvidenceAsync(JsonElement payload, CancellationToken ct)
-    {
-        var evidenceKey = Text(payload, "sourceEvidenceKey");
-        if (!string.IsNullOrWhiteSpace(evidenceKey))
-            return await db.StagedImports.SingleOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
-
-        var messageId = Text(payload, "sourceEmailMessageId") ?? Text(payload, "sourceMessageId");
-        if (string.IsNullOrWhiteSpace(messageId)) return null;
-        var candidates = await db.StagedImports
-            .Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId))
-            .OrderByDescending(item => item.ReceivedAtUtc)
-            .Take(2)
-            .ToListAsync(ct);
-        return candidates.Count == 1 ? candidates[0] : null;
     }
 
     private async Task<ArchiveResult> ExportAsync(StagedImport evidence, JsonElement orderPayload, CancellationToken ct)
@@ -245,7 +279,9 @@ public sealed class SharePointOrderArchiveService(
         var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"SharePoint upload of '{fileName}' failed ({(int)response.StatusCode}): {body}");
         var item = JsonNode.Parse(body)?.AsObject() ?? throw new InvalidOperationException("Graph returned an empty upload result.");
-        return new DriveItem(Text(item, "id") ?? throw new InvalidOperationException("Graph upload result has no id."), Text(item, "webUrl"));
+        var uploaded = new DriveItem(Text(item, "id") ?? throw new InvalidOperationException("Graph upload result has no id."), Text(item, "webUrl"));
+        await VerifyUploadedAsync(client, driveId, uploaded.Id, content.LongLength, fileName, ct);
+        return uploaded;
     }
 
     private async Task<DriveItem> UploadLargeFileAsync(HttpClient client, string driveId, string folderId, string fileName, byte[] content, CancellationToken ct)
@@ -272,7 +308,16 @@ public sealed class SharePointOrderArchiveService(
             if (response.StatusCode != HttpStatusCode.Accepted)
                 completed = JsonNode.Parse(body)?.AsObject();
         }
-        return new DriveItem(Text(completed, "id") ?? throw new InvalidOperationException("Graph did not return a completed large-file upload."), Text(completed, "webUrl"));
+        var uploaded = new DriveItem(Text(completed, "id") ?? throw new InvalidOperationException("Graph did not return a completed large-file upload."), Text(completed, "webUrl"));
+        await VerifyUploadedAsync(client, driveId, uploaded.Id, content.LongLength, fileName, ct);
+        return uploaded;
+    }
+
+    private static async Task VerifyUploadedAsync(HttpClient client, string driveId, string itemId, long expectedLength, string fileName, CancellationToken ct)
+    {
+        var item = await ReadJsonAsync(client, $"drives/{Uri.EscapeDataString(driveId)}/items/{Uri.EscapeDataString(itemId)}?$select=id,size", ct);
+        if (!long.TryParse(Text(item, "size"), out var actualLength) || actualLength != expectedLength)
+            throw new InvalidOperationException($"SharePoint upload verification failed for '{fileName}': expected {expectedLength} bytes, received {Text(item, "size") ?? "no size"}.");
     }
 
     private static async Task<JsonObject> ReadJsonAsync(HttpClient client, string path, CancellationToken ct)
@@ -293,11 +338,6 @@ public sealed class SharePointOrderArchiveService(
         return JsonNode.Parse(text)?.AsObject();
     }
 
-    private static StagedImportEvent ArchiveEvent(StagedImport order, string eventType, string? actor, object payload) => new()
-    {
-        StagedImportId = order.Id, EventType = eventType, NewStatus = order.Status, PayloadJson = JsonSerializer.Serialize(payload),
-        Note = eventType == "SharePointArchived" ? "Source evidence exported to SharePoint." : "Source evidence remains in SQL pending SharePoint archive recovery.", Actor = actor
-    };
     private static string? Text(JsonElement value, string name) => value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String ? property.GetString()?.Trim() : null;
     private static string? Text(JsonObject? value, string name) => value is null || value[name] is null ? null : value[name]!.ToString().Trim();
     private static bool Bool(JsonObject value, string name) => bool.TryParse(Text(value, name), out var result) && result;
