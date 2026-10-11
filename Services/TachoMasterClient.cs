@@ -4,6 +4,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Models.Tracking;
  
 namespace Slh.Tms.Api.Services;
@@ -14,13 +16,16 @@ public sealed class TachoMasterClient
     private readonly TachoMasterOptions options;
     private readonly ILogger<TachoMasterClient> logger;
     private readonly DotTrackingClient? dotTrackingClient;
+    private readonly IMemoryCache? memoryCache;
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> DutyCacheGates = new();
  
-    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null)
+    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null, IMemoryCache? memoryCache = null)
     {
         this.httpClient = httpClient;
         this.options = options;
         this.logger = logger;
         this.dotTrackingClient = dotTrackingClient;
+        this.memoryCache = memoryCache;
         this.httpClient.Timeout = TimeSpan.FromSeconds(30);
         this.httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
     }
@@ -71,9 +76,30 @@ public sealed class TachoMasterClient
         }).Where(profile => !string.IsNullOrWhiteSpace(profile.DriverName)).OrderBy(profile => profile.DriverName).ToList();
     }
  
-    public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken = default, bool forceRefresh = false)
     {
         if (!options.IsConfigured) return [];
+
+        var cacheKey = $"tachomaster:duties:{NormaliseBaseUrl(options.BaseUrl)}:{date:yyyy-MM-dd}";
+        IReadOnlyList<TachoDriverDutyStatus>? cached;
+        if (!forceRefresh && memoryCache is not null && memoryCache.TryGetValue(cacheKey, out cached) && cached is not null)
+            return cached;
+
+        var gate = DutyCacheGates.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!forceRefresh && memoryCache is not null && memoryCache.TryGetValue(cacheKey, out cached) && cached is not null)
+                return cached;
+            var statuses = await ReadDriverDutyStatusesAsync(date, cancellationToken);
+            memoryCache?.Set(cacheKey, statuses, TimeSpan.FromSeconds(60));
+            return statuses;
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<IReadOnlyList<TachoDriverDutyStatus>> ReadDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken)
+    {
  
         var sid = await LoginAsync(cancellationToken);
         var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);

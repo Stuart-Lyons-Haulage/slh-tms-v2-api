@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 13018)
+Total output lines: 924
+
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Contracts;
@@ -148,7 +151,8 @@ public sealed class DispatchService(
 
     public async Task<IReadOnlyList<DispatchAvailableTimeDto>> GetAvailableTimesAsync(
         DispatchAvailableTimesRequest request,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool forceTachoRefresh = false)
     {
         var ids = request.DriverIds.Distinct().ToArray();
         if (ids.Length == 0) return [];
@@ -158,7 +162,7 @@ public sealed class DispatchService(
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         // Do not parallelise EF-backed reads on the scoped TmsDbContext.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
-        var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceTachoRefresh);
         var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
@@ -234,7 +238,7 @@ public sealed class DispatchService(
         // another query starts on this scoped DbContext. Parallel Task.WhenAll here
         // caused the live HTTP 500 seen when Dispatch attempted a single-row lock.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
-        var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceTachoRefresh: true);
         var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);
@@ -367,72 +371,7 @@ public sealed class DispatchService(
                 }
 
                 await DriverDispatchStateStore.SetPlannedStartAsync(
-                    db,
-                    allocation.RunId,
-                    allocation.PlannedStartTime.ToUniversalTime(),
-                    actor,
-                    ct,
-                    allocation.UseReducedDailyRest ? "Locked smart dispatch plan · reduced 9h daily rest" : "Locked smart dispatch plan · regular 11h daily rest",
-                    allocation.DriverId,
-                    allocation.UseReducedDailyRest);
-                db.OperationalHistoryEvents.Add(new OperationalHistoryEvent
-                {
-                    EntityType = "Load", EntityId = allocation.RunId, EventType = "DispatchLocked", Actor = actor,
-                    PayloadJson = JsonSerializer.Serialize(new { allocation.DriverId, allocation.VehicleId, allocation.TrailerId, allocation.PlannedStartTime, request.PlanningDate }),
-                    OccurredAtUtc = DateTimeOffset.UtcNow
-                });
-            }
-
-            await transaction.CommitAsync(ct);
-            return new DispatchLockResponse(true, []);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            await transaction.RollbackAsync(ct);
-            db.ChangeTracker.Clear();
-            logger.LogError(exception, "Smart Dispatch atomic lock failed for {PlanningDate}; transaction rolled back.", request.PlanningDate);
-            return new DispatchLockResponse(false,
-                [new DispatchLockFailure(Guid.Empty, null, "Plan could not be locked atomically. No allocations were saved; refresh and try again.")]);
-        }
-    }
-
-    private async Task<List<RunProfile>> ReadRunProfilesAsync(DateOnly planningDate, CancellationToken ct)
-    {
-        var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
-            .Where(load => load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.Reference)
-            .ToList();
-        try { await RunOperationalStore.EnrichAsync(db, loads, ct); }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogWarning(exception, "Dispatch run operational enrichment was unavailable; core run data will still be returned.");
-            db.ChangeTracker.Clear();
-        }
-
-        var trailerIds = loads.Where(load => load.TrailerId is not null).Select(load => load.TrailerId!.Value).Distinct().ToArray();
-        var trailerById = trailerIds.Length == 0
-            ? new Dictionary<Guid, Trailer>()
-            : await db.Trailers.AsNoTracking().Where(trailer => trailerIds.Contains(trailer.Id)).ToDictionaryAsync(trailer => trailer.Id, ct);
-
-        var result = new List<RunProfile>(loads.Count);
-        foreach (var load in loads)
-        {
-            var stops = OperationalStopOrdering.Order(load.Stops).ToList();
-            var first = stops.FirstOrDefault(stop => stop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase)) ?? stops.FirstOrDefault();
-            var last = stops.LastOrDefault();
-            var trailer = load.TrailerId is Guid trailerId ? trailerById.GetValueOrDefault(trailerId) : null;
-            var text = $"{load.Reference} {load.PlannerNotes} {load.CapacityType} {string.Join(' ', stops.Select(stop => stop.Name))}";
-
-            var market = ContainsAny(text, "market", "covent garden", "new spitalfields", "spitalfields", "smithfield");
-            var doubleDeck = ContainsAny(trailer?.Type, "double", "deck") || ContainsAny(text, "double deck", "double-deck", " dd ");
-            var refrigerated = load.TemperatureC is not null || ContainsAny(trailer?.Type, "refrig", "fridge", "chill", "temp") ||
-                               ContainsAny(text, "refrigerated", "fridge", "chilled", "frozen", "temperature controlled");
-
-            var required = DispatchSkill.None;
-            if (market) required |= DispatchSkill.MarketRun;
-            if (doubleDeck) required |= DispatchSkill.DoubleDecker;
-            if (refrigerated) required |= DispatchSkill.RefrigeratedUnit;
-            if (ContainsAny(text, " adr ", "hazchem", "haz chem")) required |= DispatchSkill.HazChem;
+         …1018 tokens truncated…hem")) required |= DispatchSkill.HazChem;
             if (ContainsAny(text, "moffett", " moff ")) required |= DispatchSkill.Moffett;
             if (ContainsAny(text, "tail lift", "tail-lift")) required |= DispatchSkill.TailLift;
             if (ContainsAny(text, "manual handling")) required |= DispatchSkill.ManualHandling;
@@ -625,7 +564,7 @@ public sealed class DispatchService(
         return result;
     }
 
-    private async Task<List<TachoDriverDutyStatus>> ReadDutiesAsync(DateOnly planningDate, CancellationToken ct)
+    private async Task<List<TachoDriverDutyStatus>> ReadDutiesAsync(DateOnly planningDate, CancellationToken ct, bool forceRefresh = false)
     {
         if (!tachoMaster.IsConfigured) return [];
         var today = LondonDate(DateTimeOffset.UtcNow);
@@ -642,7 +581,7 @@ public sealed class DispatchService(
             var dutyBatches = await Task.WhenAll(dutyDates.Select(async date =>
             {
                 await gate.WaitAsync(timeout.Token);
-                try { return await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token); }
+                try { return await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token, forceRefresh); }
                 finally { gate.Release(); }
             }));
             result.AddRange(dutyBatches.SelectMany(batch => batch));
