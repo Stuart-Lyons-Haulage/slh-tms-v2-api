@@ -765,7 +765,7 @@ public sealed class SamsaraDispatchController(
             if (driver is not null)
             {
                 var available = (await dispatch.GetAvailableTimesAsync(
-                    new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct))
+                    new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct, forceTachoRefresh: true))
                     .Single();
                 if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
                     return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
@@ -1144,7 +1144,7 @@ public sealed class SamsaraDispatchController(
         if (deliveryDriver is null || deliveryVehicle is null || deliveryTrailer is null)
             return BadRequest(new { message = "The relay delivery resources must all be active Master Data records." });
 
-        var available = (await dispatch.GetAvailableTimesAsync(new DispatchAvailableTimesRequest(load.PlanningDate, [deliveryDriver.Id]), ct)).Single();
+        var available = (await dispatch.GetAvailableTimesAsync(new DispatchAvailableTimesRequest(load.PlanningDate, [deliveryDriver.Id]), ct, forceTachoRefresh: true)).Single();
         if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
             return BadRequest(new { message = available.BreachDetail ?? "A legal TachoMaster start cannot be calculated for the delivery driver." });
 

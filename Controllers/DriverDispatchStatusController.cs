@@ -81,8 +81,30 @@ public sealed class DriverDispatchStatusController(
                 timeout.CancelAfter(TimeSpan.FromSeconds(20));
                 var throughDate = planningDate < today ? planningDate : today;
                 var fromDate = throughDate.AddDays(-8);
-                for (var dutyDate = fromDate; dutyDate <= throughDate; dutyDate = dutyDate.AddDays(1))
-                    dutyBuffer.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token));
+                var dutyDates = Enumerable.Range(0, throughDate.DayNumber - fromDate.DayNumber + 1)
+                    .Select(offset => fromDate.AddDays(offset)).ToArray();
+                using var gate = new SemaphoreSlim(4, 4);
+                var dutyBatches = await Task.WhenAll(dutyDates.Select(async dutyDate =>
+                {
+                    var acquired = false;
+                    try
+                    {
+                        await gate.WaitAsync(timeout.Token);
+                        acquired = true;
+                        return await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token);
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        return (IReadOnlyList<TachoDriverDutyStatus>)Array.Empty<TachoDriverDutyStatus>();
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        logger.LogWarning(exception, "TachoMaster duty history for {DutyDate} was unavailable for Driver Dispatch status.", dutyDate);
+                        return (IReadOnlyList<TachoDriverDutyStatus>)Array.Empty<TachoDriverDutyStatus>();
+                    }
+                    finally { if (acquired) gate.Release(); }
+                }));
+                dutyBuffer.AddRange(dutyBatches.SelectMany(batch => batch));
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {

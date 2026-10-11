@@ -54,7 +54,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         if (request.DriverId is Guid requestedDriverId)
         {
             var available = (await dispatch.GetAvailableTimesAsync(
-                new DispatchAvailableTimesRequest(load.PlanningDate, [requestedDriverId], request.UseReducedDailyRest ? [requestedDriverId] : []), ct))
+                new DispatchAvailableTimesRequest(load.PlanningDate, [requestedDriverId], request.UseReducedDailyRest ? [requestedDriverId] : []), ct, forceTachoRefresh: true))
                 .Single();
             if (available.AvailableFrom is null)
                 return Conflict(new { code = "tacho_start_unavailable", message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });

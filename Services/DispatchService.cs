@@ -148,7 +148,8 @@ public sealed class DispatchService(
 
     public async Task<IReadOnlyList<DispatchAvailableTimeDto>> GetAvailableTimesAsync(
         DispatchAvailableTimesRequest request,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool forceTachoRefresh = false)
     {
         var ids = request.DriverIds.Distinct().ToArray();
         if (ids.Length == 0) return [];
@@ -158,7 +159,7 @@ public sealed class DispatchService(
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         // Do not parallelise EF-backed reads on the scoped TmsDbContext.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
-        var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceTachoRefresh);
         var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
@@ -234,7 +235,7 @@ public sealed class DispatchService(
         // another query starts on this scoped DbContext. Parallel Task.WhenAll here
         // caused the live HTTP 500 seen when Dispatch attempted a single-row lock.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
-        var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceRefresh: true);
         var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);
@@ -625,7 +626,7 @@ public sealed class DispatchService(
         return result;
     }
 
-    private async Task<List<TachoDriverDutyStatus>> ReadDutiesAsync(DateOnly planningDate, CancellationToken ct)
+    private async Task<List<TachoDriverDutyStatus>> ReadDutiesAsync(DateOnly planningDate, CancellationToken ct, bool forceRefresh = false)
     {
         if (!tachoMaster.IsConfigured) return [];
         var today = LondonDate(DateTimeOffset.UtcNow);
@@ -642,7 +643,7 @@ public sealed class DispatchService(
             var dutyBatches = await Task.WhenAll(dutyDates.Select(async date =>
             {
                 await gate.WaitAsync(timeout.Token);
-                try { return await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token); }
+                try { return await tachoMaster.GetDriverDutyStatusesAsync(date, timeout.Token, forceRefresh); }
                 finally { gate.Release(); }
             }));
             result.AddRange(dutyBatches.SelectMany(batch => batch));

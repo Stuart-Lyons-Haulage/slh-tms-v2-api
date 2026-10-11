@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Models;
@@ -13,6 +14,29 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class TachoMasterClientTests
 {
+    [Fact]
+    public async Task Duty_reads_are_shared_for_a_minute_and_can_be_force_refreshed()
+    {
+        var handler = new TachoMasterHandler();
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var client = new TachoMasterClient(new HttpClient(handler), new TachoMasterOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret"
+        }, NullLogger<TachoMasterClient>.Instance, memoryCache: cache);
+        var date = new DateOnly(2026, 8, 14);
+
+        await client.GetDriverDutyStatusesAsync(date);
+        await client.GetDriverDutyStatusesAsync(date);
+        Assert.Single(handler.Paths.Where(path => path == "/api/Duty/GetDutyTransactions"));
+
+        await client.GetDriverDutyStatusesAsync(date, forceRefresh: true);
+        Assert.Equal(2, handler.Paths.Count(path => path == "/api/Duty/GetDutyTransactions"));
+    }
+
     [Fact]
     public async Task Transient_provider_failure_is_retried_but_auth_failure_is_not_retried_as_a_5xx()
     {
