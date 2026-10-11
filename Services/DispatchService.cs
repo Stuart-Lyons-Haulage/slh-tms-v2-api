@@ -235,7 +235,7 @@ public sealed class DispatchService(
         // another query starts on this scoped DbContext. Parallel Task.WhenAll here
         // caused the live HTTP 500 seen when Dispatch attempted a single-row lock.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
-        var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceTachoRefresh: true);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceRefresh: true);
         var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);
