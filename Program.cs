@@ -38,7 +38,7 @@ if (string.IsNullOrWhiteSpace(tenantId))
 if (string.IsNullOrWhiteSpace(audience))
     throw new InvalidOperationException("Entra:Audience is required.");
 var allowedTmsDomains = builder.Configuration.GetSection("Entra:AllowedDomains").Get<string[]>() ?? ["lyonshaulage.com"];
-var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
+var deploymentRevision = ReadDeploymentRevision(builder.Configuration);
 var applicationInsightsConnectionString =
     builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"] ??
     builder.Configuration["ApplicationInsights:ConnectionString"];
@@ -375,6 +375,18 @@ builder.Services.AddAuthorization(options =>
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsMasterRolePolicy.IsAdmin(context.User, allowedTmsDomains)));
 });
+
+static string ReadDeploymentRevision(IConfiguration configuration)
+{
+    var revisionFile = Path.Combine(AppContext.BaseDirectory, "deployment-revision.txt");
+    if (File.Exists(revisionFile))
+    {
+        var revision = File.ReadAllText(revisionFile).Trim();
+        if (!string.IsNullOrWhiteSpace(revision)) return revision;
+    }
+
+    return configuration["Deployment:Revision"] ?? "local";
+}
 
 static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>
     keys.Select(key => configuration[key]).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? fallback;
