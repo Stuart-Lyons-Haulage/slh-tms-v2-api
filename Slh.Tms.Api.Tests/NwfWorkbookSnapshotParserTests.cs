@@ -16,6 +16,7 @@ public sealed class NwfWorkbookSnapshotParserTests
         Assert.Equal(expected, NwfWorkbookSnapshotParser.NormaliseNwfPlannerDestination(customer, depot));
     }
 
+    [InlineData("Aldi", "Aldi NESTON Distribution Centre", "Aldi-Neston")]
     [Fact]
     public void WorkbookSnapshot_KeepsIncompleteFreshCutRowAsPreOrder()
     {
