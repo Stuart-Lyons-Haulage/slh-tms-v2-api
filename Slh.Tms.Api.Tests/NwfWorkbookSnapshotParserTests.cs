@@ -11,12 +11,12 @@ public sealed class NwfWorkbookSnapshotParserTests
     [InlineData("Aldi", "Aldi GOLDTHORPE Distribution Centre", "Aldi-Goldthorpe")]
     [InlineData("Morrisons", "Morrisons FRUITLATIMER 952", "Morrisons-LatimerPark")]
     [InlineData("Morrisons", "Morrisons STOCKTON 994", "Morrisons-Stockton")]
+    [InlineData("Aldi", "Aldi NESTON Distribution Centre", "Aldi-Neston")]
     public void PlannerDestination_IsNormalisedToOperationalSite(string customer, string depot, string expected)
     {
         Assert.Equal(expected, NwfWorkbookSnapshotParser.NormaliseNwfPlannerDestination(customer, depot));
     }
 
-    [InlineData("Aldi", "Aldi NESTON Distribution Centre", "Aldi-Neston")]
     [Fact]
     public void WorkbookSnapshot_KeepsIncompleteFreshCutRowAsPreOrder()
     {
