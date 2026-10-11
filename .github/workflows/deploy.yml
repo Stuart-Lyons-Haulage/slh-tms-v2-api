@@ -43,6 +43,9 @@ jobs:
       - name: Publish API
         run: dotnet publish Slh.Tms.Api.csproj --configuration Release --no-restore --output ./publish
 
+      - name: Embed deployed revision in package
+        run: echo "$GITHUB_SHA" > ./publish/deployment-revision.txt
+
       - name: Package published API
         run: cd publish && zip -r ../api-publish.zip .
 
@@ -76,19 +79,11 @@ jobs:
               --type zip \
               --clean true
 
-      - name: Stamp deployed revision
-        run: |
-          az webapp config appsettings set \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_WEBAPP_NAME" \
-            --settings "Deployment__Revision=$GITHUB_SHA" \
-            --output none
-
       - name: Verify deployed revision and SQL readiness
         run: |
-          for attempt in {1..18}; do
-            response=$(curl -fsS "$API_HEALTH_URL" || true)
-            readiness=$(curl -fsS "$API_READY_URL" || true)
+          for attempt in {1..30}; do
+            response=$(curl --connect-timeout 5 --max-time 10 -fsS "$API_HEALTH_URL" || true)
+            readiness=$(curl --connect-timeout 5 --max-time 10 -fsS "$API_READY_URL" || true)
             if echo "$response" | grep -qi 'healthy' &&
                echo "$response" | grep -Fq "$GITHUB_SHA" &&
                echo "$readiness" | grep -q 'Healthy'; then
@@ -96,7 +91,7 @@ jobs:
               echo "SQL readiness: $readiness"
               exit 0
             fi
-            sleep 10
+            sleep 5
           done
           echo "App Service revision or readiness verification failed after deployment" >&2
           echo "API health: $response" >&2
