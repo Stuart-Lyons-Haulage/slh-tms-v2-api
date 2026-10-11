@@ -4,7 +4,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Models.Tracking;
  
@@ -17,7 +16,7 @@ public sealed class TachoMasterClient
     private readonly ILogger<TachoMasterClient> logger;
     private readonly DotTrackingClient? dotTrackingClient;
     private readonly IMemoryCache? memoryCache;
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> DutyCacheGates = new();
+    private const string SnapshotCacheKeyPrefix = "tachomaster:shared-snapshot:";
  
     public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null, IMemoryCache? memoryCache = null)
     {
@@ -47,16 +46,62 @@ public sealed class TachoMasterClient
         return statuses.ToDictionary(item => item.Key, item => item.Value.DriverName);
     }
  
-    public async Task<IReadOnlyList<TachoDriverProfile>> GetDriverProfilesAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// The scheduled refresh is the sole owner of TachoMaster reads. It retrieves one
+    /// 31-day duty window plus the member and metrics directories, then publishes the
+    /// completed snapshot for all operational readers in this process.
+    /// </summary>
+    public async Task<bool> RefreshSnapshotAsync(DateOnly fromDate, DateOnly toDate, CancellationToken cancellationToken = default)
     {
-        if (!options.IsConfigured) return [];
+        if (!options.IsConfigured || memoryCache is null) return false;
+        if (toDate < fromDate) throw new ArgumentOutOfRangeException(nameof(toDate), "Snapshot end date must be on or after the start date.");
+
         var sid = await LoginAsync(cancellationToken);
+        var dutiesTask = GetDutiesAsync(sid, fromDate, toDate, cancellationToken);
         var membersTask = GetMembersAsync(sid, cancellationToken);
         var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
-        await Task.WhenAll(membersTask, metricsTask);
-        var metrics = (await metricsTask).GroupBy(item => item.MemCode)
+        await Task.WhenAll(dutiesTask, membersTask, metricsTask);
+
+        var members = await membersTask;
+        var metrics = (await metricsTask)
+            .GroupBy(item => item.MemCode)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.DateTimeWhenValid).First());
-        return (await membersTask).GroupBy(item => item.MemCode).Select(group => group.First()).Select(member =>
+        var falconDrivers = await TryGetFalconDriverStatusesAsync(members, metrics, cancellationToken);
+        var snapshot = new TachoSnapshot(
+            fromDate,
+            toDate,
+            DateTimeOffset.UtcNow,
+            await dutiesTask,
+            members,
+            metrics.Values.ToList(),
+            falconDrivers);
+        memoryCache.Set(SnapshotCacheKey, snapshot, TimeSpan.FromMinutes(35));
+        logger.LogInformation(
+            "Published shared TachoMaster snapshot for {FromDate} to {ToDate}: {DutyCount} duties, {MemberCount} members, {MetricCount} metrics.",
+            fromDate, toDate, snapshot.Duties.Count, snapshot.Members.Count, snapshot.Metrics.Count);
+        return true;
+    }
+
+    public DateTimeOffset? SnapshotRefreshedAtUtc => TryGetSnapshot(out var snapshot) ? snapshot.RefreshedAtUtc : null;
+
+    private string SnapshotCacheKey => $"{SnapshotCacheKeyPrefix}{NormaliseBaseUrl(options.BaseUrl)}";
+
+    private bool TryGetSnapshot(out TachoSnapshot snapshot)
+    {
+        if (memoryCache is not null && memoryCache.TryGetValue(SnapshotCacheKey, out snapshot!) && snapshot is not null)
+            return true;
+        snapshot = null!;
+        return false;
+    }
+
+    private TachoSnapshot? GetSnapshotFor(DateOnly date)
+        => TryGetSnapshot(out var snapshot) && date >= snapshot.FromDate && date <= snapshot.ToDate ? snapshot : null;
+
+    private static IReadOnlyList<TachoDriverProfile> BuildProfiles(TachoSnapshot snapshot)
+    {
+        var metrics = snapshot.Metrics.GroupBy(item => item.MemCode)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.DateTimeWhenValid).First());
+        return snapshot.Members.GroupBy(item => item.MemCode).Select(group => group.First()).Select(member =>
         {
             metrics.TryGetValue(member.MemCode, out var metric);
             return new TachoDriverProfile(
@@ -75,44 +120,32 @@ public sealed class TachoMasterClient
                 metric?.WorkAvaiableWeek);
         }).Where(profile => !string.IsNullOrWhiteSpace(profile.DriverName)).OrderBy(profile => profile.DriverName).ToList();
     }
- 
-    public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken = default, bool forceRefresh = false)
+
+    public Task<IReadOnlyList<TachoDriverProfile>> GetDriverProfilesAsync(CancellationToken cancellationToken = default)
     {
-        if (!options.IsConfigured) return [];
-
-        var cacheKey = $"tachomaster:duties:{NormaliseBaseUrl(options.BaseUrl)}:{date:yyyy-MM-dd}";
-        IReadOnlyList<TachoDriverDutyStatus>? cached;
-        if (!forceRefresh && memoryCache is not null && memoryCache.TryGetValue(cacheKey, out cached) && cached is not null)
-            return cached;
-
-        var gate = DutyCacheGates.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        try
-        {
-            if (!forceRefresh && memoryCache is not null && memoryCache.TryGetValue(cacheKey, out cached) && cached is not null)
-                return cached;
-            var statuses = await ReadDriverDutyStatusesAsync(date, cancellationToken);
-            memoryCache?.Set(cacheKey, statuses, TimeSpan.FromSeconds(60));
-            return statuses;
-        }
-        finally { gate.Release(); }
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<IReadOnlyList<TachoDriverProfile>>(
+            options.IsConfigured && TryGetSnapshot(out var snapshot) ? BuildProfiles(snapshot) : []);
     }
 
-    private async Task<IReadOnlyList<TachoDriverDutyStatus>> ReadDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken = default, bool forceRefresh = false)
     {
- 
-        var sid = await LoginAsync(cancellationToken);
-        var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
-        var membersTask = GetMembersAsync(sid, cancellationToken);
-        var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
-        await Task.WhenAll(dutiesTask, membersTask, metricsTask);
- 
-        var members = (await membersTask).GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
-        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
+        cancellationToken.ThrowIfCancellationRequested();
+        // Kept for API compatibility. Provider reads are only permitted in RefreshSnapshotAsync.
+        _ = forceRefresh;
+        var snapshot = options.IsConfigured ? GetSnapshotFor(date) : null;
+        return Task.FromResult<IReadOnlyList<TachoDriverDutyStatus>>(
+            snapshot is null ? [] : BuildDutyStatuses(snapshot, date));
+    }
+
+    private IReadOnlyList<TachoDriverDutyStatus> BuildDutyStatuses(TachoSnapshot snapshot, DateOnly date)
+    {
+        var members = snapshot.Members.GroupBy(item => item.MemCode).ToDictionary(group => group.Key, group => group.First());
+        var metrics = snapshot.Metrics.GroupBy(item => item.MemCode)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.DateTimeWhenValid).First());
         var (dayStart, dayEnd) = OperatingWindowUtc(date);
         var result = new List<TachoDriverDutyStatus>();
- 
-        foreach (var duty in (await dutiesTask)
+        foreach (var duty in snapshot.Duties
             .Where(item => item.MemCode > 0)
             .Where(item => item.DutyStart < dayEnd && (item.DutyEnd is null || item.DutyEnd >= dayStart))
             .OrderBy(item => item.DutyStart))
@@ -120,13 +153,11 @@ public sealed class TachoMasterClient
             if (!members.TryGetValue(duty.MemCode, out var member)) continue;
             var name = DriverName(member);
             if (string.IsNullOrWhiteSpace(name)) continue;
- 
             var breaks = (duty.Wtd ?? [])
                 .Where(item => string.Equals(item.WtdEvent, "wtdBreak", StringComparison.OrdinalIgnoreCase))
                 .Where(item => item.TimeEnd >= item.TimeStart)
                 .ToList();
             metrics.TryGetValue(duty.MemCode, out var metric);
- 
             result.Add(new TachoDriverDutyStatus(
                 string.IsNullOrWhiteSpace(duty.VehCode) ? string.Empty : NormaliseIdentifier(duty.VehCode),
                 duty.MemCode,
@@ -151,11 +182,9 @@ public sealed class TachoMasterClient
                 metric?.ShortDailyRestTakenThisWeek,
                 metric?.WorkAvaiableWeek));
         }
- 
-        logger.LogInformation("TachoMaster returned {DutyCount} complete duty transaction(s) for UK operating date {Date}.", result.Count, date);
         return result;
     }
- 
+
     public async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> GetCurrentDriverStatusesByVehicleAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return new Dictionary<string, TachoVehicleDriverStatus>();
@@ -168,7 +197,7 @@ public sealed class TachoMasterClient
             if (status is not null) result[vehicle] = status;
         }
  
-        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, metrics, cancellationToken);
+        var falconDrivers = GetSnapshotFor(date)?.FalconDrivers ?? new Dictionary<string, TachoVehicleDriverStatus>();
         var falconOnly = 0;
         var overlaps = 0;
         var mismatches = 0;
@@ -241,7 +270,7 @@ public sealed class TachoMasterClient
             if (statuses.Count > 0) result[vehicle] = statuses;
         }
 
-        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, metrics, cancellationToken);
+        var falconDrivers = GetSnapshotFor(date)?.FalconDrivers ?? new Dictionary<string, TachoVehicleDriverStatus>();
         foreach (var (vehicle, falcon) in falconDrivers)
         {
             if (!result.TryGetValue(vehicle, out var existing))
@@ -275,7 +304,7 @@ public sealed class TachoMasterClient
             if (statuses.Count > 0) result[vehicle] = statuses;
         }
  
-        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, metrics, cancellationToken);
+        var falconDrivers = GetSnapshotFor(date)?.FalconDrivers ?? new Dictionary<string, TachoVehicleDriverStatus>();
         foreach (var (vehicle, falcon) in falconDrivers)
         {
             if (!result.TryGetValue(vehicle, out var existing))
@@ -289,32 +318,32 @@ public sealed class TachoMasterClient
         return result;
     }
  
-    private async Task<(
+    private Task<(
         Dictionary<string, List<TachoDuty>> DutiesByVehicle,
         Dictionary<int, TachoMember> Members,
         Dictionary<int, TachoMemberMetric> Metrics,
         IReadOnlyList<TachoMember> MemberList)> LoadDutyContextAsync(DateOnly date, CancellationToken cancellationToken)
     {
-        var sid = await LoginAsync(cancellationToken);
-        var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
-        var membersTask = GetMembersAsync(sid, cancellationToken);
-        var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
-        await Task.WhenAll(dutiesTask, membersTask, metricsTask);
- 
-        var duties = await dutiesTask;
-        var memberList = await membersTask;
+        cancellationToken.ThrowIfCancellationRequested();
+        var snapshot = GetSnapshotFor(date);
+        if (snapshot is null)
+            return Task.FromResult((
+                new Dictionary<string, List<TachoDuty>>(),
+                new Dictionary<int, TachoMember>(),
+                new Dictionary<int, TachoMemberMetric>(),
+                (IReadOnlyList<TachoMember>)Array.Empty<TachoMember>()));
+
         var (dayStart, dayEnd) = OperatingWindowUtc(date);
-        var dutiesByVehicle = duties
+        var dutiesByVehicle = snapshot.Duties
             .Where(duty => !string.IsNullOrWhiteSpace(duty.VehCode) && duty.MemCode > 0)
             .Where(duty => duty.DutyStart < dayEnd && (duty.DutyEnd is null || duty.DutyEnd >= dayStart))
             .GroupBy(duty => NormaliseIdentifier(duty.VehCode))
             .ToDictionary(group => group.Key, group => group.OrderByDescending(duty => duty.DutyStart).ToList());
- 
-        var members = memberList.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
-        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
-        return (dutiesByVehicle, members, metrics, memberList);
+        var members = snapshot.Members.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
+        var metrics = snapshot.Metrics.GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
+        return Task.FromResult((dutiesByVehicle, members, metrics, (IReadOnlyList<TachoMember>)snapshot.Members));
     }
- 
+
     private static TachoVehicleDriverStatus? BuildStatus(string vehicle, int memberCode, List<TachoDuty> vehicleDuties, Dictionary<int, TachoMember> members, Dictionary<int, TachoMemberMetric> metrics)
     {
         if (!members.TryGetValue(memberCode, out var member)) return null;
@@ -489,11 +518,12 @@ public sealed class TachoMasterClient
         throw new HttpRequestException($"TachoMaster login failed. {lastFailure ?? "No response was received."}");
     }
  
-    private async Task<List<TachoDuty>> GetDutiesAsync(string sid, DateOnly date, CancellationToken cancellationToken)
+    private async Task<List<TachoDuty>> GetDutiesAsync(string sid, DateOnly fromDate, DateOnly toDate, CancellationToken cancellationToken)
     {
         var result = new List<TachoDuty>();
         var offset = 0;
-        var (fromUtc, toUtc) = OperatingWindowUtc(date);
+        var fromUtc = OperatingWindowUtc(fromDate).StartUtc;
+        var toUtc = OperatingWindowUtc(toDate).EndUtc;
         for (var page = 0; page < options.MaxPages; page++)
         {
             using var response = await SendWithRetryAsync(() =>
@@ -695,6 +725,15 @@ public sealed class TachoMasterClient
         public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options) => writer.WriteStringValue(value);
     }
  
+    private sealed record TachoSnapshot(
+        DateOnly FromDate,
+        DateOnly ToDate,
+        DateTimeOffset RefreshedAtUtc,
+        IReadOnlyList<TachoDuty> Duties,
+        IReadOnlyList<TachoMember> Members,
+        IReadOnlyList<TachoMemberMetric> Metrics,
+        IReadOnlyDictionary<string, TachoVehicleDriverStatus> FalconDrivers);
+
     private sealed class TachoDutyEnvelope { public TachoPage<TachoDuty>? DutyNew { get; set; } }
     private sealed class TachoPage<T> { public bool MoreData { get; set; } public int RecordCount { get; set; } public List<T> Data { get; set; } = []; }
     private sealed class TachoDuty

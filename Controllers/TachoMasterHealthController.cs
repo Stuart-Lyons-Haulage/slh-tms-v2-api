@@ -60,7 +60,22 @@ public sealed class TachoMasterHealthController(
                     .Where(driver => driver.LastTachoSyncUtc != null)
                     .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
 
-            var lastSuccessfulPollUtc = DateTimeOffset.UtcNow;
+            var lastSuccessfulPollUtc = tachoMasterClient.SnapshotRefreshedAtUtc;
+            if (lastSuccessfulPollUtc is null)
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    status = "snapshot-unavailable",
+                    configured = true,
+                    connectionFreshness = "unknown",
+                    lastSuccessfulPollUtc = (DateTimeOffset?)null,
+                    checkedAtUtc = DateTimeOffset.UtcNow
+                });
+            }
+
+            var snapshotAgeMinutes = Math.Max(0, (DateTimeOffset.UtcNow - lastSuccessfulPollUtc.Value).TotalMinutes);
+            var connectionFreshness = snapshotAgeMinutes <= 15 ? "live" : snapshotAgeMinutes <= 30 ? "delayed" : "stale";
+            var snapshotStale = connectionFreshness != "live";
             var openDuties = duties.Values.SelectMany(items => items).ToList();
 
             var newestMetric = profiles.Select(item => item.MetricsValidAtUtc)
@@ -69,7 +84,7 @@ public sealed class TachoMasterHealthController(
                 .Select(item => item!.Value)
                 .DefaultIfEmpty()
                 .Max();
-            var metricsAgeMinutes = newestMetric == default ? (double?)null : Math.Max(0, Math.Round((lastSuccessfulPollUtc - newestMetric).TotalMinutes, 1));
+            var metricsAgeMinutes = newestMetric == default ? (double?)null : Math.Max(0, Math.Round((DateTimeOffset.UtcNow - newestMetric).TotalMinutes, 1));
             var metricsFreshness = metricsAgeMinutes switch
             {
                 null => "unknown",
@@ -81,7 +96,7 @@ public sealed class TachoMasterHealthController(
 
             var jobAgeMinutes = latestPersistedSyncUtc is null
                 ? (double?)null
-                : Math.Max(0, Math.Round((lastSuccessfulPollUtc - latestPersistedSyncUtc.Value).TotalMinutes, 1));
+                : Math.Max(0, Math.Round((DateTimeOffset.UtcNow - latestPersistedSyncUtc.Value).TotalMinutes, 1));
             var jobFreshness = JobFreshness(jobAgeMinutes);
             var jobStale = db is not null && (jobAgeMinutes is null || jobAgeMinutes > StaleJobAgeMinutes);
 
@@ -96,7 +111,7 @@ public sealed class TachoMasterHealthController(
 
             return Ok(new
             {
-                status = jobStale ? "degraded" : "healthy",
+                status = jobStale || snapshotStale ? "degraded" : "healthy",
                 configured = true,
                 usesSharedRoadTechCredentials = tachoMasterClient.UsesSharedRoadTechCredentials,
                 operatingDate = today,
@@ -109,7 +124,7 @@ public sealed class TachoMasterHealthController(
                 latestDutyEndUtc,
                 currentVehicleDuties = openDuties.Count,
                 openVehicleDuties = openDuties.Count,
-                connectionFreshness = "live",
+                connectionFreshness,
                 lastSuccessfulPollUtc,
                 scheduledSync = new
                 {
@@ -117,7 +132,7 @@ public sealed class TachoMasterHealthController(
                     latestPersistedSyncUtc,
                     ageMinutes = jobAgeMinutes,
                     freshness = jobFreshness,
-                    stale = jobStale,
+                    stale = jobStale || snapshotStale,
                     warning = jobStale
                         ? "The scheduled TachoMaster synchronisation has not refreshed persisted driver data within 30 minutes. Check the slh-tms-job-tachomaster Container Apps Job execution history and deployed jobs image."
                         : (string?)null
@@ -131,7 +146,7 @@ public sealed class TachoMasterHealthController(
                 sourceAgeMinutes = metricsAgeMinutes,
                 stale = jobStale,
                 sourceDataStale = metricsStale,
-                checkedAtUtc = lastSuccessfulPollUtc
+                checkedAtUtc = DateTimeOffset.UtcNow
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

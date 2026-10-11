@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
@@ -135,7 +136,7 @@ public sealed class RunProgressLiveRefreshTests
     public async Task Operations_progress_returns_explicit_tachomaster_sign_on_evidence()
     {
         var now = DateTimeOffset.UtcNow;
-        var planningDate = UkDate(now);
+        var planningDate = new DateOnly(2026, 8, 24);
         var vehicleId = Guid.NewGuid();
         var driverId = Guid.NewGuid();
         var loadId = Guid.NewGuid();
@@ -188,7 +189,9 @@ public sealed class RunProgressLiveRefreshTests
                 Username = "planner",
                 Password = "secret"
             },
-            NullLogger<TachoMasterClient>.Instance);
+            NullLogger<TachoMasterClient>.Instance,
+            memoryCache: new MemoryCache(new MemoryCacheOptions()));
+        Assert.True(await tacho.RefreshSnapshotAsync(planningDate, planningDate));
         var controller = new RunProgressController(
             db,
             tracking,

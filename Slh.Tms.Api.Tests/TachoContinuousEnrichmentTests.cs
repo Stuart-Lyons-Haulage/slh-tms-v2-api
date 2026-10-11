@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
@@ -42,8 +43,10 @@ public sealed class TachoContinuousEnrichmentTests
                 Password = "secret"
             },
             NullLogger<TachoMasterClient>.Instance,
-            dotClient);
+            dotClient,
+            new MemoryCache(new MemoryCacheOptions()));
 
+        Assert.True(await client.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2)));
         var statuses = await client.GetCurrentDriverStatusesByVehicleAsync(today);
 
         Assert.Equal(2, statuses.Count);

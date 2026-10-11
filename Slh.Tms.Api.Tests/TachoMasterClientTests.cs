@@ -15,7 +15,7 @@ namespace Slh.Tms.Api.Tests;
 public sealed class TachoMasterClientTests
 {
     [Fact]
-    public async Task Duty_reads_are_shared_for_a_minute_and_can_be_force_refreshed()
+    public async Task Scheduled_refresh_is_the_only_provider_read_and_all_readers_share_its_snapshot()
     {
         var handler = new TachoMasterHandler();
         using var cache = new MemoryCache(new MemoryCacheOptions());
@@ -29,11 +29,26 @@ public sealed class TachoMasterClientTests
         }, NullLogger<TachoMasterClient>.Instance, memoryCache: cache);
         var date = new DateOnly(2026, 8, 14);
 
+        Assert.Empty(await client.GetDriverProfilesAsync());
+        Assert.Empty(await client.GetDriverDutyStatusesAsync(date));
+        Assert.Empty(handler.Paths); // A page request on a cold cache never calls TachoMaster.
+
+        Assert.True(await client.RefreshSnapshotAsync(date, date));
+        await client.GetDriverProfilesAsync();
         await client.GetDriverDutyStatusesAsync(date);
-        await client.GetDriverDutyStatusesAsync(date);
+        await client.GetCurrentDriverStatusesByVehicleAsync(date);
+        await client.GetOpenDriverStatusesByVehicleAsync(date);
+        await client.GetLiveDriverStatusesByVehicleAsync(date);
+        await client.GetAllDriverStatusesByVehicleAsync(date);
+        Assert.Single(handler.Paths.Where(path => path == "/api/Duty/GetDutyTransactions"));
+        Assert.Single(handler.Paths.Where(path => path == "/api/Member/GetMembersLong"));
+        Assert.Single(handler.Paths.Where(path => path == "/api/Member/GetMemberMetrics"));
+
+        // forceRefresh remains source-compatible but consumers still read the shared snapshot.
+        await client.GetDriverDutyStatusesAsync(date, forceRefresh: true);
         Assert.Single(handler.Paths.Where(path => path == "/api/Duty/GetDutyTransactions"));
 
-        await client.GetDriverDutyStatusesAsync(date, forceRefresh: true);
+        Assert.True(await client.RefreshSnapshotAsync(date, date));
         Assert.Equal(2, handler.Paths.Count(path => path == "/api/Duty/GetDutyTransactions"));
     }
 
@@ -48,8 +63,10 @@ public sealed class TachoMasterClientTests
             ApiKey = "test-key",
             Username = "planner",
             Password = "secret"
-        }, NullLogger<TachoMasterClient>.Instance);
+        }, NullLogger<TachoMasterClient>.Instance, memoryCache: new MemoryCache(new MemoryCacheOptions()));
 
+        var date = new DateOnly(2026, 8, 14);
+        Assert.True(await client.RefreshSnapshotAsync(date, date));
         var profiles = await client.GetDriverProfilesAsync();
         Assert.Single(profiles);
         Assert.Equal(2, handler.LoginAttempts);
@@ -62,9 +79,9 @@ public sealed class TachoMasterClientTests
             ApiKey = "test-key",
             Username = "planner",
             Password = "secret"
-        }, NullLogger<TachoMasterClient>.Instance);
+        }, NullLogger<TachoMasterClient>.Instance, memoryCache: new MemoryCache(new MemoryCacheOptions()));
 
-        await Assert.ThrowsAsync<HttpRequestException>(() => authClient.GetDriverProfilesAsync());
+        await Assert.ThrowsAsync<HttpRequestException>(() => authClient.RefreshSnapshotAsync(date, date));
         Assert.Equal(2, authHandler.LoginAttempts); // two credential forms, no 5xx retry loop
     }
 
@@ -79,9 +96,11 @@ public sealed class TachoMasterClientTests
             ApiKey = "test-key",
             Username = "planner",
             Password = "secret"
-        }, NullLogger<TachoMasterClient>.Instance);
+        }, NullLogger<TachoMasterClient>.Instance, memoryCache: new MemoryCache(new MemoryCacheOptions()));
 
-        var statuses = await client.GetCurrentDriverStatusesByVehicleAsync(new DateOnly(2026, 8, 14));
+        var date = new DateOnly(2026, 8, 14);
+        Assert.True(await client.RefreshSnapshotAsync(date, date));
+        var statuses = await client.GetCurrentDriverStatusesByVehicleAsync(date);
 
         var status = Assert.Single(statuses).Value;
         Assert.Equal("AB12CDE", Assert.Single(statuses).Key);
@@ -117,9 +136,11 @@ public sealed class TachoMasterClientTests
             ApiKey = "test-key",
             Username = "planner",
             Password = "secret"
-        }, NullLogger<TachoMasterClient>.Instance);
+        }, NullLogger<TachoMasterClient>.Instance, memoryCache: new MemoryCache(new MemoryCacheOptions()));
 
         var date = new DateOnly(2026, 8, 14);
+
+        Assert.True(await client.RefreshSnapshotAsync(date, date));
 
         // The existing "current occupant" method must keep collapsing to the latest driver only —
         // other callers rely on that behaviour and must not change.
@@ -168,6 +189,7 @@ public sealed class TachoMasterClientTests
         var client = Client(handler);
         var date = new DateOnly(2026, 8, 14);
 
+        Assert.True(await client.RefreshSnapshotAsync(date, date));
         var open = await client.GetOpenDriverStatusesByVehicleAsync(date);
         var openStatuses = Assert.Single(open).Value;
         var live = Assert.Single(openStatuses);
@@ -183,9 +205,11 @@ public sealed class TachoMasterClientTests
     {
         // Regression: a four-hour-old open duty start must not make a successful live API
         // response look disconnected; legal-hours metric age is a separate readiness signal.
-        var controller = new TachoMasterHealthController(
-            Client(new TachoMasterHandler()),
-            NullLogger<TachoMasterHealthController>.Instance);
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        var dutyStartUtc = new DateTimeOffset(today.ToDateTime(new TimeOnly(6, 0), DateTimeKind.Utc));
+        var client = Client(new TachoMasterHandler(dutyStartUtc));
+        Assert.True(await client.RefreshSnapshotAsync(new DateOnly(2026, 8, 14), today));
+        var controller = new TachoMasterHealthController(client, NullLogger<TachoMasterHealthController>.Instance);
 
         var response = Assert.IsType<OkObjectResult>(await controller.Get(CancellationToken.None));
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(response.Value));
@@ -209,7 +233,7 @@ public sealed class TachoMasterClientTests
             Username = "planner",
             Password = "secret"
         },
-        NullLogger<TachoMasterClient>.Instance);
+        NullLogger<TachoMasterClient>.Instance, memoryCache: new MemoryCache(new MemoryCacheOptions()));
 
     private sealed class TwoDriverOneVehicleHandler : HttpMessageHandler
     {
@@ -252,7 +276,7 @@ public sealed class TachoMasterClientTests
         }
     }
 
-    private sealed class TachoMasterHandler : HttpMessageHandler
+    private sealed class TachoMasterHandler(DateTimeOffset? dutyStartUtc = null) : HttpMessageHandler
     {
         public List<string> Paths { get; } = [];
         public Dictionary<string, string> BodiesByPath { get; } = [];
@@ -291,6 +315,8 @@ public sealed class TachoMasterClientTests
                     """,
                 _ => throw new InvalidOperationException($"Unexpected test request {request.RequestUri}")
             };
+            if (dutyStartUtc is not null)
+                payload = payload.Replace("2026-08-14T06:00:00Z", dutyStartUtc.Value.ToString("O"), StringComparison.Ordinal);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
@@ -316,6 +342,7 @@ public sealed class TachoMasterClientTests
 
             var payload = path switch
             {
+                "/api/Duty/GetDutyTransactions" => "{\"dutyNew\":{\"moreData\":false,\"recordCount\":0,\"data\":[]}}",
                 "/api/Member/GetMembersLong" => "{\"moreData\":false,\"recordCount\":1,\"data\":[{\"memCode\":42,\"cName\":\"Jane\",\"sName\":\"Driver\",\"cardNoShort\":\"DB123456789\"}]}",
                 "/api/Member/GetMemberMetrics" => "{\"moreData\":false,\"recordCount\":0,\"data\":[]}",
                 _ => throw new InvalidOperationException($"Unexpected test request {request.RequestUri}")

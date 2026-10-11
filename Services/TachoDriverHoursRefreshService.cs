@@ -49,8 +49,18 @@ public sealed class TachoDriverHoursRefreshService(
 
         if (lease is null)
         {
+            // Driver Master writes are distributed-lease protected. Each API process still
+            // warms its local shared snapshot on the same scheduled path so its readers never
+            // fall back to provider calls or wait for another process-local cache.
+            var now = DateTimeOffset.UtcNow;
+            var refreshedAt = tachoMaster.SnapshotRefreshedAtUtc;
+            if (refreshedAt is null || now - refreshedAt.Value >= TimeSpan.FromMinutes(15))
+            {
+                var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, London).DateTime);
+                await tachoMaster.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2), ct);
+            }
             logger.LogInformation(
-                "TachoMaster lightweight driver-hours refresh skipped because another distributed writer currently holds the integration lease.");
+                "TachoMaster Driver Master write skipped because another instance holds the integration lease; local shared snapshot was warmed on the scheduled refresh path.");
             return 0;
         }
 
@@ -132,6 +142,16 @@ public sealed class TachoDriverHoursRefreshService(
 
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, London).DateTime);
+
+        // One scheduled pull refreshes the process-wide snapshot used by Dispatch,
+        // Timesheets, Compliance and the driver master update below.
+        var snapshotReady = await tachoMaster.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2), ct);
+        if (!snapshotReady)
+        {
+            logger.LogWarning("TachoMaster shared snapshot was not refreshed; retaining the last known driver master state.");
+            return 0;
+        }
+
         var profilesTask = tachoMaster.GetDriverProfilesAsync(ct);
         var dutiesTask = tachoMaster.GetDriverDutyStatusesAsync(today, ct);
         await Task.WhenAll(profilesTask, dutiesTask);
@@ -514,7 +534,7 @@ public sealed class TachoDriverHoursRefreshWorker(
     {
         if (environment.IsEnvironment("Testing")) return;
 
-        var nextRefresh = DateTimeOffset.UtcNow + RefreshInterval;
+        var nextRefresh = DateTimeOffset.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
