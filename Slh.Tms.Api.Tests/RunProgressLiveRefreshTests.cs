@@ -109,7 +109,6 @@ public sealed class RunProgressLiveRefreshTests
             },
             NullLogger<DotTrackingClient>.Instance);
         var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
-        Assert.True(await tacho.RefreshSnapshotAsync(planningDate, planningDate));
         var controller = new RunProgressController(
             db,
             tracking,
@@ -192,6 +191,7 @@ public sealed class RunProgressLiveRefreshTests
             },
             NullLogger<TachoMasterClient>.Instance,
             memoryCache: new MemoryCache(new MemoryCacheOptions()));
+        Assert.True(await tacho.RefreshSnapshotAsync(planningDate, planningDate));
         var controller = new RunProgressController(
             db,
             tracking,
