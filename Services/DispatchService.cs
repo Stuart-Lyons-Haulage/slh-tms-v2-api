@@ -37,6 +37,15 @@ public sealed class DispatchService(
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
 
+        // Index recent runs once rather than scan the entire history for every driver.
+        var latestHistoryByDriver = history
+            .Where(load => load.DriverId is not null)
+            .GroupBy(load => load.DriverId)
+            .ToDictionary(group => group.Key, group => group
+                .OrderByDescending(load => load.PlanningDate)
+                .ThenByDescending(load => load.CreatedAtUtc)
+                .First());
+
         var rows = new List<DispatchDriverDto>(drivers.Count);
         foreach (var driver in drivers)
         {
@@ -61,10 +70,7 @@ public sealed class DispatchService(
             var signOff = live is null
                 ? DispatchLocationRules.ResolveTachoSignOffPosition(completedVehicle, shiftEnd, signOffTracking)
                 : null;
-            var previous = history.Where(load => load.DriverId == driver.Id)
-                .OrderByDescending(load => load.PlanningDate)
-                .ThenByDescending(load => load.CreatedAtUtc)
-                .FirstOrDefault();
+            var previous = latestHistoryByDriver.GetValueOrDefault(driver.Id);
             var previousFinal = previous is null ? null : OperationalStopOrdering.Order(previous.Stops).LastOrDefault();
             var latitude = live?.Latitude ?? signOff?.Latitude ?? previousFinal?.Latitude;
             var longitude = live?.Longitude ?? signOff?.Longitude ?? previousFinal?.Longitude;
