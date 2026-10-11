@@ -1,0 +1,29 @@
+name: Azure production target discovery (read only)
+
+on:
+  push:
+    branches: [diag/azure-prod-target-20261011]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: List app and registry resource identities
+        run: |
+          echo "Azure Container Apps:"
+          az containerapp list --query "[].{name:name,resourceGroup:resourceGroup,fqdn:properties.configuration.ingress.fqdn,image:properties.template.containers[0].image}" --output table
+          echo "Azure App Services:"
+          az webapp list --query "[].{name:name,resourceGroup:resourceGroup,host:defaultHostName}" --output table
+          echo "Azure Container Registries:"
+          az acr list --query "[].{name:name,resourceGroup:resourceGroup,loginServer:loginServer}" --output table
