@@ -51,9 +51,9 @@ public sealed class TachoDriverHoursRefreshService(
         {
             // Only the lease holder reads TachoMaster. Other instances load the SQL snapshot.
             var loaded = await tachoMaster.LoadSharedSnapshotAsync(ct);
-            for (var attempt = 0; !loaded && attempt < 5; attempt++)
+            for (var attempt = 0; !loaded && attempt < 12; attempt++)
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
                 loaded = await tachoMaster.LoadSharedSnapshotAsync(ct);
             }
 
