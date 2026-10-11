@@ -87,7 +87,7 @@ public sealed class SainsburyHaulierPlanParserTests
         null,
         []);
 
-    private static byte[] BuildScreenshotWorkbook()
+    internal static byte[] BuildScreenshotWorkbook()
     {
         using var stream = new MemoryStream();
         using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))

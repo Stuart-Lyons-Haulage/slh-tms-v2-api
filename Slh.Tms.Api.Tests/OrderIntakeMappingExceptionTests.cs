@@ -35,6 +35,61 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
     }
 
     [Fact]
+    public async Task Successful_reparse_archives_same_message_mapping_placeholder_and_stages_parsed_order()
+    {
+        var messageId = $"sainsbury-resolve-{Guid.NewGuid():N}";
+        var compactMessageId = new string(messageId.Where(char.IsLetterOrDigit).ToArray());
+        var placeholder = new StagedImport
+        {
+            EntityType = "order",
+            IdempotencyKey = $"email:{compactMessageId}:mapping-exception",
+            PayloadJson = JsonSerializer.Serialize(new { customerCode = "SAINSBURY", intakeStatus = "MappingException", sourceMessageId = messageId }),
+            Status = StagingStatus.PendingReview,
+            Source = "Info mailbox intake",
+            ReceivedAtUtc = DateTimeOffset.Parse("2026-10-11T14:09:00Z")
+        };
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(placeholder);
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var request = JsonSerializer.Serialize(new
+        {
+            messageId,
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "Backhaul.Requests@sainsburys.co.uk",
+            senderName = "Backhaul.Requests",
+            subject = "Transport plan for STUART LYONS for 12/10/2026 - Version 1",
+            receivedAtUtc = "2026-10-11T14:09:00Z",
+            bodyText = "Please find attached the transport plan.",
+            attachments = new[]
+            {
+                new
+                {
+                    name = "Haulier Plan.xlsx",
+                    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    contentBase64 = Convert.ToBase64String(SainsburyHaulierPlanParserTests.BuildScreenshotWorkbook()),
+                    isInline = false
+                }
+            }
+        });
+
+        var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(request, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        using var resultScope = factory.Services.CreateScope();
+        var resultDb = resultScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.Equal(StagingStatus.Archived, (await resultDb.StagedImports.FindAsync(placeholder.Id))!.Status);
+        var active = resultDb.StagedImports.Where(item => item.EntityType == "order" &&
+            item.Status == StagingStatus.PendingReview && item.PayloadJson.Contains(messageId)).ToList();
+        var parsed = Assert.Single(active);
+        Assert.DoesNotContain("MappingException", parsed.PayloadJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Nwf_pallet_order_sender_without_readable_attachment_is_retained_as_evidence_only()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
