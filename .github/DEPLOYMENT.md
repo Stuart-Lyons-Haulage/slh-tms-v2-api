@@ -47,15 +47,14 @@ This document defines the mandatory checks and procedures required before deploy
 
 ## Deployment Steps
 
-### Step 1: Build & Test Image
+### Step 1: Build & Test API Package
 ```bash
-# GitHub Actions does this automatically for you
-# Verify in Actions tab that the Docker image built successfully
+# GitHub Actions restores, builds, tests, publishes and packages the API.
 ```
 
-### Step 2: Deploy to Azure Container Apps
+### Step 2: Deploy to Azure App Service
 ```bash
-# Deployment via GitHub Actions using Azure OIDC
+# GitHub Actions deploys api-publish.zip using Azure OIDC.
 # Monitor the deployment job in the Actions tab
 # Expected duration: 3-5 minutes
 ```
@@ -209,7 +208,7 @@ az containerapp update \
 
 ## References
 
-- [Azure Container Apps Deployment Docs](https://learn.microsoft.com/en-us/azure/container-apps/)
+- [Azure App Service Deployment Docs](https://learn.microsoft.com/en-us/azure/app-service/)
 - [GitHub Actions OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
 - [SLH TMS API Architecture](./README.md)
 - [SQL Backup & Disaster Recovery](./ops/backup/README.md)
