@@ -14,7 +14,7 @@ public sealed class DispatchLockRegressionTests
         Assert.DoesNotContain("Task.WhenAll(profilesTask, dutiesTask)", source);
         Assert.DoesNotContain("Task.WhenAll(profilesTask, dutiesTask, runProfilesTask, liveTask, historyTask)", source);
         Assert.Contains("var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);", source);
-        Assert.Contains("var duties = await ReadDutiesAsync(request.PlanningDate, ct);", source);
+        Assert.Contains("var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceRefresh: true);", source);
         Assert.Contains("var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);", source);
     }
 
