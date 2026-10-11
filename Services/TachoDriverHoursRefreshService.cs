@@ -132,6 +132,16 @@ public sealed class TachoDriverHoursRefreshService(
 
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, London).DateTime);
+
+        // One scheduled pull refreshes the process-wide snapshot used by Dispatch,
+        // Timesheets, Compliance and the driver master update below.
+        var snapshotReady = await tachoMaster.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2), ct);
+        if (!snapshotReady)
+        {
+            logger.LogWarning("TachoMaster shared snapshot was not refreshed; retaining the last known driver master state.");
+            return 0;
+        }
+
         var profilesTask = tachoMaster.GetDriverProfilesAsync(ct);
         var dutiesTask = tachoMaster.GetDriverDutyStatusesAsync(today, ct);
         await Task.WhenAll(profilesTask, dutiesTask);
@@ -514,7 +524,7 @@ public sealed class TachoDriverHoursRefreshWorker(
     {
         if (environment.IsEnvironment("Testing")) return;
 
-        var nextRefresh = DateTimeOffset.UtcNow + RefreshInterval;
+        var nextRefresh = DateTimeOffset.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
