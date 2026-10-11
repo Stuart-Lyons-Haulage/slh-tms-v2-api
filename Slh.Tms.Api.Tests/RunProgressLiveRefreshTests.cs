@@ -57,7 +57,7 @@ public sealed class RunProgressLiveRefreshTests
         var longitude = fence.Points.Average(point => point.Longitude);
         var latitude = fence.Points.Average(point => point.Latitude);
         var now = DateTimeOffset.UtcNow;
-        var planningDate = UkDate(now);
+        var planningDate = new DateOnly(2026, 8, 24);
         var vehicleId = Guid.NewGuid();
         var loadId = Guid.NewGuid();
         var stopId = Guid.NewGuid();
