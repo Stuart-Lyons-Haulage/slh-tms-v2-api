@@ -109,6 +109,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             .Select(item => item.Order)
             .ToList();
         var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct);
+        if (prepared.Count > 0)
+            superseded += await ArchiveResolvedMappingException(request.MessageId, ct);
         var createdByKey = new Dictionary<string, StagedImport>(StringComparer.Ordinal);
 
         foreach (var preparedOrder in prepared)
@@ -397,6 +399,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             .Select(item => item.Order)
             .ToList();
         var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct);
+        if (prepared.Count > 0)
+            superseded += await ArchiveResolvedMappingException(request.MessageId, ct);
         var createdByKey = new Dictionary<string, StagedImport>(StringComparer.Ordinal);
 
         foreach (var preparedOrder in prepared)
@@ -458,6 +462,28 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return key.Length <= 200 ? key : key[..200];
     }
 
+    private async Task<int> ArchiveResolvedMappingException(string messageId, CancellationToken ct)
+    {
+        var idempotencyKey = $"email:{CompactKey(messageId)}:mapping-exception";
+        if (idempotencyKey.Length > 200) idempotencyKey = idempotencyKey[..200];
+        var placeholder = await db.StagedImports.SingleOrDefaultAsync(item =>
+            item.IdempotencyKey == idempotencyKey && item.Status == StagingStatus.PendingReview, ct);
+        if (placeholder is null) return 0;
+
+        var previous = placeholder.Status;
+        placeholder.Status = StagingStatus.Archived;
+        placeholder.ReviewedAtUtc = DateTimeOffset.UtcNow;
+        placeholder.ReviewedBy = "Successful mailbox reparse";
+        placeholder.ReviewNote = "Replaced by parsed order data from the same retained source email.";
+        db.StagedImportEvents.Add(StagingAudit.Create(
+            placeholder,
+            "MappingExceptionResolved",
+            previous,
+            placeholder.ReviewNote,
+            placeholder.ReviewedBy));
+        return 1;
+    }
+
     private async Task<EmailIntakeParseResult> ParseEmail(
         MailboxEmailIntakeRequest request,
         CancellationToken ct,
@@ -505,8 +531,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         {
             var nwfAttachment = nwfWorkbookParser.TryParse(request) ?? nwfCsvParser.TryParse(request);
             var nwfBodyUpdate = nwfQuantityChangeParser.TryParse(request) ?? nwfParser.TryParse(request);
+            var coopAttachment = IsVerifiedCoopAttachment(request)
+                ? await ParseCoopAttachment(request, ct)
+                : null;
             parsed = MergeNwfAttachmentAndBody(nwfAttachment, nwfBodyUpdate)
                 ?? sainsburyParser.TryParse(request)
+                ?? coopAttachment
                 ?? specialistParser.TryParse(request)
                 ?? (IsVerifiedRetainedBodyFormat(request)
                     ? new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct))
@@ -711,6 +741,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             source.Contains("WHOLESALE MARKET", StringComparison.Ordinal)))
             return false;
 
+        // These verified source formats identify the sender more reliably than
+        // the body, which often only says that a booking form is attached.
+        if (SainsburyHaulierPlanParser.IsSainsburyPlanEmail(request) ||
+            IsLangmeadCoopBooking(request))
+            return true;
+
         return source.Contains("WAITROSE", StringComparison.Ordinal)
             || source.Contains("ALDI", StringComparison.Ordinal)
             || source.Contains("MORRISONS", StringComparison.Ordinal)
@@ -725,6 +761,41 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             || source.Contains("SUMMERBERRY", StringComparison.Ordinal)
             || source.Contains("BARFOOTS", StringComparison.Ordinal)
             || source.Contains("BAREFOOTS", StringComparison.Ordinal);
+    }
+
+    private static bool IsLangmeadCoopBooking(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
+            string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
+        var trustedSender = sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                            sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase);
+        return trustedSender && Regex.IsMatch(source, @"\bCO(?:-|\s)?OP\b", RegexOptions.IgnoreCase) &&
+               (source.Contains("booking", StringComparison.OrdinalIgnoreCase) ||
+                (request.Attachments ?? []).Any(item => item.IsInline != true &&
+                    (item.Name ?? string.Empty).Contains("proforma", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static bool IsVerifiedCoopAttachment(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var trustedSender = sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                            sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                            sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase);
+        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml);
+        return trustedSender && Regex.IsMatch(source, @"\bCO(?:-|\s)?OP\b", RegexOptions.IgnoreCase) &&
+               (request.Attachments ?? []).Any(item => item.IsInline != true &&
+                   !string.IsNullOrWhiteSpace(item.EffectiveContentBase64));
+    }
+
+    private async Task<EmailIntakeParseResult?> ParseCoopAttachment(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var parsed = new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct));
+        // CO-OP's attachment is the authority for quantities. Never let a
+        // generic body inference create a zero-pallet placeholder for this lane.
+        var orders = parsed.Orders.Where(order =>
+            int.TryParse(ReadText(order.Payload, "pallets"), out var pallets) && pallets > 0).ToList();
+        return orders.Count == 0 ? null : parsed with { Orders = orders };
     }
 
     private static bool IsSimplifiedIntakeSource(MailboxEmailIntakeRequest request)
