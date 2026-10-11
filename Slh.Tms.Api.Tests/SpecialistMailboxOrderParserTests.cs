@@ -149,6 +149,29 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal(7560, line.TotalQuantity);
     }
 
+    [Fact]
+    public void SummerBerryEuroPoolConfirmation_RecognisesDestinationWhenPdfWrapsAddressAcrossLines()
+    {
+        const string text = """
+            Order Confirmation
+            Euro Pool System UK Limited
+            Sales order number: 0228874133
+            Loading date: 12/10/2026
+            Bedford (Euro Pool System Ltd)
+            Summer Berry Company - DPP,
+            Groves Farm CHICHESTER
+            Material     Description     Load carrier     Quality     Logistic variant     Order Qty     LPC Qty     Total Qty
+            21000022     156-Green tray  LPR PR080 EP     Conditioned  300 Folded IN        30            252         7.560
+            """;
+
+        var confirmation = IntakeParser.ParseEuroPoolConfirmationPdf(text);
+
+        Assert.NotNull(confirmation);
+        Assert.Equal("Bedford", confirmation.CollectionSite);
+        Assert.Equal("Summer Berry Groves Farm", confirmation.Destination);
+        Assert.Single(confirmation.LineItems);
+    }
+
     private static byte[] CreateTextPdf(params string[] lines)
     {
         var content = new StringBuilder("BT\n/F1 10 Tf\n72 760 Td\n");
