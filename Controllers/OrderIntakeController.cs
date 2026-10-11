@@ -697,16 +697,24 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     {
         if (!IsInternalSender(request.SenderAddress)) return false;
 
-        var subject = request.Subject ?? string.Empty;
-        var attachmentNames = string.Join("\\n", (request.Attachments ?? [])
+        var subject = request.Subject?.Trim() ?? string.Empty;
+        if (subject.Contains("LYONS COLLECTIONS", StringComparison.OrdinalIgnoreCase)) return true;
+        if (subject.StartsWith("SB ", StringComparison.OrdinalIgnoreCase) ||
+            subject.StartsWith("SB-", StringComparison.OrdinalIgnoreCase) ||
+            subject.StartsWith("SB_", StringComparison.OrdinalIgnoreCase) ||
+            subject.StartsWith("SOUTHBOUND", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return (request.Attachments ?? [])
             .Where(item => item.IsInline != true)
-            .Select(item => item.Name));
-        var plannerEvidence = $"{subject}\\n{attachmentNames}";
-        if (plannerEvidence.Contains("LYONS COLLECTIONS", StringComparison.OrdinalIgnoreCase)) return true;
-        if (Regex.IsMatch(subject.Trim(), @"^(?:SB|SOUTHBOUND)(?:\\b|\\s|[-_])", RegexOptions.IgnoreCase)) return true;
-        return Regex.IsMatch(attachmentNames, @"(?:^|[\\\\/])(?:SB|SOUTHBOUND)(?:\\b|[ _-])", RegexOptions.IgnoreCase) &&
-               (attachmentNames.Contains("BOOKING", StringComparison.OrdinalIgnoreCase) ||
-                attachmentNames.Contains("LOAD PLAN", StringComparison.OrdinalIgnoreCase));
+            .Select(item => Path.GetFileName(item.Name ?? string.Empty))
+            .Any(name =>
+                (name.StartsWith("SB ", StringComparison.OrdinalIgnoreCase) ||
+                 name.StartsWith("SB-", StringComparison.OrdinalIgnoreCase) ||
+                 name.StartsWith("SB_", StringComparison.OrdinalIgnoreCase) ||
+                 name.StartsWith("SOUTHBOUND", StringComparison.OrdinalIgnoreCase)) &&
+                (name.Contains("BOOKING", StringComparison.OrdinalIgnoreCase) ||
+                 name.Contains("LOAD PLAN", StringComparison.OrdinalIgnoreCase)));
     }
 
     internal static bool IsInternalSender(string? senderAddress)
