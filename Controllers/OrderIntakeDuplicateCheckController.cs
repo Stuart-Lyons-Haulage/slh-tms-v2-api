@@ -338,8 +338,8 @@ public sealed class OrderIntakeDuplicateCheckController(
     private static string FallbackSignature(OrderSnapshot value) => string.Join('|', new[]
     {
         Normalise(value.Customer), value.CollectionDate?.ToString("yyyyMMdd") ?? string.Empty,
-        value.DeliveryDate?.ToString("yyyyMMdd") ?? string.Empty, Normalise(value.CollectionLocation),
-        Normalise(value.DeliveryLocation), Normalise(value.OrderReference)
+        value.DeliveryDate?.ToString("yyyyMMdd") ?? string.Empty, NormaliseSite(value.CollectionLocation),
+        NormaliseSite(value.DeliveryLocation), Normalise(value.OrderReference)
     });
 
     private static bool Same(string? left, string? right) => Normalise(left) == Normalise(right);
