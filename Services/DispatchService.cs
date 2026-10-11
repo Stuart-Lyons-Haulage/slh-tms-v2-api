@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
@@ -13,7 +14,8 @@ public sealed class DispatchService(
     TachoMasterClient tachoMaster,
     SageHrClient sageHr,
     DispatchOptions options,
-    ILogger<DispatchService> logger)
+    ILogger<DispatchService> logger,
+    IMemoryCache cache)
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
     private const string DriverDetailType = "masterdetail:driver";
@@ -32,7 +34,7 @@ public sealed class DispatchService(
         var liveStatuses = await ReadLiveStatusesAsync(ct);
         var history = await ReadRecentHistoryAsync(planningDate, ct);
         var signOffTracking = await ReadTachoSignOffTrackingAsync(duties, ct);
-        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger);
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger, cache);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
@@ -163,7 +165,7 @@ public sealed class DispatchService(
         // Do not parallelise EF-backed reads on the scoped TmsDbContext.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
         var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceTachoRefresh);
-        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger, cache);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var referenceDate = request.PlanningDate > today ? today : request.PlanningDate;
@@ -239,7 +241,7 @@ public sealed class DispatchService(
         // caused the live HTTP 500 seen when Dispatch attempted a single-row lock.
         var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
         var duties = await ReadDutiesAsync(request.PlanningDate, ct, forceRefresh: true);
-        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger);
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, request.PlanningDate, ct, sageHr, logger, cache, forceRefresh: true);
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);
         var vehicleById = await db.Vehicles.AsNoTracking()
@@ -388,6 +390,7 @@ public sealed class DispatchService(
             }
 
             await transaction.CommitAsync(ct);
+            DriverAvailabilityService.Invalidate(cache);
             return new DispatchLockResponse(true, []);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

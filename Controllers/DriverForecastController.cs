@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -12,6 +13,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DriverForecastController(
     TmsDbContext db,
     SageHrClient sageHr,
+    IMemoryCache cache,
     ILogger<DriverForecastController> logger) : ControllerBase
 {
     private const string EntityType = "driverdemandforecast";
@@ -32,7 +34,7 @@ public sealed class DriverForecastController(
         var result = new List<DriverForecastDay>();
         for (var date = from; date <= to; date = date.AddDays(1))
         {
-            var staffing = await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger);
+            var staffing = await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger, cache);
             var demand = await ReadSuggestedDemandAsync(date, ct);
             byDate.TryGetValue(date, out var input);
             var required = (input?.DayRequired ?? 0) + (input?.NightRequired ?? 0);

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -8,17 +9,17 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/driver-availability"), Authorize]
-public sealed class DriverAvailabilityController(TmsDbContext db, SageHrClient sageHr, ILogger<DriverAvailabilityController> logger) : ControllerBase
+public sealed class DriverAvailabilityController(TmsDbContext db, SageHrClient sageHr, IMemoryCache cache, ILogger<DriverAvailabilityController> logger) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<DriverAvailabilitySnapshot>> Get([FromQuery] DateOnly date, CancellationToken ct) =>
-        Ok(await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger));
+        Ok(await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger, cache));
 
     [HttpGet("classification-review")]
     public async Task<IActionResult> ClassificationReview([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
-        var snapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger);
+        var snapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger, cache);
         return Ok(new
         {
             planningDate,
@@ -54,6 +55,7 @@ public sealed class DriverAvailabilityController(TmsDbContext db, SageHrClient s
         Apply(window, request, actor);
         if (!existed) db.DriverAvailabilityWindows.Add(window);
         await AddAudit(window, existed ? "DriverAvailabilityUpdated" : "DriverAvailabilityCreated", actor, ct);
+        DriverAvailabilityService.Invalidate(cache);
         return existed
             ? Ok(window)
             : CreatedAtAction(nameof(Get), new { date = DateOnly.FromDateTime(window.AvailableFromUtc.UtcDateTime) }, window);
@@ -70,6 +72,7 @@ public sealed class DriverAvailabilityController(TmsDbContext db, SageHrClient s
         var actor = User.Identity?.Name ?? "TMS planner";
         Apply(window, request, actor);
         await AddAudit(window, "DriverAvailabilityUpdated", actor, ct);
+        DriverAvailabilityService.Invalidate(cache);
         return Ok(window);
     }
 
