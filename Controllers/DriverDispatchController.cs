@@ -28,8 +28,6 @@ public sealed class DriverDispatchController(
         if (cache.TryGetValue<object>(cacheKey, out var cachedSnapshot)) return Ok(cachedSnapshot);
         var weekStart = DriverDispatchAgencyRosterStore.WeekStart(planningDate);
         var weekEnd = weekStart.AddDays(6);
-        var sageTask = ReadSageStateAsync(planningDate, ct);
-
         var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
@@ -68,7 +66,9 @@ public sealed class DriverDispatchController(
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
-        var sage = await sageTask;
+        // Read the same cached Staffing availability snapshot consumed by Dispatch and
+        // the availability calendar. This avoids a second full Sage HR read on this path.
+        var sage = await ReadSageStateAsync(planningDate, ct);
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
@@ -347,6 +347,7 @@ public sealed class DriverDispatchController(
             var fromDate = request.StartDate ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
             rosterEntry = await DriverDispatchAgencyRosterStore.UpsertAsync(db, driver, fromDate, request.Days!.Value, actor, ct);
         }
+        DriverAvailabilityService.Invalidate(cache);
 
         return Ok(new
         {
@@ -376,6 +377,7 @@ public sealed class DriverDispatchController(
         if (!IsAgency(driver)) return BadRequest(new { message = "Only Agency drivers can be added to the weekly agency roster." });
         var actor = User.Identity?.Name ?? "TMS planner";
         var entry = await DriverDispatchAgencyRosterStore.UpsertAsync(db, driver, request.StartDate, request.Days, actor, ct);
+        DriverAvailabilityService.Invalidate(cache);
         return Ok(entry);
     }
 
@@ -466,44 +468,23 @@ public sealed class DriverDispatchController(
 
     private async Task<SageDispatchState> ReadSageStateAsync(DateOnly date, CancellationToken ct)
     {
-        if (!sageHr.IsConfigured) return SageDispatchState.Unavailable;
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(6));
-            var employeeTask = sageHr.GetActiveEmployeesAsync(timeout.Token);
-            var leaveTask = sageHr.GetOutOfOfficeAsync(date, timeout.Token);
-            await Task.WhenAll(employeeTask, leaveTask);
-
-            var driverEmployees = employeeTask.Result.Where(IsSageDriver).ToList();
-            var employees = driverEmployees.ToDictionary(employee => employee.Id);
-            var activeNumbers = driverEmployees
-                .Where(employee => !string.IsNullOrWhiteSpace(employee.EmployeeNumber))
-                .Select(employee => Normalise(employee.EmployeeNumber))
-                .Where(value => value.Length > 0)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var snapshot = await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger, cache);
             var leave = new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in leaveTask.Result)
+            foreach (var item in snapshot.Drivers.Where(item => item.BlockReasons.Contains("Leave", StringComparer.OrdinalIgnoreCase)))
             {
-                if (!employees.TryGetValue(item.EmployeeId, out var employee) || string.IsNullOrWhiteSpace(employee.EmployeeNumber)) continue;
-                leave[Normalise(employee.EmployeeNumber)] = new LeaveState(item.Policy?.Name, item.Details, item.IsPartOfDay);
+                if (string.IsNullOrWhiteSpace(item.EmployeeNumber)) continue;
+                leave[Normalise(item.EmployeeNumber)] = new LeaveState("Leave", "Leave is recorded in Staffing availability.", false);
             }
-            return new SageDispatchState(true, activeNumbers, leave);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning("Sage HR exceeded the 6 second Driver Dispatch budget; the canonical Driver Master fallback will be used.");
-            return SageDispatchState.Unavailable;
+            return new SageDispatchState(snapshot.SageRosterAvailable, new HashSet<string>(StringComparer.OrdinalIgnoreCase), leave);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "Sage HR was unavailable for Driver Dispatch; the canonical Driver Master fallback will be used.");
+            logger.LogWarning(exception, "Staffing availability snapshot was unavailable for Driver Dispatch; the canonical Driver Master fallback will be used.");
             return SageDispatchState.Unavailable;
         }
     }
-
-    private bool IsSageDriver(SageHrEmployee employee) =>
-        DriverPopulationRules.IsSageDriver(employee, sageHr.DriverTeamName, sageHr.DriverPositionKeyword);
 
     private static int ConsecutiveWorkedDays(IEnumerable<Load> history, Driver driver, DateOnly planningDate)
     {
