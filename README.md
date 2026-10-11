@@ -40,9 +40,9 @@ Management endpoints:
 | Item | Value |
 | --- | --- |
 | Portal | `https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/` |
-| API | `https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io` |
+| API | `https://slh-tms-api-prod.azurewebsites.net` |
 | Region | UK South |
-| Runtime | Azure Container Apps |
+| Runtime | Azure App Service |
 | Database | Azure SQL |
 | Authentication | Microsoft Entra JWT bearer tokens |
 | Deployment | GitHub Actions using Azure OIDC |

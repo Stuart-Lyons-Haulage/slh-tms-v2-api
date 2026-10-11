@@ -47,15 +47,14 @@ This document defines the mandatory checks and procedures required before deploy
 
 ## Deployment Steps
 
-### Step 1: Build & Test Image
+### Step 1: Build & Test API Package
 ```bash
-# GitHub Actions does this automatically for you
-# Verify in Actions tab that the Docker image built successfully
+# GitHub Actions restores, builds, tests, publishes and packages the API.
 ```
 
-### Step 2: Deploy to Azure Container Apps
+### Step 2: Deploy to Azure App Service
 ```bash
-# Deployment via GitHub Actions using Azure OIDC
+# GitHub Actions deploys api-publish.zip using Azure OIDC.
 # Monitor the deployment job in the Actions tab
 # Expected duration: 3-5 minutes
 ```
@@ -66,7 +65,7 @@ Run these within 2 minutes of deployment:
 
 ```bash
 # Check API is running
-curl -s https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/v1/health \
+curl -s https://slh-tms-api-prod.azurewebsites.net/api/v1/health \
   -H "Authorization: Bearer <valid-token>" | jq .
 
 # Expected response:
@@ -139,7 +138,7 @@ Perform these manual checks against live production:
 
 ### Step 6: Monitor for 30 Minutes
 
-- [ ] Watch Azure Container Apps metrics (CPU, memory, request rate)
+- [ ] Watch Azure App Service metrics (CPU, memory, request rate)
 - [ ] Check Application Insights for exceptions or slow requests
 - [ ] Monitor email intake queue – no stuck messages
 - [ ] No spike in HTTP 5xx errors
@@ -159,13 +158,7 @@ If critical issues are discovered within 30 minutes of deployment:
 
 ### Immediate Action
 
-```bash
-# Azure CLI rollback (redeploy previous revision)
-az containerapp update \
-  --name slh-tms-api-prod \
-  --resource-group slh-tms-prod \
-  --set-traffic <previous-revision-name>=100
-```
+Redeploy the last known-good API commit through the tested GitHub Actions App Service workflow. The workflow verifies the App Service host and health endpoint before completing.
 
 ### Post-Rollback
 
@@ -209,7 +202,7 @@ az containerapp update \
 
 ## References
 
-- [Azure Container Apps Deployment Docs](https://learn.microsoft.com/en-us/azure/container-apps/)
+- [Azure App Service Deployment Docs](https://learn.microsoft.com/en-us/azure/app-service/)
 - [GitHub Actions OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
 - [SLH TMS API Architecture](./README.md)
 - [SQL Backup & Disaster Recovery](./ops/backup/README.md)
