@@ -790,7 +790,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private async Task<EmailIntakeParseResult?> ParseCoopAttachment(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        var parsed = await new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct));
+        var parsed = new EmailOrderIntakeService().Parse(request, await MasterSiteNames(ct));
         // CO-OP's attachment is the authority for quantities. Never let a
         // generic body inference create a zero-pallet placeholder for this lane.
         var orders = parsed.Orders.Where(order =>
