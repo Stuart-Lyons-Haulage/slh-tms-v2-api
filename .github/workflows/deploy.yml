@@ -14,8 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  EXPECTED_CONTAINERAPP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
-  API_HEALTH_URL: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/v1/health
+  AZURE_WEBAPP_NAME: slh-tms-api-prod
+  AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+  API_HEALTH_URL: https://slh-tms-api-prod.azurewebsites.net/api/v1/health
 
 jobs:
   test-and-deploy:
@@ -38,6 +39,12 @@ jobs:
       - name: Test API
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
 
+      - name: Publish API
+        run: dotnet publish Slh.Tms.Api.csproj --configuration Release --no-restore --output ./publish
+
+      - name: Package published API
+        run: cd publish && zip -r ../api-publish.zip .
+
       - name: Sign in to Azure with GitHub OIDC
         uses: azure/login@v2
         with:
@@ -45,50 +52,30 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Locate the production Container App and registry
+      - name: Verify the production App Service target
         run: |
-          apps=$(az containerapp list --output json)
-          matches=$(jq --arg fqdn "$EXPECTED_CONTAINERAPP_FQDN" '[.[] | select(.properties.configuration.ingress.fqdn == $fqdn)]' <<<"$apps")
-          match_count=$(jq 'length' <<<"$matches")
-          if [[ "$match_count" != "1" ]]; then
-            echo "Expected exactly one production Container App for $EXPECTED_CONTAINERAPP_FQDN; found $match_count." >&2
-            echo "Related SLH Container Apps:"
-            az containerapp list --output json | jq '[.[] | select((.name | ascii_downcase | contains("slh-tms-api"))) | {name, resourceGroup, fqdn: .properties.configuration.ingress.fqdn, image: .properties.template.containers[0].image}]'
-            echo "Related SLH App Services:"
-            az webapp list --output json | jq '[.[] | select((.name | ascii_downcase | contains("slh-tms-api"))) | {name, resourceGroup, host: .defaultHostName}]'
-            echo "Related SLH registries:"
-            az acr list --output json | jq '[.[] | select((.name | ascii_downcase | contains("slh-tms"))) | {name, resourceGroup, loginServer}]'
-            exit 1
-          fi
-
-          app_name=$(jq -r '.[0].name' <<<"$matches")
-          resource_group=$(jq -r '.[0].resourceGroup' <<<"$matches")
-          current_image=$(jq -r '.[0].properties.template.containers[0].image // empty' <<<"$matches")
-          registry_server="${current_image%%/*}"
-          if [[ -z "$app_name" || -z "$resource_group" || "$registry_server" != *.azurecr.io ]]; then
-            echo "Production app metadata is incomplete or its image is not in Azure Container Registry: $current_image" >&2
-            exit 1
-          fi
-
-          printf 'AZURE_CONTAINERAPP_NAME=%s\n' "$app_name" >> "$GITHUB_ENV"
-          printf 'AZURE_RESOURCE_GROUP=%s\n' "$resource_group" >> "$GITHUB_ENV"
-          printf 'ACR_LOGIN_SERVER=%s\n' "$registry_server" >> "$GITHUB_ENV"
-          printf 'ACR_NAME=%s\n' "${registry_server%.azurecr.io}" >> "$GITHUB_ENV"
-
-      - name: Build and push immutable API image
-        run: |
-          az acr login --name "$ACR_NAME"
-          docker build --pull --tag "$ACR_LOGIN_SERVER/slh-tms-api:${{ github.sha }}" .
-          docker push "$ACR_LOGIN_SERVER/slh-tms-api:${{ github.sha }}"
-
-      - name: Deploy image to Azure Container Apps
-        run: |
-          az containerapp update \
+          host=$(az webapp show \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_CONTAINERAPP_NAME" \
-            --image "$ACR_LOGIN_SERVER/slh-tms-api:${{ github.sha }}"
+            --name "$AZURE_WEBAPP_NAME" \
+            --query defaultHostName \
+            --output tsv)
+          if [[ "$host" != "slh-tms-api-prod.azurewebsites.net" ]]; then
+            echo "Unexpected production App Service host: $host" >&2
+            exit 1
+          fi
 
-      - name: Verify production health and deployed revision
+      - name: Deploy ZIP to Azure App Service
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az webapp deploy \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --src-path api-publish.zip \
+              --type zip \
+              --clean true
+
+      - name: Verify production API health
         run: |
           for attempt in {1..18}; do
             response=$(curl -fsS "$API_HEALTH_URL" || true)
@@ -98,5 +85,5 @@ jobs:
             fi
             sleep 10
           done
-          echo "Container App health check failed after deployment" >&2
+          echo "App Service API health check failed after deployment" >&2
           exit 1
