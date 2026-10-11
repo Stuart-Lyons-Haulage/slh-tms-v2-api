@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 20120)
-Total output lines: 1618
-
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authorization;
@@ -493,7 +490,643 @@ public sealed class SamsaraDispatchController(
             logger.LogWarning(exception, "Samsara route status failed for run {RunId}.", runId);
             return StatusCode(StatusCodes.Status502BadGateway, new { message = exception.GetBaseException().Message });
         }
-    }…8120 tokens truncated…onTrailer,
+    }
+
+    [HttpPost("dispatch/mappings/sync")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SyncDispatchMappings([FromQuery] DateOnly date, CancellationToken ct)
+    {
+        if (!samsara.IsConfigured)
+            return BadRequest(new
+            {
+                message = $"Samsara cannot sync mappings until these settings are complete: {string.Join(", ", samsara.MissingSettings)}.",
+                missingSettings = samsara.MissingSettings
+            });
+
+        var loads = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+        if (loads.Count == 0)
+            loads = await db.Loads.AsNoTracking().Where(load => load.PlanningDate == date).ToListAsync(ct);
+
+        var driverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).Distinct().ToList();
+        var vehicleIds = loads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).Distinct().ToList();
+        var localDrivers = driverIds.Count == 0
+            ? []
+            : await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToListAsync(ct);
+        var localVehicles = vehicleIds.Count == 0
+            ? []
+            : await db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToListAsync(ct);
+
+        var remoteDriversTask = samsara.GetDriversAsync(ct);
+        var remoteVehiclesTask = samsara.GetVehiclesAsync(ct);
+        await Task.WhenAll(remoteDriversTask, remoteVehiclesTask);
+        var remoteDrivers = await remoteDriversTask;
+        var remoteVehicles = await remoteVehiclesTask;
+
+        var unmatchedDrivers = new List<string>();
+        var unmatchedVehicles = new List<string>();
+        var driversMapped = 0;
+        var vehiclesMapped = 0;
+
+        foreach (var driver in localDrivers)
+        {
+            if (!string.IsNullOrWhiteSpace(await ExistingMappingAsync("Driver", driver.Id, ct)))
+            {
+                driversMapped++;
+                continue;
+            }
+
+            var match = MatchDriver(driver, remoteDrivers);
+            if (match is null)
+            {
+                unmatchedDrivers.Add(driver.DisplayName);
+                continue;
+            }
+
+            await SaveMappingAsync("Driver", driver.Id, match.Id, match.Username ?? match.Name ?? driver.DisplayName, ct);
+            driversMapped++;
+        }
+
+        foreach (var vehicle in localVehicles)
+        {
+            if (!string.IsNullOrWhiteSpace(await ExistingMappingAsync("Vehicle", vehicle.Id, ct)))
+            {
+                vehiclesMapped++;
+                continue;
+            }
+
+            var match = MatchVehicle(vehicle, remoteVehicles);
+            if (match is null)
+            {
+                unmatchedVehicles.Add(vehicle.Registration);
+                continue;
+            }
+
+            await SaveMappingAsync("Vehicle", vehicle.Id, match.Id, vehicle.Registration, ct);
+            vehiclesMapped++;
+        }
+
+        return Ok(new
+        {
+            planningDate = date,
+            driversMapped,
+            vehiclesMapped,
+            unmatchedDrivers,
+            unmatchedVehicles,
+            message = unmatchedDrivers.Count == 0 && unmatchedVehicles.Count == 0
+                ? "Samsara driver and vehicle mappings are ready for dispatch."
+                : "Samsara mappings were refreshed; unmatched resources still need attention."
+        });
+    }
+
+    [HttpGet("dispatch/{runId:guid}/csv")]
+    public async Task<IActionResult> DownloadDispatchCsv(Guid runId, CancellationToken ct)
+    {
+        var load = await FindLoadAsync(runId, ct);
+        if (load is null)
+            return NotFound(new { message = "The selected run could not be found." });
+        if (load.VehicleId is null)
+            return BadRequest(new { message = "Allocate a vehicle before downloading the Samsara CSV." });
+        if (load.Stops.Count < 2)
+            return BadRequest(new { message = "Samsara routes require at least two stops." });
+
+        var orderedStops = load.Stops.OrderBy(stop => stop.Sequence).ToList();
+        if (orderedStops.Any(stop => stop.PlannedArrivalUtc is null))
+            return BadRequest(new
+            {
+                message = "Every stop needs a planned time before the Samsara CSV can be generated.",
+                missingStops = orderedStops.Where(stop => stop.PlannedArrivalUtc is null).Select(stop => stop.Name).ToList()
+            });
+
+        var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+        if (vehicle is null)
+            return BadRequest(new { message = "The allocated vehicle could not be found in Vehicle Master." });
+        var driver = load.DriverId is null
+            ? null
+            : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var trailer = load.TrailerId is null
+            ? null
+            : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
+
+        var orderIds = orderedStops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
+        var orders = orderIds.Count == 0
+            ? new Dictionary<Guid, TransportOrder>()
+            : await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+
+        var sites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Site Master coordinate enrichment was unavailable during Samsara CSV generation.");
+        }
+
+        var samsaraDriverUsername = string.Empty;
+        if (driver is not null && samsara.IsConfigured)
+        {
+            try
+            {
+                var remoteDrivers = await samsara.GetDriversAsync(ct);
+                var mappedId = await ExistingMappingAsync("Driver", driver.Id, ct);
+                var match = !string.IsNullOrWhiteSpace(mappedId)
+                    ? remoteDrivers.SingleOrDefault(item => string.Equals(item.Id, mappedId, StringComparison.Ordinal))
+                    : MatchDriver(driver, remoteDrivers);
+                samsaraDriverUsername = match?.Username ?? string.Empty;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Samsara driver username lookup failed during CSV fallback generation.");
+            }
+        }
+
+        var csv = new StringBuilder();
+        csv.AppendLine("Route Name,Assigned Driver Username,Assigned Vehicle Name,Stop Name,Stop Arrival Time,Stop Departure Time,Stop Notes,Address Name,Latitude,Longitude,Full Address");
+
+        for (var index = 0; index < orderedStops.Count; index++)
+        {
+            var stop = orderedStops[index];
+            var resolved = ResolveLocation(stop, sites);
+            if (resolved.Latitude is null || resolved.Longitude is null)
+                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Complete Site Master/geofence mapping for {stop.Name}." });
+
+            orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
+            var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
+            if (index == 0)
+            {
+                stopNotes = string.Join("\n", new[]
+                {
+                    stopNotes,
+                    driver is null ? null : $"Driver: {driver.DisplayName}",
+                    $"Vehicle: {vehicle.Registration}",
+                    trailer is null ? null : $"Trailer: {trailer.TrailerNumber}"
+                }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+
+            var isFirst = index == 0;
+            var isLast = index == orderedStops.Count - 1;
+            var arrival = isFirst ? null : stop.PlannedArrivalUtc;
+            var departure = isFirst || isLast ? stop.PlannedArrivalUtc : null;
+            var addressName = resolved.Site?.DriverTextName ?? resolved.Site?.Name ?? CleanStopName(stop.Name);
+
+            csv.AppendLine(string.Join(",", new[]
+            {
+                Csv($"SLH {load.Reference}"),
+                Csv(samsaraDriverUsername),
+                Csv(vehicle.Registration),
+                Csv(CleanStopName(stop.Name)),
+                Csv(FormatCsvTime(arrival)),
+                Csv(FormatCsvTime(departure)),
+                Csv(stopNotes),
+                Csv(addressName),
+                Csv(resolved.Latitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                Csv(resolved.Longitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                Csv(resolved.Address)
+            }));
+        }
+
+        var fileName = $"SLH-{Normalise(load.Reference)}-Samsara.csv";
+        return File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", fileName);
+    }
+
+    [HttpGet("dispatch/progress-feed")]
+    public async Task<IActionResult> ProgressFeed([FromQuery] string? after, CancellationToken ct)
+    {
+        if (!samsara.IsConfigured)
+            return BadRequest(new { message = "Samsara is not configured.", missingSettings = samsara.MissingSettings });
+
+        try
+        {
+            var feed = await samsara.GetRouteAuditFeedAsync(after, ct);
+            return Ok(new
+            {
+                entries = feed.Entries,
+                endCursor = feed.EndCursor,
+                feed.HasNextPage
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Samsara route progress feed failed.");
+            return StatusCode(StatusCodes.Status502BadGateway, new { message = exception.GetBaseException().Message });
+        }
+    }
+
+    [HttpPost("dispatch/{runId:guid}")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Dispatch(Guid runId, CancellationToken ct)
+    {
+        if (!samsara.IsConfigured)
+            return BadRequest(new
+            {
+                message = $"Samsara cannot dispatch until these settings are complete: {string.Join(", ", samsara.MissingSettings)}.",
+                missingSettings = samsara.MissingSettings
+            });
+
+        var load = await FindLoadAsync(runId, ct);
+        if (load is null)
+            return NotFound(new { message = "The selected run could not be found." });
+
+        if (load.Status == LoadStatus.Cancelled)
+            return BadRequest(new
+            {
+                message = "This run is cancelled. Use the Samsara cancellation endpoint to remove any previously exported route.",
+                cancellationEndpoint = $"/api/v1/integrations/samsara/dispatch/{runId}"
+            });
+
+        if (load.VehicleId is null)
+            return BadRequest(new { message = "Allocate a vehicle before sending the run to Samsara." });
+        if (load.Stops.Count < 2)
+            return BadRequest(new { message = "Samsara routes require at least two stops." });
+
+        var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+        if (vehicle is null)
+            return BadRequest(new { message = "The allocated vehicle could not be found in Vehicle Master." });
+
+        var driver = load.DriverId is null
+            ? null
+            : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var trailer = load.TrailerId is null
+            ? null
+            : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
+
+        try
+        {
+            var dispatchState = await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct);
+            dispatchState.TryGetValue(load.Id, out var state);
+            var orderedStops = OperationalStopOrdering.Order(load.Stops);
+            // A vehicle-only route is valid for Samsara export. Tacho/legal-start
+            // validation applies when a driver has been allocated; without a
+            // driver we use the saved/planned route start and let Samsara carry
+            // the route as vehicle-assigned and unallocated.
+            var firstScheduled = state?.PlannedStartUtc
+                ?? orderedStops[0].PlannedArrivalUtc
+                ?? DateTimeOffset.UtcNow;
+            if (driver is not null)
+            {
+                var available = (await dispatch.GetAvailableTimesAsync(
+                    new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct, forceTachoRefresh: true))
+                    .Single();
+                if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
+                    return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
+                var legalStart = available.AvailableFrom.Value;
+                var rebasedStart = DispatchTachoRules.RebasePlannedStart(firstScheduled, legalStart);
+                if (state?.DriverId != driver.Id || state.PlannedStartUtc is null || rebasedStart != state.PlannedStartUtc)
+                {
+                    state = await DriverDispatchStateStore.SetPlannedStartAsync(
+                        db, load.Id, rebasedStart, User.Identity?.Name, ct,
+                        rebasedStart != firstScheduled
+                            ? "Rebased on resend to TachoMaster legal start"
+                            : available.RequiredRestPeriod == 9 ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
+                        driver.Id,
+                        state?.UseReducedDailyRest == true);
+                }
+                firstScheduled = rebasedStart;
+            }
+
+            var firstPlannedStopTime = orderedStops[0].PlannedArrivalUtc;
+            if (firstPlannedStopTime is DateTimeOffset firstStopTime && firstStopTime < firstScheduled)
+                return BadRequest(new
+                {
+                    message = $"The first planned stop {orderedStops[0].Name} is timed at {firstStopTime:O}, before the driver's legal Tacho start {firstScheduled:O}."
+                });
+
+            var orderIds = orderedStops
+                .Where(stop => stop.OrderId is not null)
+                .Select(stop => stop.OrderId!.Value)
+                .Distinct()
+                .ToList();
+            var orders = orderIds.Count == 0
+                ? new Dictionary<Guid, TransportOrder>()
+                : await db.TransportOrders.AsNoTracking()
+                    .Where(order => orderIds.Contains(order.Id))
+                    .ToDictionaryAsync(order => order.Id, ct);
+
+            var sites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
+            try
+            {
+                await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Site Master coordinate enrichment was unavailable during Samsara dispatch.");
+            }
+
+            var resolvedStops = orderedStops
+                .Select((stop, index) => new ResolvedDispatchStop(
+                    stop,
+                    index,
+                    ResolveLocation(stop, sites)))
+                .ToList();
+            var physicalStops = SamsaraPhysicalStopGrouping.GroupCollectionFirst(resolvedStops.Select(item =>
+                new SamsaraPhysicalStopCandidate(
+                    item.Stop.Id,
+                    item.Stop.Name,
+                    item.Location.Site?.Id,
+                    item.Location.Address,
+                    item.Location.Latitude,
+                    item.Location.Longitude,
+                    item.Stop.PlannedArrivalUtc,
+                    OperationalStopOrdering.IsCollection(item.Stop.Name),
+                    item.Stop.OrderId,
+                    item.Stop.PlannerNote)));
+
+            var mappedSiteIds = physicalStops
+                .Where(item => item.Representative.SiteId is not null)
+                .Select(item => item.Representative.SiteId!.Value)
+                .Distinct()
+                .ToList();
+            var existingSiteMappings = mappedSiteIds.Count == 0
+                ? []
+                : await db.IntegrationMappings.AsNoTracking()
+                    .Where(item => item.Active &&
+                                   item.Provider == "Samsara" &&
+                                   item.TmsEntityType == "Site" &&
+                                   mappedSiteIds.Contains(item.TmsEntityId))
+                    .OrderByDescending(item => item.UpdatedAtUtc)
+                    .ToListAsync(ct);
+            var samsaraAddressBySiteId = existingSiteMappings
+                .GroupBy(item => item.TmsEntityId)
+                .ToDictionary(group => group.Key, group => group.First().ExternalKey);
+
+            // Address creation is the only genuinely per-site first-export work. Reuse
+            // the local mapping on later exports, and keep first-time provider calls
+            // bounded so a route with many stops cannot spend the whole API request in
+            // a serial GET -> POST/PATCH loop.
+            var addressFallbackBySiteId = new HashSet<Guid>();
+            if (samsara.AddressSyncEnabled)
+            {
+                using var addressGate = new SemaphoreSlim(4, 4);
+                var sitesToSync = physicalStops
+                    .Where(item => item.Representative.SiteId is not null &&
+                                   item.Representative.Latitude is not null &&
+                                   item.Representative.Longitude is not null &&
+                                   !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
+                    .GroupBy(item => item.Representative.SiteId!.Value)
+                    .Select(group => group.First())
+                    .ToList();
+
+                var addressResults = await Task.WhenAll(sitesToSync.Select(async item =>
+                {
+                    var site = sites.Single(site => site.Id == item.Representative.SiteId!.Value);
+                    await addressGate.WaitAsync(ct);
+                    try
+                    {
+                        var result = await samsara.UpsertAddressAsync(
+                            new SamsaraAddressRequest(
+                                site.Id,
+                                site.ExternalCode,
+                                site.DriverTextName ?? site.Name,
+                                item.Representative.Address!,
+                                item.Representative.Latitude!.Value,
+                                item.Representative.Longitude!.Value,
+                                site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
+                            ct);
+                        return new AddressSyncResult(site.Id, result.AddressId);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        logger.LogWarning(
+                            exception,
+                            "Samsara reusable address sync failed for site {SiteId}; route stop will use a single-use location.",
+                            site.Id);
+                        return new AddressSyncResult(site.Id, null);
+                    }
+                    finally
+                    {
+                        addressGate.Release();
+                    }
+                }));
+
+                foreach (var addressResult in addressResults)
+                {
+                    if (!string.IsNullOrWhiteSpace(addressResult.AddressId))
+                    {
+                        samsaraAddressBySiteId[addressResult.SiteId] = addressResult.AddressId;
+                        await SaveMappingAsync(
+                            "Site",
+                            addressResult.SiteId,
+                            addressResult.AddressId,
+                            sites.Single(item => item.Id == addressResult.SiteId).Name,
+                            ct);
+                    }
+                    else
+                    {
+                        addressFallbackBySiteId.Add(addressResult.SiteId);
+                    }
+                }
+            }
+
+            var samsaraStops = new List<SamsaraRouteStopRequest>();
+            var missingLocations = new List<string>();
+            var missingSchedule = new List<string>();
+            var addressFallbacks = new List<string>();
+            var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
+            var departLastStop = !string.Equals(options.RouteCompletionCondition, "arriveLastStop", StringComparison.OrdinalIgnoreCase);
+
+            foreach (var physicalStop in physicalStops.Select((item, index) => (Group: item, Index: index)))
+            {
+                var representative = physicalStop.Group.Representative;
+                var stop = orderedStops.First(item => item.Id == representative.StopId);
+                var representativeSite = representative.SiteId is Guid representativeSiteId
+                    ? sites.SingleOrDefault(item => item.Id == representativeSiteId)
+                    : null;
+                var physicalStopName = representativeSite?.DriverTextName ?? representativeSite?.Name ?? CleanStopName(stop.Name);
+                var index = physicalStop.Index;
+                var isFirst = index == 0;
+                var isLast = index == physicalStops.Count - 1;
+                var plannedArrival = physicalStop.Group.EarliestPlannedArrivalUtc;
+                if (!options.RecomputeScheduledTimes && !isFirst && plannedArrival is null)
+                {
+                    missingSchedule.Add(physicalStopName);
+                    continue;
+                }
+                if (representative.Latitude is null || representative.Longitude is null)
+                {
+                    missingLocations.Add(physicalStopName);
+                    continue;
+                }
+
+                string? samsaraAddressId = null;
+                if (samsara.AddressSyncEnabled && representative.SiteId is Guid siteId)
+                {
+                    samsaraAddressBySiteId.TryGetValue(siteId, out samsaraAddressId);
+                    if (addressFallbackBySiteId.Contains(siteId))
+                        addressFallbacks.Add(physicalStopName);
+                }
+
+                var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
+                DateTimeOffset? scheduledArrival = isFirst && departFirstStop
+                    ? null
+                    : options.RecomputeScheduledTimes
+                        ? null
+                        : plannedArrival ?? firstScheduled;
+                var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
+                var scheduledDeparture = isFirst && departFirstStop
+                    ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
+                        ? plannedFirstDeparture
+                        : earliestFirstDeparture
+                    : isLast && departLastStop
+                        ? plannedArrival
+                        : null;
+
+                samsaraStops.Add(new SamsaraRouteStopRequest(
+                    representative.StopId,
+                    index + 1,
+                    physicalStopName,
+                    samsaraAddressId,
+                    representative.Address ?? CleanStopName(stop.Name),
+                    representative.Latitude.Value,
+                    representative.Longitude.Value,
+                    representativeSite is not null
+                        ? representativeSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters
+                        : samsara.StopRadiusMeters,
+                    scheduledArrival,
+                    scheduledDeparture,
+                    stopNotes));
+            }
+
+            if (missingLocations.Count > 0)
+                return BadRequest(new
+                {
+                    message = $"Samsara needs coordinates for every route stop. Complete Site Master/geofence mapping for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    missingStops = missingLocations
+                });
+
+            if (!options.RecomputeScheduledTimes && missingSchedule.Count > 0)
+                return BadRequest(new
+                {
+                    message = $"Every Samsara stop after the route start needs a planned arrival time because SLH TMS owns the schedule. Complete the plan for: {string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    missingStops = missingSchedule
+                });
+
+            // Validate the exact payload that will be sent, not only the source
+            // register. A stale or partially-recovered planning copy can contain
+            // stops that are later excluded while resolving coordinates/times. Do
+            // not allow that to become Samsara's opaque `stops: []` 400 response.
+            if (samsaraStops.Count < 2)
+            {
+                var payloadStopNames = samsaraStops.Select(stop => stop.Name).ToList();
+                logger.LogWarning(
+                    "Samsara export blocked for run {RunId} ({Reference}): source stops {SourceStopCount}, payload stops {PayloadStopCount} ({PayloadStopNames}).",
+                    load.Id,
+                    load.Reference,
+                    orderedStops.Count,
+                    samsaraStops.Count,
+                    string.Join(", ", payloadStopNames));
+
+                return BadRequest(new
+                {
+                    message = $"Samsara export was stopped because {load.Reference} produced only {samsaraStops.Count} usable stop(s). At least two planned stops are required.",
+                    runId = load.Id,
+                    sourceStopCount = orderedStops.Count,
+                    payloadStopCount = samsaraStops.Count,
+                    payloadStops = payloadStopNames
+                });
+            }
+
+            if (load.RelayPlan is { Enabled: true } relay)
+                return await DispatchRelayAsync(load, relay, vehicle, driver, trailer, state, orderedStops, samsaraStops, sites, ct);
+
+            // Mapping pre-sync normally means these are local lookups only. Keep them
+            // sequential because EF Core does not permit concurrent operations on one DbContext.
+            var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
+            var samsaraVehicleId = await ResolveVehicleIdAsync(vehicle, ct);
+
+            var notes = string.Join("\n", new[]
+            {
+                $"SLH TMS run {load.Reference}",
+                $"Planning date: {load.PlanningDate:yyyy-MM-dd}",
+                "Planning authority: SLH TMS",
+                driver is null ? null : $"Driver: {driver.DisplayName}",
+                $"Vehicle: {vehicle.Registration}",
+                state?.PlannedStartUtc is null ? null : $"Planned yard start: {state.PlannedStartUtc:O}",
+                $"Walkaround/sign-on allowance: {Math.Max(0, options.WalkaroundMinutes)} minutes",
+                $"Default site dwell/wait allowance: {Math.Max(0, options.DefaultStopDwellMinutes)} minutes",
+                trailer is null ? null : $"Trailer: {trailer.TrailerNumber}",
+                string.IsNullOrWhiteSpace(load.PlannerNotes) ? null : $"Planner: {load.PlannerNotes}"
+            }.Where(line => !string.IsNullOrWhiteSpace(line)));
+
+            var request = new SamsaraRouteRequest(
+                load.Id,
+                SamsaraRouteName(load),
+                notes,
+                samsaraDriverId,
+                string.IsNullOrWhiteSpace(samsaraDriverId) ? samsaraVehicleId : null,
+                samsaraStops);
+
+            var result = await samsara.UpsertRouteAsync(request, ct);
+            await DeactivateMappingsAsync(runId, ct, orderedStops.Select(stop => stop.Id).ToList());
+            await SaveMappingAsync("Load", load.Id, result.RouteId ?? result.ExternalId, load.Reference, ct);
+
+            if (result.Route is not null)
+            {
+                foreach (var remoteStop in result.Route.Stops)
+                {
+                    var tmsStopId = ResolveTmsStopId(remoteStop);
+                    if (tmsStopId is null || string.IsNullOrWhiteSpace(remoteStop.Id)) continue;
+
+                    var group = physicalStops.FirstOrDefault(item => item.Representative.StopId == tmsStopId.Value);
+                    // A physical Samsara stop can represent several local LoadStop rows.
+                    // IntegrationMappings deliberately permits only one active mapping for
+                    // a provider/external key/type, so persist the canonical representative
+                    // rather than attempting to insert the same Samsara stop once per job.
+                    if (group is not null)
+                    {
+                        var representative = group.Representative;
+                        await SaveMappingAsync("LoadStop", representative.StopId, remoteStop.Id, representative.Name, ct);
+                    }
+                }
+            }
+
+            return Ok(new
+            {
+                success = true,
+                runId = load.Id,
+                load.Reference,
+                result.RouteId,
+                result.ExternalId,
+                result.Created,
+                result.Updated,
+                planningAuthority = "SLH TMS",
+                samsaraRecomputedSchedule = options.RecomputeScheduledTimes,
+                assignment = !string.IsNullOrWhiteSpace(samsaraDriverId)
+                    ? "driver"
+                    : !string.IsNullOrWhiteSpace(samsaraVehicleId) ? "vehicle" : "unallocated",
+                samsaraDriverId,
+                samsaraVehicleId,
+                allocatedVehicle = vehicle.Registration,
+                allocatedDriver = driver?.DisplayName,
+                allocatedTrailer = trailer?.TrailerNumber,
+                stopCount = samsaraStops.Count,
+                reusableAddressStops = samsaraStops.Count(stop => !string.IsNullOrWhiteSpace(stop.AddressId)),
+                singleUseFallbackStops = samsaraStops.Count(stop => string.IsNullOrWhiteSpace(stop.AddressId)),
+                addressFallbacks,
+                message = result.Created
+                    ? (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId)
+                        ? $"{load.Reference} was created in Samsara as an unallocated route from the SLH TMS plan."
+                        : $"{load.Reference} was created in Samsara from the SLH TMS plan.")
+                    : (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId)
+                        ? $"{load.Reference} already existed in Samsara and was updated as an unallocated route from the current SLH TMS plan rather than duplicated."
+                        : $"{load.Reference} already existed in Samsara and was updated from the current SLH TMS plan rather than duplicated.")
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Samsara dispatch failed for run {RunId}.", runId);
+            return StatusCode(StatusCodes.Status502BadGateway, new
+            {
+                message = $"Samsara dispatch failed: {exception.GetBaseException().Message}"
+            });
+        }
+    }
+
+    private async Task<IActionResult> DispatchRelayAsync(
+        Load load,
+        LoadRelayPlan relay,
+        Vehicle collectionVehicle,
+        Driver collectionDriver,
+        Trailer? collectionTrailer,
         DriverDispatchState? collectionState,
         IReadOnlyList<LoadStop> orderedStops,
         IReadOnlyList<SamsaraRouteStopRequest> routeStops,
