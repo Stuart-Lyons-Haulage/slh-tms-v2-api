@@ -37,6 +37,9 @@ public sealed class DispatchService(
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
 
+        // Group run history once instead of searching the full list for each driver.
+        var historyByDriver = history.ToLookup(load => load.DriverId);
+
         var rows = new List<DispatchDriverDto>(drivers.Count);
         foreach (var driver in drivers)
         {
@@ -61,7 +64,7 @@ public sealed class DispatchService(
             var signOff = live is null
                 ? DispatchLocationRules.ResolveTachoSignOffPosition(completedVehicle, shiftEnd, signOffTracking)
                 : null;
-            var previous = history.Where(load => load.DriverId == driver.Id)
+            var previous = historyByDriver[driver.Id]
                 .OrderByDescending(load => load.PlanningDate)
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .FirstOrDefault();
