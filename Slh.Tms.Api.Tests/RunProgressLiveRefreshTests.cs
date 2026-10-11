@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
@@ -108,6 +109,7 @@ public sealed class RunProgressLiveRefreshTests
             },
             NullLogger<DotTrackingClient>.Instance);
         var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
+        Assert.True(await tacho.RefreshSnapshotAsync(planningDate, planningDate));
         var controller = new RunProgressController(
             db,
             tracking,
@@ -188,7 +190,8 @@ public sealed class RunProgressLiveRefreshTests
                 Username = "planner",
                 Password = "secret"
             },
-            NullLogger<TachoMasterClient>.Instance);
+            NullLogger<TachoMasterClient>.Instance,
+            memoryCache: new MemoryCache(new MemoryCacheOptions()));
         var controller = new RunProgressController(
             db,
             tracking,
