@@ -38,6 +38,7 @@ public sealed class TachoMasterClientTests
         await client.GetDriverDutyStatusesAsync(date);
         await client.GetCurrentDriverStatusesByVehicleAsync(date);
         await client.GetOpenDriverStatusesByVehicleAsync(date);
+        await client.GetLiveDriverStatusesByVehicleAsync(date);
         await client.GetAllDriverStatusesByVehicleAsync(date);
         Assert.Single(handler.Paths.Where(path => path == "/api/Duty/GetDutyTransactions"));
         Assert.Single(handler.Paths.Where(path => path == "/api/Member/GetMembersLong"));
@@ -204,8 +205,10 @@ public sealed class TachoMasterClientTests
     {
         // Regression: a four-hour-old open duty start must not make a successful live API
         // response look disconnected; legal-hours metric age is a separate readiness signal.
-        var client = Client(new TachoMasterHandler());
-        Assert.True(await client.RefreshSnapshotAsync(new DateOnly(2026, 8, 14), DateOnly.FromDateTime(DateTime.UtcNow)));
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        var dutyStartUtc = new DateTimeOffset(today.ToDateTime(new TimeOnly(6, 0), DateTimeKind.Utc));
+        var client = Client(new TachoMasterHandler(dutyStartUtc));
+        Assert.True(await client.RefreshSnapshotAsync(new DateOnly(2026, 8, 14), today));
         var controller = new TachoMasterHealthController(client, NullLogger<TachoMasterHealthController>.Instance);
 
         var response = Assert.IsType<OkObjectResult>(await controller.Get(CancellationToken.None));
@@ -273,7 +276,7 @@ public sealed class TachoMasterClientTests
         }
     }
 
-    private sealed class TachoMasterHandler : HttpMessageHandler
+    private sealed class TachoMasterHandler(DateTimeOffset? dutyStartUtc = null) : HttpMessageHandler
     {
         public List<string> Paths { get; } = [];
         public Dictionary<string, string> BodiesByPath { get; } = [];
@@ -312,6 +315,8 @@ public sealed class TachoMasterClientTests
                     """,
                 _ => throw new InvalidOperationException($"Unexpected test request {request.RequestUri}")
             };
+            if (dutyStartUtc is not null)
+                payload = payload.Replace("2026-08-14T06:00:00Z", dutyStartUtc.Value.ToString("O"), StringComparison.Ordinal);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
