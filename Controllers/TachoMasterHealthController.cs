@@ -75,6 +75,7 @@ public sealed class TachoMasterHealthController(
 
             var snapshotAgeMinutes = Math.Max(0, (DateTimeOffset.UtcNow - lastSuccessfulPollUtc.Value).TotalMinutes);
             var connectionFreshness = snapshotAgeMinutes <= 15 ? "live" : snapshotAgeMinutes <= 30 ? "delayed" : "stale";
+            var snapshotStale = connectionFreshness != "live";
             var openDuties = duties.Values.SelectMany(items => items).ToList();
 
             var newestMetric = profiles.Select(item => item.MetricsValidAtUtc)
@@ -110,7 +111,7 @@ public sealed class TachoMasterHealthController(
 
             return Ok(new
             {
-                status = jobStale ? "degraded" : "healthy",
+                status = jobStale || snapshotStale ? "degraded" : "healthy",
                 configured = true,
                 usesSharedRoadTechCredentials = tachoMasterClient.UsesSharedRoadTechCredentials,
                 operatingDate = today,
@@ -131,7 +132,7 @@ public sealed class TachoMasterHealthController(
                     latestPersistedSyncUtc,
                     ageMinutes = jobAgeMinutes,
                     freshness = jobFreshness,
-                    stale = jobStale,
+                    stale = jobStale || snapshotStale,
                     warning = jobStale
                         ? "The scheduled TachoMaster synchronisation has not refreshed persisted driver data within 30 minutes. Check the slh-tms-job-tachomaster Container Apps Job execution history and deployed jobs image."
                         : (string?)null
