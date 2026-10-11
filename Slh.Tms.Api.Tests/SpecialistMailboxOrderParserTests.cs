@@ -192,7 +192,7 @@ public sealed class SpecialistMailboxOrderParserTests
             "EPS Bedford\n12/10\nThank you!", null, null,
             [new MailboxAttachmentRequest("Order confirmation 0228874133.pdf", "application/pdf", Convert.ToBase64String(pdf))]);
 
-        var result = IntakeParser.TryParse(request);
+        var result = new IntakeParser().TryParse(request);
 
         var order = Assert.Single(result!.Orders).Payload;
         Assert.Equal("SUMMERBERRY", order.GetProperty("customerCode").GetString());
