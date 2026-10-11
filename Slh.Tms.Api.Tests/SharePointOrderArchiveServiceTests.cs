@@ -16,4 +16,10 @@ public sealed class SharePointOrderArchiveServiceTests
         Assert.Contains("logo.png", cleaned);
         Assert.DoesNotContain("contentBase64", cleaned);
     }
+
+    [Fact]
+    public void Retention_window_is_72_hours()
+    {
+        Assert.Equal(TimeSpan.FromHours(72), SharePointOrderRetentionBackgroundService.RetentionAge);
+    }
 }

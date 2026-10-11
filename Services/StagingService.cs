@@ -6,7 +6,7 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
-public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingRuleStore = null, SharePointOrderArchiveService? sharePointOrderArchive = null)
+public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingRuleStore = null)
 {
     private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "emailroute", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order", "communication" };
     public StagedImport Create(StageImportRequest r)
@@ -100,11 +100,6 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             try
             {
                 await Promote(item, ct);
-                if (item.EntityType == "order" && sharePointOrderArchive is not null)
-                {
-                    using var orderPayload = JsonDocument.Parse(item.PayloadJson);
-                    await sharePointOrderArchive.ArchiveApprovedOrderAsync(item, orderPayload.RootElement, actor, ct);
-                }
                 using var document = JsonDocument.Parse(item.PayloadJson);
                 var detailKey = DetailKey(item.EntityType, document.RootElement);
                 if (!string.IsNullOrWhiteSpace(detailKey))
