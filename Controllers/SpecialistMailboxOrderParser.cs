@@ -512,11 +512,13 @@ public sealed class SpecialistMailboxOrderParser
                     continue;
                 }
 
-                var rowWarnings = new List<string>
-                {
-                    "The source reports load carriers rather than an explicit pallet count; confirm the pallet count before approval.",
-                    "The confirmation does not state an unloading date; delivery date is provisionally set to the loading date for review."
-                };
+                // A complete Euro Pool confirmation already supplies the route,
+                // loading date, order reference and load-carrier quantity. These
+                // movements are tray equipment transfers, so the carrier count is
+                // the transport quantity used by Order Review. Keep the quantity
+                // and same-day date basis explicit for the planner without turning
+                // every complete confirmation into a manual-review-only order.
+                var rowWarnings = new List<string>();
                 var totalQuantity = parsed.LineItems.Sum(row => row.TotalQuantity);
                 var carrierQuantity = parsed.LineItems.Sum(row => row.CarrierQuantity);
                 var isBarfoots = parsed.Destination.StartsWith("Barfoots ", StringComparison.OrdinalIgnoreCase);
@@ -531,7 +533,8 @@ public sealed class SpecialistMailboxOrderParser
                     $"Load carriers: {carrierQuantity}",
                     $"Euro Pool tray quantity: {totalQuantity:N0}",
                     $"Source attachment: {attachment.Name}",
-                    "Confirm pallet count and unloading date before approval."
+                    "Transport quantity is the confirmed Euro Pool load-carrier count; tray quantity is recorded separately.",
+                    "Delivery date follows the confirmed loading date for this same-day tray movement."
                 });
                 var payload = new Dictionary<string, object?>
                 {
@@ -540,6 +543,7 @@ public sealed class SpecialistMailboxOrderParser
                     ["customerCode"] = customerCode,
                     ["collectionDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
                     ["deliveryDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    ["deliveryDateBasis"] = "Same day as confirmed Euro Pool loading date",
                     // Euro Pool order quantity is load-carrier quantity; retain the
                     // tray total separately so mapping has a usable handling-unit count.
                     ["pallets"] = carrierQuantity,
@@ -548,6 +552,7 @@ public sealed class SpecialistMailboxOrderParser
                     ["handlingUnitQuantity"] = totalQuantity,
                     ["loadCarrierType"] = string.Join(", ", parsed.LineItems.Select(row => row.LoadCarrier).Distinct(StringComparer.OrdinalIgnoreCase)),
                     ["loadCarrierQuantity"] = carrierQuantity,
+                    ["quantityBasis"] = "Confirmed Euro Pool load-carrier count; tray unit total is stored separately",
                     ["unitsPerLoadCarrier"] = parsed.LineItems.Count == 1 ? parsed.LineItems[0].UnitsPerCarrier : null,
                     ["sellerName"] = parsed.CollectionSite,
                     ["collectionSite"] = parsed.CollectionSite,
@@ -572,10 +577,15 @@ public sealed class SpecialistMailboxOrderParser
                     ["intakeMatchKeys"] = new[] { $"{customerCode}|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}" },
                     ["intakeParser"] = "Euro Pool confirmation PDF",
                     ["intakeProfile"] = isBarfoots ? "BARFOOTS_EUROPOOL_CONFIRMATION_PDF" : "SUMMERBERRY_EUROPOOL_CONFIRMATION_PDF",
-                    ["intakeConfidence"] = "Medium",
+                    ["intakeConfidence"] = "High",
                     ["intakeWarnings"] = rowWarnings,
-                    ["plannerReady"] = false,
-                    ["intakeStatus"] = "Review"
+                    ["intakeNotes"] = new[]
+                    {
+                        "Transport quantity is the confirmed Euro Pool load-carrier count; tray quantity is recorded separately.",
+                        "Delivery date follows the confirmed loading date for this same-day tray movement."
+                    },
+                    ["plannerReady"] = true,
+                    ["intakeStatus"] = "ReadyForReview"
                 };
                 var element = JsonSerializer.SerializeToElement(payload);
                 orders.Add(new ParsedEmailOrder(
