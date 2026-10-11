@@ -65,7 +65,7 @@ Run these within 2 minutes of deployment:
 
 ```bash
 # Check API is running
-curl -s https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/v1/health \
+curl -s https://slh-tms-api-prod.azurewebsites.net/api/v1/health \
   -H "Authorization: Bearer <valid-token>" | jq .
 
 # Expected response:
@@ -138,7 +138,7 @@ Perform these manual checks against live production:
 
 ### Step 6: Monitor for 30 Minutes
 
-- [ ] Watch Azure Container Apps metrics (CPU, memory, request rate)
+- [ ] Watch Azure App Service metrics (CPU, memory, request rate)
 - [ ] Check Application Insights for exceptions or slow requests
 - [ ] Monitor email intake queue – no stuck messages
 - [ ] No spike in HTTP 5xx errors
@@ -158,13 +158,7 @@ If critical issues are discovered within 30 minutes of deployment:
 
 ### Immediate Action
 
-```bash
-# Azure CLI rollback (redeploy previous revision)
-az containerapp update \
-  --name slh-tms-api-prod \
-  --resource-group slh-tms-prod \
-  --set-traffic <previous-revision-name>=100
-```
+Redeploy the last known-good API commit through the tested GitHub Actions App Service workflow. The workflow verifies the App Service host and health endpoint before completing.
 
 ### Post-Rollback
 
