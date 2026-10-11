@@ -105,6 +105,7 @@ public sealed class TachoMasterClient
 
             var payload = reader.GetString(0);
             var refreshedAtUtc = reader.GetFieldValue<DateTimeOffset>(1);
+            if (DateTimeOffset.UtcNow - refreshedAtUtc > TimeSpan.FromMinutes(35)) return false;
             if (TryGetSnapshot(out var local) && local.RefreshedAtUtc >= refreshedAtUtc) return true;
 
             var snapshot = JsonSerializer.Deserialize<TachoSnapshot>(payload, JsonOptions);
