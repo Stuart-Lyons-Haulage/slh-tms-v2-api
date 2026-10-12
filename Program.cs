@@ -135,9 +135,14 @@ var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
     .Select(origin => origin.Trim())
     .ToArray();
-var allowedOrigins = configuredOrigins is { Length: > 0 } ? configuredOrigins : [
-    "https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
-];
+var allowedOrigins = (configuredOrigins is { Length: > 0 }
+        ? configuredOrigins
+        : [
+            "https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
+        ])
+    .Append("https://tms.lyonshaulage.com")
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddSingleton(TmsMetrics.Shared);
 builder.Services.AddSingleton<SqlLatencyInterceptor>();
