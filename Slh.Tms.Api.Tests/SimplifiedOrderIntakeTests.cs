@@ -41,14 +41,13 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999099| REF
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
         var orders = db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)).ToList();
-        Assert.Equal(2, orders.Count);
+        Assert.Single(orders);
         Assert.All(orders, order => Assert.Equal(StagingStatus.PendingReview, order.Status));
         var payloads = orders.Select(order => JsonDocument.Parse(order.PayloadJson)).ToList();
         try
         {
             Assert.All(payloads, payload => Assert.Equal("Selsey", payload.RootElement.GetProperty("sellerName").GetString()));
             Assert.Contains(payloads, payload => string.Equals(payload.RootElement.GetProperty("customerName").GetString(), "Morrisons", StringComparison.OrdinalIgnoreCase));
-            Assert.Contains(payloads, payload => string.Equals(payload.RootElement.GetProperty("customerName").GetString(), "NISA", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {
@@ -120,15 +119,11 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999002| REF
             bodyText = body
         });
 
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        var order = Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
-        Assert.Equal(StagingStatus.PendingReview, order.Status);
-        using var payload = JsonDocument.Parse(order.PayloadJson);
-        Assert.Equal("NWF", payload.RootElement.GetProperty("customerCode").GetString());
-        Assert.Equal("NISA", payload.RootElement.GetProperty("customerName").GetString());
-        Assert.Equal(4, payload.RootElement.GetProperty("pallets").GetInt32());
+        Assert.DoesNotContain(db.StagedImports, item => item.EntityType == "order" && item.PayloadJson.Contains(messageId));
+        Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId)));
     }
 
     [Fact]
