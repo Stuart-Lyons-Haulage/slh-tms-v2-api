@@ -72,12 +72,22 @@ jobs:
         uses: azure/cli@v2
         with:
           inlineScript: |
-            az webapp deploy \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_WEBAPP_NAME" \
-              --src-path api-publish.zip \
-              --type zip \
-              --clean true
+            for attempt in 1 2 3; do
+              if az webapp deploy \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_WEBAPP_NAME" \
+                --src-path api-publish.zip \
+                --type zip \
+                --clean true; then
+                exit 0
+              fi
+              if [[ "$attempt" -lt 3 ]]; then
+                echo "App Service deployment is busy; waiting 30 seconds before retry $((attempt + 1))."
+                sleep 30
+              fi
+            done
+            echo "App Service deployment failed after three attempts." >&2
+            exit 1
 
       - name: Verify deployed revision and SQL readiness
         run: |
