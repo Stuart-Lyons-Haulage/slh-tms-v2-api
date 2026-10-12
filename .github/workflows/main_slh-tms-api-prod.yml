@@ -1,5 +1,6 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
+# Docs for Azure actions: https://github.com/Azure/actions
+# Production deployment workflow; keep this file on main so every roster repair is published.
 
 name: Build and deploy ASP.Net Core app to Azure Web App - slh-tms-api-prod
 
@@ -47,7 +48,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: .net-app
-      
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -62,4 +63,3 @@ jobs:
           app-name: 'slh-tms-api-prod'
           slot-name: 'Production'
           package: .
-          
