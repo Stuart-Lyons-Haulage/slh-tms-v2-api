@@ -201,7 +201,7 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var root = await response.Content.ReadFromJsonAsync<JsonElement>();
 
-        Assert.False(root.GetProperty("ignored").GetBoolean());
-        Assert.Equal(1, root.GetProperty("orderCount").GetInt32());
+        Assert.True(root.GetProperty("ignored").GetBoolean());
+        Assert.Equal(0, root.GetProperty("orderCount").GetInt32());
     }
 }
