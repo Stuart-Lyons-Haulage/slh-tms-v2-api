@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -46,6 +47,24 @@ public sealed class OrderIntakeAutomaticSourceGateTests
     public void ExternalSendersAreNotRecognisedAsInternal(string sender)
     {
         Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsInternalSender(sender));
+    }
+
+    [Theory]
+    [InlineData("{\"customerCode\":\"COOP\"}")]
+    [InlineData("{\"customerCode\":\"BARFOOTS\",\"stallNumber\":\"Nisa Retail Ltd (Aylesford)\"}")]
+    [InlineData("{\"customerCode\":\"BARFOOTS\",\"destination\":\"Covent Garden Market\"}")]
+    [InlineData("{\"customerCode\":\"INDEPENDENT\"}")]
+    public void Manual_only_customer_rows_are_excluded_from_automation(string payloadJson)
+    {
+        using var document = JsonDocument.Parse(payloadJson);
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsManualInputOrder(document.RootElement));
+    }
+
+    [Fact]
+    public void Approved_retailer_row_is_not_classified_as_manual_only()
+    {
+        using var document = JsonDocument.Parse("{\"customerCode\":\"WAITROSE\",\"stallNumber\":\"Leyland\"}");
+        Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsManualInputOrder(document.RootElement));
     }
 
     private static MailboxEmailIntakeRequest Request(string subject, string body) => new(
