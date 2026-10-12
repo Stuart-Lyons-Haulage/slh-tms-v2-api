@@ -33,22 +33,26 @@ public sealed class DriverDispatchController(
             .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
             .ThenBy(load => load.Reference)
             .ToList();
-        try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        if (loads.Count > 0)
         {
-            logger.LogWarning(exception, "Driver Dispatch commercial enrichment was unavailable; the operational plan will still be returned.");
-            db.ChangeTracker.Clear();
+            try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Driver Dispatch commercial enrichment was unavailable; the operational plan will still be returned.");
+                db.ChangeTracker.Clear();
+            }
         }
 
         // One bounded SQL history query still supplies yesterday/previous-run context and the
         // emergency fallback. Day number itself is calculated from TachoMaster duty history below.
-        var historyStart = planningDate.AddDays(-7);
-        var history = await db.Loads.AsNoTracking()
-            .Include(load => load.Stops)
-            .Where(load => load.DriverId != null && load.PlanningDate >= historyStart && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
-            .OrderByDescending(load => load.PlanningDate)
-            .ThenByDescending(load => load.CreatedAtUtc)
-            .ToListAsync(ct);
+        var history = loads.Count == 0
+            ? new List<Load>()
+            : await db.Loads.AsNoTracking()
+                .Include(load => load.Stops)
+                .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-7) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
+                .OrderByDescending(load => load.PlanningDate)
+                .ThenByDescending(load => load.CreatedAtUtc)
+                .ToListAsync(ct);
 
         var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
         var relevantDriverIds = loads.Concat(history)
@@ -72,12 +76,16 @@ public sealed class DriverDispatchController(
                 DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown")
             .OrderBy(driver => driver.DisplayName)
             .ToList();
-        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
-        var trailers = await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
+        var vehicles = loads.Count == 0
+            ? new List<Vehicle>()
+            : await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
+        var trailers = loads.Count == 0
+            ? new List<Trailer>()
+            : await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         // Read the same cached Staffing availability snapshot consumed by Dispatch and
         // the availability calendar. This avoids a second full Sage HR read on this path.
-        var sage = await ReadSageStateAsync(planningDate, ct);
+        var sage = loads.Count == 0 ? SageDispatchState.Unavailable : await ReadSageStateAsync(planningDate, ct);
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
@@ -99,7 +107,9 @@ public sealed class DriverDispatchController(
         var tachoDayTask = loads.Count == 0
             ? Task.FromResult(TachoDayNumberState.Unavailable)
             : ReadTachoDayNumbersAsync(selectedDrivers, planningDate, ct);
-        var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
+        var dispatchStates = loads.Count == 0
+            ? new Dictionary<Guid, DriverDispatchState>()
+            : await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
         var unavailableDriverIds = selectedDrivers
             .Where(driver => sage.Leave.ContainsKey(Normalise(driver.EmployeeNumber)))
             .Select(driver => driver.Id)
