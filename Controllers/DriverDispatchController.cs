@@ -94,22 +94,28 @@ public sealed class DriverDispatchController(
 
         // Start the bounded Tacho history read before the remaining planning enrichment so its
         // network latency overlaps with the local database/assistant work below.
-        var tachoDayTask = ReadTachoDayNumbersAsync(selectedDrivers, planningDate, ct);
+        // With no built runs there is no route context to score or Tacho-cycle against.
+        // Keep the workforce roster independent of those optional planning enrichments.
+        var tachoDayTask = loads.Count == 0
+            ? Task.FromResult(TachoDayNumberState.Unavailable)
+            : ReadTachoDayNumbersAsync(selectedDrivers, planningDate, ct);
         var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
         var unavailableDriverIds = selectedDrivers
             .Where(driver => sage.Leave.ContainsKey(Normalise(driver.EmployeeNumber)))
             .Select(driver => driver.Id)
             .ToHashSet();
-        var assistedPlan = await DriverDispatchAssistantService.BuildAsync(
-            db,
-            planningDate,
-            selectedDrivers,
-            loads,
-            history,
-            vehicles,
-            trailers,
-            unavailableDriverIds,
-            ct);
+        var assistedPlan = loads.Count == 0
+            ? new Dictionary<Guid, DriverDispatchAssistantSuggestion>()
+            : await DriverDispatchAssistantService.BuildAsync(
+                db,
+                planningDate,
+                selectedDrivers,
+                loads,
+                history,
+                vehicles,
+                trailers,
+                unavailableDriverIds,
+                ct);
         var tachoDays = await tachoDayTask;
 
         var rows = new List<DriverDispatchDriver>();
