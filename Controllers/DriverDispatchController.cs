@@ -55,14 +55,23 @@ public sealed class DriverDispatchController(
             .Where(load => load.DriverId is not null)
             .Select(load => load.DriverId!.Value)
             .ToHashSet();
+        // Driver Master can carry stale Active flags while the promoted master-detail
+        // record still identifies current employed drivers. Read the compact identity table
+        // without the Active predicate, then apply the same positive driver/evidence rules
+        // below so Dispatch does not lose the workforce after a refresh.
         var identityDrivers = await db.Drivers.AsNoTracking()
-            .Where(driver => driver.Active || relevantDriverIds.Contains(driver.Id))
             .OrderBy(driver => driver.DisplayName)
             .ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, identityDrivers, ct);
         RepairAllocatedDriverAliases(loads, identityDrivers);
         RepairAllocatedDriverAliases(history, identityDrivers);
-        var driverCandidates = identityDrivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToList();
+        var driverCandidates = identityDrivers
+            .Where(driver =>
+                driver.Active ||
+                DriverPopulationRules.IsDriver(driver) ||
+                DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown")
+            .OrderBy(driver => driver.DisplayName)
+            .ToList();
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
@@ -76,36 +85,6 @@ public sealed class DriverDispatchController(
             currentDayDriverIds.Contains(driver.Id) ||
             DriverPopulationRules.IsDriver(driver) ||
             DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
-
-        // Driver Dispatch must remain usable when the direct Driver Master read is
-        // temporarily empty/stale. Availability is the shared operational snapshot;
-        // use its already-evaluated employed/casual/subcontractor rows as a safe
-        // fallback rather than showing an empty workforce.
-        if (selectedDrivers.Count == 0)
-        {
-            var availability = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger, cache);
-            selectedDrivers = availability.Drivers
-                .Where(item => item.Dispatchable && !string.Equals(item.EmploymentType, "Agency", StringComparison.OrdinalIgnoreCase))
-                .Select(item => new Driver
-                {
-                    Id = item.DriverId,
-                    EmployeeNumber = item.EmployeeNumber,
-                    DisplayName = item.DisplayName,
-                    DriverType = item.EmploymentType,
-                    DriverGroup = item.DriverGroup,
-                    Skills = item.Skills,
-                    AgencyName = item.AgencyName,
-                    TachoDriveAvailableTodayMinutes = item.DriveAvailableTodayMinutes,
-                    TachoWorkAvailableWeekMinutes = item.WorkAvailableWeekMinutes,
-                    LicenceExpiry = item.LicenceExpiry,
-                    CPCExpiry = item.CpcExpiry,
-                    DigitalTachoCardExpiry = item.TachoCardExpiry,
-                    LicenceStatus = item.LicenceStatus,
-                    Active = true
-                })
-                .OrderBy(item => item.DisplayName)
-                .ToList();
-        }
 
         await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
 
