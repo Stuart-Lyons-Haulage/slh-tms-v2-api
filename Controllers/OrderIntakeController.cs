@@ -70,8 +70,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             // remains the authority, while this low-confidence projection gives the
             // planner an actionable anomaly instead of silently leaving the message
             // in the archived evidence store.
-            if (ShouldStageMappingException(request, parsed))
-                return await StageMappingException(request, parsed, ct);
+            // Unmatched and manual-only messages remain in immutable mailbox evidence.
+            // They are not projected into the planner queue as mapping exceptions.
 
             var linked = 0;
             if (parsed.IgnoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase))
@@ -541,6 +541,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 "Parser error; source evidence retained for manual review.");
         }
 
+        parsed = ExcludeManualOnlyOrders(parsed);
         if (parsed.Orders.Count == 0)
             return parsed;
 
@@ -961,6 +962,43 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             }
         });
     }
+
+    internal static EmailIntakeParseResult ExcludeManualOnlyOrders(EmailIntakeParseResult parsed)
+    {
+        if (parsed.Orders.Count == 0) return parsed;
+
+        var retained = parsed.Orders.Where(order => !IsManualInputOrder(order.Payload)).ToList();
+        var excluded = parsed.Orders.Count - retained.Count;
+        if (excluded == 0) return parsed;
+
+        var note = $"{excluded} Co-op, Nisa, market or independent order row(s) retained as email evidence for manual input.";
+        if (retained.Count == 0)
+            return parsed with { Orders = [], Warnings = parsed.Warnings.Append(note).ToList(), IgnoredReason = note };
+
+        return parsed with { Orders = retained, Warnings = parsed.Warnings.Append(note).ToList() };
+    }
+
+    internal static bool IsManualInputOrder(JsonElement payload)
+    {
+        var identityFields = new[] { "customerCode", "customer", "customerName", "retailer", "retailerName", "marketName" };
+        var routeFields = new[] { "destination", "deliverySite", "deliverySiteName", "depotDescription", "stallNumber" };
+        var identity = identityFields.Select(field => ReadText(payload, field)).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!);
+        var route = routeFields.Select(field => ReadText(payload, field)).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!);
+
+        return identity.Any(IsManualCustomerIdentity) || route.Any(IsManualDestination);
+    }
+
+    private static bool IsManualCustomerIdentity(string value) =>
+        Regex.IsMatch(value, @"\b(?:CO[\s-]?OP|COOPERATIVE|NISA|INDEPENDENTS?|MARKETS?)\b", RegexOptions.IgnoreCase) ||
+        IsNamedMarket(value);
+
+    private static bool IsManualDestination(string value) =>
+        Regex.IsMatch(value, @"\b(?:CO[\s-]?OP|COOPERATIVE|NISA|INDEPENDENTS?)\b", RegexOptions.IgnoreCase) ||
+        IsNamedMarket(value);
+
+    private static bool IsNamedMarket(string value) =>
+        Regex.IsMatch(value, @"\b(?:COVENT\s+GARDEN|SPITALFIELDS|SPIT|WESTERN\s+INTERNATIONAL|BRIGHTON\s+MARKET|TANGMERE\s+MARKET)\b", RegexOptions.IgnoreCase) ||
+        value.Contains("market", StringComparison.OrdinalIgnoreCase);
 
     private static bool ShouldStageMappingException(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed)
     {
