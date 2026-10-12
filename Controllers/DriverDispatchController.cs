@@ -31,19 +31,34 @@ public sealed class DriverDispatchController(
         List<Load> loads;
         try
         {
-            // Planning resilience can inspect several audited sources. Bound that optional
-            // recovery read so a slow/stale planning register cannot hide the workforce roster.
+            // Read the operational run table first. This is the normal path for built runs
+            // and avoids scanning every audited planning source when the date is empty.
             using var planningBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            planningBudget.CancelAfter(TimeSpan.FromSeconds(15));
-            loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, planningBudget.Token))
-                .Where(load => load.Status != LoadStatus.Cancelled)
+            planningBudget.CancelAfter(TimeSpan.FromSeconds(10));
+            loads = await db.Loads.AsNoTracking()
+                .Include(load => load.Stops)
+                .Where(load => load.PlanningDate == planningDate && load.Status != LoadStatus.Cancelled)
                 .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
                 .ThenBy(load => load.Reference)
-                .ToList();
+                .Take(2000)
+                .ToListAsync(planningBudget.Token);
+
+            // If the operational table is empty, give the resilient planning register a short
+            // opportunity to recover an audit-only run, but never let that block the roster.
+            if (loads.Count == 0)
+            {
+                using var recoveryBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                recoveryBudget.CancelAfter(TimeSpan.FromSeconds(5));
+                loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, recoveryBudget.Token))
+                    .Where(load => load.Status != LoadStatus.Cancelled)
+                    .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
+                    .ThenBy(load => load.Reference)
+                    .ToList();
+            }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning("Planning sources exceeded the 15 second Driver Dispatch budget; returning the canonical driver roster without optional routes.");
+            logger.LogWarning("Planning sources exceeded the bounded Driver Dispatch read budget; returning the canonical driver roster without optional routes.");
             db.ChangeTracker.Clear();
             loads = [];
         }
