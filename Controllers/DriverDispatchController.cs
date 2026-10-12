@@ -68,7 +68,9 @@ public sealed class DriverDispatchController(
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .ToListAsync(ct);
 
-        var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
+        var roster = loads.Count == 0
+            ? new Dictionary<Guid, DriverDispatchAgencyRosterEntry>()
+            : await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
         var relevantDriverIds = loads.Concat(history)
             .Where(load => load.DriverId is not null)
             .Select(load => load.DriverId!.Value)
@@ -80,7 +82,8 @@ public sealed class DriverDispatchController(
         var identityDrivers = await db.Drivers.AsNoTracking()
             .OrderBy(driver => driver.DisplayName)
             .ToListAsync(ct);
-        await MasterDetailStore.EnrichDriversAsync(db, identityDrivers, ct);
+        if (loads.Count > 0)
+            await MasterDetailStore.EnrichDriversAsync(db, identityDrivers, ct);
         RepairAllocatedDriverAliases(loads, identityDrivers);
         RepairAllocatedDriverAliases(history, identityDrivers);
         var driverCandidates = identityDrivers
@@ -103,12 +106,15 @@ public sealed class DriverDispatchController(
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
-        var selectedDrivers = driverCandidates.Where(driver =>
-            currentDayDriverIds.Contains(driver.Id) ||
-            DriverPopulationRules.IsDriver(driver) ||
-            DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
+        var selectedDrivers = loads.Count == 0
+            ? identityDrivers.Where(driver => driver.Active).ToList()
+            : driverCandidates.Where(driver =>
+                currentDayDriverIds.Contains(driver.Id) ||
+                DriverPopulationRules.IsDriver(driver) ||
+                DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
 
-        await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
+        if (loads.Count > 0)
+            await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
 
         // Detail enrichment supplies agency name, coding and skills, but does not
         // change the Master Data employment classification.
