@@ -77,6 +77,36 @@ public sealed class DriverDispatchController(
             DriverPopulationRules.IsDriver(driver) ||
             DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
 
+        // Driver Dispatch must remain usable when the direct Driver Master read is
+        // temporarily empty/stale. Availability is the shared operational snapshot;
+        // use its already-evaluated employed/casual/subcontractor rows as a safe
+        // fallback rather than showing an empty workforce.
+        if (selectedDrivers.Count == 0)
+        {
+            var availability = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger, cache);
+            selectedDrivers = availability.Drivers
+                .Where(item => item.Dispatchable && !string.Equals(item.EmploymentType, "Agency", StringComparison.OrdinalIgnoreCase))
+                .Select(item => new Driver
+                {
+                    Id = item.DriverId,
+                    EmployeeNumber = item.EmployeeNumber,
+                    DisplayName = item.DisplayName,
+                    DriverType = item.EmploymentType,
+                    DriverGroup = item.DriverGroup,
+                    Skills = item.Skills,
+                    AgencyName = item.AgencyName,
+                    TachoDriveAvailableTodayMinutes = item.DriveAvailableTodayMinutes,
+                    TachoWorkAvailableWeekMinutes = item.WorkAvailableWeekMinutes,
+                    LicenceExpiry = item.LicenceExpiry,
+                    CPCExpiry = item.CpcExpiry,
+                    DigitalTachoCardExpiry = item.TachoCardExpiry,
+                    LicenceStatus = item.LicenceStatus,
+                    Active = true
+                })
+                .OrderBy(item => item.DisplayName)
+                .ToList();
+        }
+
         await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
 
         // Detail enrichment supplies agency name, coding and skills, but does not
