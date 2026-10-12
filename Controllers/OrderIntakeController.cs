@@ -568,6 +568,39 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return enriched with { Orders = ordersToStage };
     }
 
+    internal static EmailIntakeParseResult ExcludeManualOnlyOrders(EmailIntakeParseResult parsed)
+    {
+        var eligible = parsed.Orders.Where(order => !IsManualInputOrder(order.Payload)).ToList();
+        var excluded = parsed.Orders.Count - eligible.Count;
+        if (excluded == 0) return parsed;
+
+        var warnings = parsed.Warnings.Append(
+            $"{excluded} Co-op, Nisa, market, or independent order(s) were retained as email evidence and excluded from automatic TMS intake.")
+            .ToList();
+        var reason = eligible.Count == 0
+            ? "Manual-input customer order retained as source evidence; it was not added to TMS."
+            : parsed.IgnoredReason;
+        return new EmailIntakeParseResult(eligible, warnings, reason);
+    }
+
+    internal static bool IsManualInputOrder(JsonElement payload)
+    {
+        var identifyingFields = new[]
+        {
+            "customerCode", "customer", "sellerName", "marketName",
+            "destination", "deliverySite", "deliveryLocation", "stallNumber"
+        };
+        var value = string.Join(" ", identifyingFields.Select(field => ReadText(payload, field)))
+            .ToLowerInvariant();
+
+        return value.Contains("coop", StringComparison.Ordinal) ||
+               value.Contains("co-op", StringComparison.Ordinal) ||
+               value.Contains("co op", StringComparison.Ordinal) ||
+               value.Contains("nisa", StringComparison.Ordinal) ||
+               value.Contains("market", StringComparison.Ordinal) ||
+               value.Contains("independent", StringComparison.Ordinal);
+    }
+
     private static EmailIntakeParseResult? MergeNwfAttachmentAndBody(
         EmailIntakeParseResult? attachment,
         EmailIntakeParseResult? bodyUpdate)
