@@ -493,6 +493,11 @@ public sealed class DriverDispatchController(
             }
             return new SageDispatchState(snapshot.SageRosterAvailable, new HashSet<string>(StringComparer.OrdinalIgnoreCase), leave);
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning("Staffing availability snapshot exceeded the 8 second Driver Dispatch enrichment budget; local Driver Master roster will be used.");
+            return SageDispatchState.Unavailable;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogWarning(exception, "Staffing availability snapshot was unavailable for Driver Dispatch; the canonical Driver Master fallback will be used.");
