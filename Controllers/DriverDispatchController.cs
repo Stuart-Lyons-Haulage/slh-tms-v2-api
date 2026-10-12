@@ -28,11 +28,25 @@ public sealed class DriverDispatchController(
         if (cache.TryGetValue<object>(cacheKey, out var cachedSnapshot)) return Ok(cachedSnapshot);
         var weekStart = DriverDispatchAgencyRosterStore.WeekStart(planningDate);
         var weekEnd = weekStart.AddDays(6);
-        var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
-            .Where(load => load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
-            .ThenBy(load => load.Reference)
-            .ToList();
+        List<Load> loads;
+        try
+        {
+            // Planning resilience can inspect several audited sources. Bound that optional
+            // recovery read so a slow/stale planning register cannot hide the workforce roster.
+            using var planningBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            planningBudget.CancelAfter(TimeSpan.FromSeconds(15));
+            loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, planningBudget.Token))
+                .Where(load => load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
+                .ThenBy(load => load.Reference)
+                .ToList();
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning("Planning sources exceeded the 15 second Driver Dispatch budget; returning the canonical driver roster without optional routes.");
+            db.ChangeTracker.Clear();
+            loads = [];
+        }
         if (loads.Count > 0)
         {
             try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
