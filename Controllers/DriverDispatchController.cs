@@ -479,7 +479,12 @@ public sealed class DriverDispatchController(
     {
         try
         {
-            var snapshot = await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger, cache);
+            // Availability is a shared Staffing snapshot, but Dispatch must not wait on
+            // a cold Sage/external refresh before showing the local workforce. Keep this
+            // enrichment bounded; the roster itself is sourced from Driver Master below.
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            var snapshot = await DriverAvailabilityService.ReadAsync(db, date, timeout.Token, sageHr, logger, cache);
             var leave = new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in snapshot.Drivers.Where(item => item.BlockReasons.Contains("Leave", StringComparer.OrdinalIgnoreCase)))
             {
