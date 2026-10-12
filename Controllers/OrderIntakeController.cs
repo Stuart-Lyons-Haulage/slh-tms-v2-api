@@ -65,11 +65,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
-            // Keep plausible customer order messages visible in Order Review even
-            // when no verified parser profile matched. The immutable Graph evidence
-            // remains the authority, while this low-confidence projection gives the
-            // planner an actionable anomaly instead of silently leaving the message
-            // in the archived evidence store.
+            // Unsupported or unmatched messages stay in mailbox evidence only.
+            // Order Review contains parsed orders, not source messages needing manual remapping.
             // Unmatched and manual-only messages remain in immutable mailbox evidence.
             // They are not projected into the planner queue as mapping exceptions.
 
@@ -997,8 +994,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         IsNamedMarket(value);
 
     private static bool IsNamedMarket(string value) =>
-        Regex.IsMatch(value, @"\b(?:COVENT\s+GARDEN|SPITALFIELDS|SPIT|WESTERN\s+INTERNATIONAL|BRIGHTON\s+MARKET|TANGMERE\s+MARKET)\b", RegexOptions.IgnoreCase) ||
-        value.Contains("market", StringComparison.OrdinalIgnoreCase);
+        Regex.IsMatch(value, @"\b(?:COVENT\s+GARDEN|SPITALFIELDS|SPIT|WESTERN\s+INTERNATIONAL|BRIGHTON\s+MARKET|TANGMERE\s+MARKET)\b", RegexOptions.IgnoreCase);
 
     private static bool ShouldStageMappingException(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed)
     {
