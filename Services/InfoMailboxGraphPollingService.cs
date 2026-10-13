@@ -1,4 +1,4 @@
-using System.Data.Common;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net;
@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using Azure.Core;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Data.SqlClient;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Controllers;
@@ -207,6 +208,20 @@ public sealed class InfoMailboxGraphPollingService(
         return receivedDate;
     }
 
+    private static bool IsMessageTimeout(Exception exception, CancellationToken messageToken)
+    {
+        if (messageToken.IsCancellationRequested) return true;
+
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is TimeoutException or TaskCanceledException) return true;
+            if (current is Win32Exception { NativeErrorCode: 258 }) return true;
+            if (current is SqlException { Number: -2 }) return true;
+        }
+
+        return false;
+    }
+
     internal static DateOnly CurrentMailboxDate() =>
         DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
 
@@ -342,12 +357,11 @@ public sealed class InfoMailboxGraphPollingService(
             }
             catch (Exception ex) when (
                 !ct.IsCancellationRequested &&
-                messageCt.IsCancellationRequested &&
-                (ex is OperationCanceledException || ex is DbException))
+                IsMessageTimeout(ex, messageCt))
             {
-                // SqlClient can surface CancellationToken cancellation as a DbException
-                // rather than OperationCanceledException. Treat that as this message's
-                // exhausted intake budget, not a fatal failure of the whole mailbox day.
+                // HTTP and SQL clients can report a per-message timeout using different
+                // exception types. Treat only explicit timeout/cancellation signals as a
+                // message-level failure; the poll-level token still fails the whole pass.
                 logger.LogWarning(
                     ex,
                     "Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.",
