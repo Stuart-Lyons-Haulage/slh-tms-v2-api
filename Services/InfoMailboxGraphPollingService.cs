@@ -141,9 +141,9 @@ public sealed class InfoMailboxGraphPollingService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            DateOnly? manualReceivedDate = null;
             try
             {
-                DateOnly? manualReceivedDate;
                 lock (manualPollGate)
                 {
                     manualReceivedDate = queuedManualReceivedDates.Count > 0
