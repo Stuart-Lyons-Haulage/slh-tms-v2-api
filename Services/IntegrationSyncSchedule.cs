@@ -11,6 +11,13 @@ public static class IntegrationSyncSchedule
         return ToUtc(nextLocal);
     }
 
+    public static DateTimeOffset NextTachoMaster(DateTimeOffset nowUtc)
+    {
+        var interval = TimeSpan.FromMinutes(20);
+        var nextTicks = ((nowUtc.UtcTicks / interval.Ticks) + 1) * interval.Ticks;
+        return new DateTimeOffset(new DateTime(nextTicks, DateTimeKind.Utc));
+    }
+
     public static DateTimeOffset NextSageHr(DateTimeOffset nowUtc)
     {
         var local = TimeZoneInfo.ConvertTime(nowUtc, UkTimeZone);
@@ -43,8 +50,18 @@ public sealed class IntegrationSyncSchedulerBackgroundService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("Automatic integration sync schedules enabled: Fleetio hourly; Sage HR daily at 05:00 and 14:00 Europe/London.");
-        await Task.WhenAll(RunFleetioScheduleAsync(stoppingToken), RunSageScheduleAsync(stoppingToken));
+        logger.LogInformation("Automatic integration sync schedules enabled: TachoMaster every 20 minutes; Fleetio hourly; Sage HR daily at 05:00 and 14:00 Europe/London.");
+        await Task.WhenAll(RunTachoMasterScheduleAsync(stoppingToken), RunFleetioScheduleAsync(stoppingToken), RunSageScheduleAsync(stoppingToken));
+    }
+
+    private async Task RunTachoMasterScheduleAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await DelayUntilAsync(IntegrationSyncSchedule.NextTachoMaster(DateTimeOffset.UtcNow), ct);
+            if (ct.IsCancellationRequested) break;
+            await RunAsync("TachoMaster", (coordinator, actor) => coordinator.SyncTachoMasterAsync(actor, ct), ct);
+        }
     }
 
     private async Task RunFleetioScheduleAsync(CancellationToken ct)
