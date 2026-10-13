@@ -35,13 +35,17 @@ public sealed class DriverDispatchController(
             // and avoids scanning every audited planning source when the date is empty.
             using var planningBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
             planningBudget.CancelAfter(TimeSpan.FromSeconds(10));
-            loads = await db.Loads.AsNoTracking()
+            // FirstPlanned reads the child-stop collection and is not SQL-translatable on
+            // every provider. Bound the database read first, then apply the deterministic
+            // operational ordering in memory so one bad provider cannot take Dispatch down.
+            loads = (await db.Loads.AsNoTracking()
                 .Include(load => load.Stops)
                 .Where(load => load.PlanningDate == planningDate && load.Status != LoadStatus.Cancelled)
+                .Take(2000)
+                .ToListAsync(planningBudget.Token))
                 .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
                 .ThenBy(load => load.Reference)
-                .Take(2000)
-                .ToListAsync(planningBudget.Token);
+                .ToList();
 
             // If the operational table is empty, give the resilient planning register a short
             // opportunity to recover an audit-only run, but never let that block the roster.
