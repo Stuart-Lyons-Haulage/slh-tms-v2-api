@@ -125,9 +125,12 @@ public sealed class DriverDispatchController(
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
-        var selectedDrivers = loads.Count == 0
-            ? identityDrivers.Where(driver => driver.Active).ToList()
-            : driverCandidates.Where(driver =>
+        // Keep the workforce roster available even when the selected date has no
+        // runs.  Using Active alone here loses drivers after a master refresh when
+        // Active is stale but the driver has positive role/Tacho/agency evidence.
+        // Use the same guarded population rules as the populated-day path, so
+        // office/non-driver records are still excluded.
+        var selectedDrivers = driverCandidates.Where(driver =>
                 currentDayDriverIds.Contains(driver.Id) ||
                 DriverPopulationRules.IsDriver(driver) ||
                 DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
