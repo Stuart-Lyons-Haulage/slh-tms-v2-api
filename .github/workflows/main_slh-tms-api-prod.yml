@@ -4,10 +4,9 @@
 
 name: Build and deploy ASP.Net Core app to Azure Web App - slh-tms-api-prod
 
+# Keep this workflow as a manual fallback only. deploy.yml is the sole
+# automatic production deployment and includes tests and readiness verification.
 on:
-  push:
-    branches:
-      - 'main'
   workflow_dispatch:
 
 jobs:
