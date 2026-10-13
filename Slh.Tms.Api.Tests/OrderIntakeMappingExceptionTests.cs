@@ -91,7 +91,7 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
     }
 
     [Fact]
-    public async Task Nwf_pallet_order_sender_without_readable_attachment_is_retained_as_evidence_only()
+    public async Task Nwf_pallet_order_sender_without_readable_attachment_is_visible_for_review()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
         var messageId = $"nwf-mapping-{Guid.NewGuid():N}";
@@ -120,12 +120,12 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
 
         var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Assert.Contains("\"ignored\":true", responseBody);
+        Assert.Contains("\"intakeStatus\":\"MappingException\"", responseBody);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.DoesNotContain(db.StagedImports, item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(db.StagedImports, item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase));
         Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
     }
 

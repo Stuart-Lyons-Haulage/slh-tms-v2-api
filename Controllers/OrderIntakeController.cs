@@ -65,14 +65,45 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
-            // Unsupported or unmatched messages remain in mailbox evidence only.
-            // Order Review contains parsed orders, not source messages needing remapping.
-
             var linked = 0;
             if (parsed.IgnoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase))
             {
                 linked = await LinkOperationalUpdateToPendingOrders(request, ct);
             }
+
+            // A verified automatic customer source must never disappear from the
+            // planner's view merely because a workbook/PDF profile has drifted.
+            // Keep manual-only and unrelated mail evidence-only, but create one
+            // idempotent Review row for an automatic source with order evidence.
+            var mappingException = await StageAutomaticMappingException(request, parsed, ct);
+            if (mappingException is not null)
+            {
+                return Accepted(new
+                {
+                    ignored = false,
+                    reason = parsed.IgnoredReason,
+                    staged = mappingException.Value.Staged ? 1 : 0,
+                    existing = mappingException.Value.Existing ? 1 : 0,
+                    superseded = 0,
+                    linked,
+                    warnings = parsed.Warnings.Append(mappingException.Value.Warning).ToList(),
+                    outlookCategory = "TMS Imported",
+                    records = new[]
+                    {
+                        new
+                        {
+                            stagingId = mappingException.Value.Id,
+                            status = "PendingReview",
+                            existing = mappingException.Value.Existing,
+                            plannerReady = false,
+                            intakeStatus = "MappingException",
+                            warnings = new[] { mappingException.Value.Warning },
+                            reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{mappingException.Value.Id}"
+                        }
+                    }
+                });
+            }
+
             return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, linked, warnings = parsed.Warnings, outlookCategory = (string?)null });
         }
 
@@ -455,6 +486,104 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     {
         var key = $"email:{CompactKey(messageId)}:{sourceKey}";
         return key.Length <= 200 ? key : key[..200];
+    }
+
+    private async Task<(Guid Id, bool Staged, bool Existing, string Warning)?> StageAutomaticMappingException(
+        MailboxEmailIntakeRequest request,
+        EmailIntakeParseResult parsed,
+        CancellationToken ct)
+    {
+        if (!IsApprovedAutomaticSource(request) ||
+            IsInternalSender(request.SenderAddress) ||
+            IsInternalPlannerSnapshot(request) ||
+            IsManualOnlySource(request) ||
+            LooksLikeNonOrderMessage(request) ||
+            !HasOrderEvidence(request))
+            return null;
+
+        var idempotencyKey = BuildOrderIdempotencyKey(request.MessageId, "mapping-exception");
+        var existing = await db.StagedImports.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey &&
+                                          item.Status == StagingStatus.PendingReview, ct);
+        if (existing is not null)
+        {
+            var existingWarning = ReadText(JsonDocument.Parse(existing.PayloadJson).RootElement, "intakeWarning") ??
+                                  "Automatic source requires parser review before it can be planned.";
+            return (existing.Id, false, true, existingWarning);
+        }
+
+        var source = string.Join("\n", request.Subject, request.BodyText,
+            string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)))
+            .Trim();
+        var warning = parsed.Warnings.Count > 0
+            ? string.Join(" | ", parsed.Warnings)
+            : "No verified order rows were extracted from this automatic customer source; inspect the retained email and attachments.";
+        var payload = new JsonObject
+        {
+            ["customerCode"] = InferAutomaticCustomerCode(request),
+            ["customerName"] = "Automatic customer source - parser review required",
+            ["plannerReady"] = false,
+            ["intakeStatus"] = "MappingException",
+            ["intakeConfidence"] = "Low",
+            ["intakeWarning"] = warning,
+            ["intakeWarnings"] = new JsonArray(warning),
+            ["sourceSummary"] = source.Length <= 2000 ? source : source[..2000]
+        };
+        var stagedPayload = EnrichSourceEvidence(JsonSerializer.SerializeToElement(payload), request);
+        var item = stagingService.Create(new StageImportRequest(
+            "order",
+            idempotencyKey,
+            stagedPayload,
+            $"Info mailbox mapping exception / {(request.SenderAddress ?? "unknown sender").Trim()}"));
+        db.StagedImports.Add(item);
+        db.StagedImportEvents.Add(StagingAudit.Create(item, "MappingException", null, warning, "Mailbox intake"));
+        await db.SaveChangesAsync(ct);
+        return (item.Id, true, false, warning);
+    }
+
+    private static bool HasOrderEvidence(MailboxEmailIntakeRequest request)
+    {
+        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
+            string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
+        var supportedAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true && IsSupportedOrderAttachment(item.Name));
+        var trustedCustomerSender = (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                                    (request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                                    (request.SenderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                                    (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
+                                    (request.SenderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase);
+        return supportedAttachment ||
+               (trustedCustomerSender && Regex.IsMatch(source, @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b|\b(?:booking|load plan)\b", RegexOptions.IgnoreCase));
+    }
+
+    private static bool IsManualOnlySource(MailboxEmailIntakeRequest request)
+    {
+        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
+            string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
+        return Regex.IsMatch(source, @"\b(?:CO[- ]?OP|NISA|COVENT\s+GARDEN|SPITALFIELDS|WHOLESALE\s+MARKET|SMALL\s+INDEPENDENT|INDEPENDENT\s+CUSTOMER)\b", RegexOptions.IgnoreCase);
+    }
+
+    private static bool LooksLikeNonOrderMessage(MailboxEmailIntakeRequest request) =>
+        Regex.IsMatch(string.Join("\n", request.Subject, request.BodyText),
+            @"\b(?:available loads|mailshot|newsletter|out of office|automatic reply)\b", RegexOptions.IgnoreCase);
+
+    private static bool IsSupportedOrderAttachment(string? name) =>
+        Path.GetExtension(name ?? string.Empty).ToLowerInvariant() is ".xls" or ".xlsx" or ".xlsm" or ".csv" or ".pdf";
+
+    private static string InferAutomaticCustomerCode(MailboxEmailIntakeRequest request)
+    {
+        var source = string.Join("\n", request.SenderAddress, request.Subject, request.BodyText,
+            string.Join("\n", (request.Attachments ?? []).Select(item => item.Name))).ToUpperInvariant();
+        if (source.Contains("NATURES WAY") || source.Contains("NATURE'S WAY") || source.Contains("NWF") || source.Contains("NWAY")) return "NWF";
+        if (source.Contains("BARFOOTS") || source.Contains("BAREFOOTS")) return "BARFOOTS";
+        if (source.Contains("LANGMEAD") || source.Contains("HAM FARM")) return "LANGMEAD";
+        if (source.Contains("SUMMER BERRY") || source.Contains("SUMMERBERRY")) return "SUMMER_BERRY";
+        if (source.Contains("GREENHOUSE") || source.Contains("GHS")) return "GHS";
+        if (source.Contains("PALEO RIDGE")) return "PALEO_RIDGE";
+        if (source.Contains("SAINSBURY")) return "SAINSBURY";
+        if (source.Contains("WAITROSE")) return "WAITROSE";
+        if (source.Contains("ALDI")) return "ALDI";
+        if (source.Contains("MORRISONS")) return "MORRISONS";
+        return "AUTOMATIC_REVIEW";
     }
 
     private async Task<int> ArchiveResolvedMappingException(string messageId, CancellationToken ct)
