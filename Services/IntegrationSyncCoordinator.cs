@@ -35,7 +35,26 @@ public sealed class IntegrationSyncCoordinator(
 
         try
         {
+            // Force sync must refresh the provider snapshot first. GetDriverProfilesAsync
+            // is intentionally cache-only so ordinary readers do not create duplicate
+            // upstream requests; calling it alone here can produce a false 0-match success.
+            var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(
+                DateTimeOffset.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+            var refreshed = await tachoMaster.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2), ct);
+            if (!refreshed && !await tachoMaster.LoadSharedSnapshotAsync(ct))
+            {
+                return new("TachoMaster", false, DateTimeOffset.UtcNow,
+                    "TachoMaster could not refresh or load a shared driver snapshot; no driver records were changed.");
+            }
+
             var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
+            if (profiles.Count == 0)
+            {
+                return new("TachoMaster", false, DateTimeOffset.UtcNow,
+                    "TachoMaster returned no driver profiles after refresh; no driver records were changed.");
+            }
+
             var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
             var persistedMemberOwners = drivers
                 .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))

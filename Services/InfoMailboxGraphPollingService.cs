@@ -141,9 +141,9 @@ public sealed class InfoMailboxGraphPollingService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            DateOnly? manualReceivedDate = null;
             try
             {
-                DateOnly? manualReceivedDate;
                 lock (manualPollGate)
                 {
                     manualReceivedDate = queuedManualReceivedDates.Count > 0
@@ -163,7 +163,21 @@ public sealed class InfoMailboxGraphPollingService(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Info mailbox Graph polling failed. The next scheduled poll will retry.");
+                if (manualReceivedDate is { } retryDate && !stoppingToken.IsCancellationRequested)
+                {
+                    // A manual day scan can exceed the poll time budget. Keep its date
+                    // queued so the next pass resumes idempotently; staged evidence is
+                    // keyed by Graph message ID and already completed messages are skipped.
+                    lock (manualPollGate) queuedManualReceivedDates.Enqueue(retryDate);
+                    logger.LogWarning(
+                        ex,
+                        "Info mailbox Graph poll for {ReceivedDate} failed and was re-queued for retry after the normal poll interval.",
+                        retryDate);
+                }
+                else
+                {
+                    logger.LogError(ex, "Info mailbox Graph polling failed. The next scheduled poll will retry.");
+                }
             }
 
             try
