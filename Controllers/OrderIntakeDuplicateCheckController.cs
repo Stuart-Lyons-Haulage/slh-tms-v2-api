@@ -248,10 +248,16 @@ public sealed class OrderIntakeDuplicateCheckController(
         AddChange(changes, "Customer", current.Customer, incoming.Customer);
         AddChange(changes, "Collection date", current.CollectionDate?.ToString("yyyy-MM-dd"), incoming.CollectionDate?.ToString("yyyy-MM-dd"));
         AddChange(changes, "Delivery date", current.DeliveryDate?.ToString("yyyy-MM-dd"), incoming.DeliveryDate?.ToString("yyyy-MM-dd"));
-        AddChange(changes, "Collection site", current.CollectionLocation, incoming.CollectionLocation);
-        AddChange(changes, "Delivery site", current.DeliveryLocation, incoming.DeliveryLocation);
+        AddSiteChange(changes, "Collection site", current.CollectionLocation, incoming.CollectionLocation);
+        AddSiteChange(changes, "Delivery site", current.DeliveryLocation, incoming.DeliveryLocation);
         AddChange(changes, "Pallets", current.Pallets?.ToString(), incoming.Pallets?.ToString());
         return changes;
+    }
+
+    private static void AddSiteChange(List<object> changes, string field, string? from, string? to)
+    {
+        if (string.IsNullOrWhiteSpace(to) || SameSite(from, to)) return;
+        changes.Add(new { field, from = string.IsNullOrWhiteSpace(from) ? "—" : from, to });
     }
 
     private static void AddChange(List<object> changes, string field, string? from, string? to)
@@ -303,15 +309,15 @@ public sealed class OrderIntakeDuplicateCheckController(
 
     private static bool EquivalentCore(OrderSnapshot left, OrderSnapshot right) =>
         Same(left.Customer, right.Customer) && left.CollectionDate == right.CollectionDate && left.DeliveryDate == right.DeliveryDate &&
-        Same(left.CollectionLocation, right.CollectionLocation) && Same(left.DeliveryLocation, right.DeliveryLocation) && left.Pallets == right.Pallets;
+        SameSite(left.CollectionLocation, right.CollectionLocation) && SameSite(left.DeliveryLocation, right.DeliveryLocation) && left.Pallets == right.Pallets;
 
     private static bool HasMaterialConflict(OrderSnapshot left, OrderSnapshot right)
     {
         if (!BothBlankOrSame(left.Customer, right.Customer)) return true;
         if (left.CollectionDate is not null && right.CollectionDate is not null && left.CollectionDate != right.CollectionDate) return true;
         if (left.DeliveryDate is not null && right.DeliveryDate is not null && left.DeliveryDate != right.DeliveryDate) return true;
-        if (!BothBlankOrSame(left.CollectionLocation, right.CollectionLocation)) return true;
-        if (!BothBlankOrSame(left.DeliveryLocation, right.DeliveryLocation)) return true;
+        if (!BothBlankOrSameSite(left.CollectionLocation, right.CollectionLocation)) return true;
+        if (!BothBlankOrSameSite(left.DeliveryLocation, right.DeliveryLocation)) return true;
         if (left.Pallets is not null && right.Pallets is not null && left.Pallets != right.Pallets) return true;
         return false;
     }
@@ -322,8 +328,8 @@ public sealed class OrderIntakeDuplicateCheckController(
         if (SameNonBlank(left.Customer, right.Customer)) score++;
         if (left.CollectionDate is not null && left.CollectionDate == right.CollectionDate) score++;
         if (left.DeliveryDate is not null && left.DeliveryDate == right.DeliveryDate) score++;
-        if (SameNonBlank(left.CollectionLocation, right.CollectionLocation)) score++;
-        if (SameNonBlank(left.DeliveryLocation, right.DeliveryLocation)) score++;
+        if (SameNonBlankSite(left.CollectionLocation, right.CollectionLocation)) score++;
+        if (SameNonBlankSite(left.DeliveryLocation, right.DeliveryLocation)) score++;
         if (SameNonBlank(left.OrderReference, right.OrderReference)) score += 2;
         if (left.Pallets is not null && left.Pallets == right.Pallets) score++;
         return score;
@@ -332,11 +338,25 @@ public sealed class OrderIntakeDuplicateCheckController(
     private static string FallbackSignature(OrderSnapshot value) => string.Join('|', new[]
     {
         Normalise(value.Customer), value.CollectionDate?.ToString("yyyyMMdd") ?? string.Empty,
-        value.DeliveryDate?.ToString("yyyyMMdd") ?? string.Empty, Normalise(value.CollectionLocation),
-        Normalise(value.DeliveryLocation), Normalise(value.OrderReference)
+        value.DeliveryDate?.ToString("yyyyMMdd") ?? string.Empty, NormaliseSite(value.CollectionLocation),
+        NormaliseSite(value.DeliveryLocation), Normalise(value.OrderReference)
     });
 
     private static bool Same(string? left, string? right) => Normalise(left) == Normalise(right);
+    private static bool SameSite(string? left, string? right) => NormaliseSite(left) == NormaliseSite(right);
+    private static bool SameNonBlankSite(string? left, string? right) => NormaliseSite(left).Length > 0 && SameSite(left, right);
+    private static bool BothBlankOrSameSite(string? left, string? right)
+    {
+        var a = NormaliseSite(left); var b = NormaliseSite(right);
+        return a.Length == 0 || b.Length == 0 || a == b;
+    }
+    private static string NormaliseSite(string? value)
+    {
+        var normalised = Normalise(value);
+        // These labels refer to the same NWF physical site. Keep this alias exact
+        // so other NWF sites (for example Selsey or Runcton) remain distinct.
+        return normalised is "MERSTON" or "NWFMERSTON" ? "NWFMERSTON" : normalised;
+    }
     private static bool SameNonBlank(string? left, string? right) => Normalise(left).Length > 0 && Same(left, right);
     private static bool BothBlankOrSame(string? left, string? right)
     {
