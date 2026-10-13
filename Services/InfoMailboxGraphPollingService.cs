@@ -154,7 +154,13 @@ public sealed class InfoMailboxGraphPollingService(
                 // SQL or a parser can occasionally fail to honour a lower-level
                 // timeout, so bound the complete pass and let the next cycle retry.
                 using var pollTimeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                pollTimeout.CancelAfter(TimeSpan.FromMinutes(5));
+                // Attachment downloads are deliberately bounded per message, but a
+                // mailbox can contain a much larger backlog.  A five-minute budget
+                // cancelled the whole pass halfway through a 114-message window.
+                // Process a bounded oldest-first batch below and allow enough time
+                // for that batch to finish; the next cycle continues from the
+                // evidence watermark.
+                pollTimeout.CancelAfter(TimeSpan.FromMinutes(20));
                 await PollOnceAsync(pollTimeout.Token, manualReceivedDate);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -265,6 +271,18 @@ public sealed class InfoMailboxGraphPollingService(
 
         stage = "Graph mailbox scan";
         var messages = await FetchMessagesAsync(client, token.Token, since, until, customerDomains, ct);
+        const int maxMessagesPerPass = 25;
+        if (messages.Count > maxMessagesPerPass)
+        {
+            messages = messages
+                .OrderBy(item => item.ReceivedAtUtc)
+                .Take(maxMessagesPerPass)
+                .ToList();
+            logger.LogInformation(
+                "Info mailbox Graph poll {PollId} found a backlog; processing the oldest {BatchSize} messages this pass and continuing on the next cycle.",
+                pollId, messages.Count);
+        }
+
         var seen = messages.Count;
         var ingested = 0;
 
