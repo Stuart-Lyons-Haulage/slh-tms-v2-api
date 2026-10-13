@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net;
@@ -321,9 +322,18 @@ public sealed class InfoMailboxGraphPollingService(
             {
                 await controller.Intake(request, messageCt);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested && messageCt.IsCancellationRequested)
+            catch (Exception ex) when (
+                !ct.IsCancellationRequested &&
+                messageCt.IsCancellationRequested &&
+                (ex is OperationCanceledException || ex is DbException))
             {
-                logger.LogWarning("Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.", message.Id);
+                // SqlClient can surface CancellationToken cancellation as a DbException
+                // rather than OperationCanceledException. Treat that as this message's
+                // exhausted intake budget, not a fatal failure of the whole mailbox day.
+                logger.LogWarning(
+                    ex,
+                    "Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.",
+                    message.Id);
                 continue;
             }
             ingested++;
