@@ -20,6 +20,33 @@ public sealed class DriverDispatchController(
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
     private static readonly LoadStatus[] ExecutedStatuses = [LoadStatus.Dispatched, LoadStatus.InProgress, LoadStatus.Completed];
 
+    [HttpGet("health")]
+    public async Task<IActionResult> Health(CancellationToken ct)
+    {
+        var activeDrivers = await db.Drivers.AsNoTracking().CountAsync(driver => driver.Active, ct);
+        var tachoLinkedDrivers = await db.Drivers.AsNoTracking().CountAsync(driver =>
+            driver.Active && driver.TachoMasterDriverId != null && driver.TachoMasterDriverId != "", ct);
+        var latestSyncUtc = await db.StagedImports.AsNoTracking()
+            .Where(item => item.Status == StagingStatus.Promoted &&
+                           (item.EntityType == "tachodrivermastersync" ||
+                            item.EntityType == "tachodrivermasterorchestration" ||
+                            item.EntityType == TachoDriverMasterSyncJobService.EntityType))
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .Select(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .FirstOrDefaultAsync(ct);
+
+        return Ok(new
+        {
+            healthy = activeDrivers > 0,
+            activeDrivers,
+            tachoLinkedDrivers,
+            latestTachoSyncUtc = latestSyncUtc == default ? (DateTimeOffset?)null : latestSyncUtc,
+            message = activeDrivers > 0
+                ? "Driver Master contains an active roster."
+                : "Driver Master contains no active drivers; Dispatch cannot calculate availability."
+        });
+    }
+
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
