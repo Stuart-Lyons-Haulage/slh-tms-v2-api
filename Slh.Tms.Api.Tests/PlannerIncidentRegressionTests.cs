@@ -65,6 +65,31 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
     }
 
     [Fact]
+    public async Task Driver_with_positive_role_evidence_remains_visible_on_an_empty_planning_day()
+    {
+        var name = $"Empty day driver {Guid.NewGuid():N}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Drivers.Add(new Driver
+            {
+                EmployeeNumber = $"DRV-{Guid.NewGuid():N}"[..24],
+                DisplayName = name,
+                DriverType = "Employed",
+                DriverGroup = "Day Drivers",
+                Active = false
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var response = await client.GetAsync("/api/v1/driver-dispatch?date=2027-02-05");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Contains(payload.GetProperty("drivers").EnumerateArray(), item => item.GetProperty("displayName").GetString() == name);
+    }
+
+    [Fact]
     public async Task Subcontractor_without_SLH_Tacho_identity_can_acknowledge_external_compliance_at_dispatch()
     {
         var date = new DateOnly(2027, 2, 4);
