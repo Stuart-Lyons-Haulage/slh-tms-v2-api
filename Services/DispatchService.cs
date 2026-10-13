@@ -22,19 +22,81 @@ public sealed class DispatchService(
 
     public async Task<IReadOnlyList<DispatchDriverDto>> GetDriversAsync(DateOnly planningDate, CancellationToken ct)
     {
-        var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
-        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        var cacheKey = $"dispatch-driver-roster:{planningDate:yyyy-MM-dd}";
+        if (cache.TryGetValue(cacheKey, out IReadOnlyList<DispatchDriverDto>? cachedRoster) && cachedRoster is not null)
+            return cachedRoster;
+
+        List<Driver> drivers;
+        try
+        {
+            drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Master was unavailable for Smart Dispatch roster {PlanningDate}; returning the last good roster if one exists.", planningDate);
+            db.ChangeTracker.Clear();
+            return cachedRoster ?? Array.Empty<DispatchDriverDto>();
+        }
+
+        try
+        {
+            await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Master detail enrichment was unavailable for Smart Dispatch roster {PlanningDate}; base Driver Master identities will be used.", planningDate);
+            db.ChangeTracker.Clear();
+        }
 
         // TmsDbContext is scoped and must not execute concurrent EF operations.
         // Keep these reads sequential so Dispatch cannot intermittently fail with
         // "A second operation was started on this context" under load.
-        var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
+        Dictionary<Guid, DriverMasterProfile> profiles;
+        try
+        {
+            profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Master profiles were unavailable for Smart Dispatch roster {PlanningDate}; using base identities.", planningDate);
+            db.ChangeTracker.Clear();
+            profiles = [];
+        }
+
         var duties = await ReadDutiesAsync(planningDate, ct);
-        var runProfiles = await ReadRunProfilesAsync(planningDate, ct);
+        List<RunProfile> runProfiles;
+        try
+        {
+            runProfiles = await ReadRunProfilesAsync(planningDate, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Run profiles were unavailable for Smart Dispatch roster {PlanningDate}; driver rows will be returned without suggestions.", planningDate);
+            db.ChangeTracker.Clear();
+            runProfiles = [];
+        }
+
         var liveStatuses = await ReadLiveStatusesAsync(ct);
         var history = await ReadRecentHistoryAsync(planningDate, ct);
         var signOffTracking = await ReadTachoSignOffTrackingAsync(duties, ct);
-        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger, cache);
+
+        DriverAvailabilitySnapshot availabilitySnapshot;
+        try
+        {
+            availabilitySnapshot = await DriverAvailabilityService.ReadAsync(db, planningDate, ct, sageHr, logger, cache);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Shared Driver Availability was unavailable for Smart Dispatch roster {PlanningDate}; allocation checks remain fail-closed.", planningDate);
+            db.ChangeTracker.Clear();
+            availabilitySnapshot = new DriverAvailabilitySnapshot(
+                planningDate,
+                DateTimeOffset.UtcNow,
+                new DriverAvailabilitySummary(0, 0, 0, 0, 0, 0, 0, 0, 0),
+                Array.Empty<DriverAvailabilityItem>(),
+                0,
+                false);
+        }
         var availabilityByDriver = availabilitySnapshot.Drivers.ToDictionary(item => item.DriverId);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
@@ -141,11 +203,13 @@ public sealed class DispatchService(
                 suggestion.Reasons));
         }
 
-        return rows
+        var result = rows
             .OrderBy(row => row.IsBlocked)
             .ThenByDescending(row => row.NeedsReturn)
             .ThenBy(row => row.Name)
             .ToArray();
+        cache.Set(cacheKey, result, TimeSpan.FromSeconds(15));
+        return result;
     }
 
     public async Task<IReadOnlyList<DispatchRunDto>> GetRunsAsync(DateOnly planningDate, CancellationToken ct) =>
