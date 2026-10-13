@@ -32,6 +32,30 @@ public sealed class OrderIntakeAutomaticSourceGateTests
             Request("Small customer booking", "Please collect 4 pallets on 05/10/2026.")));
     }
 
+    [Fact]
+    public void LangmeadCoopBookingWithProformaAttachmentIsApproved()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "langmead-coop-test", null, "info@lyonshaulage.com", "Alex@langmeadherbs.co.uk", "Alex",
+            "Ham Farm to CO-OP Transport MON 12/10/2026 depot.", DateTimeOffset.Parse("2026-10-11T08:31:00Z"),
+            "Please find attached Ham Farm Langmead Herbs CO-OP booking form for Monday 12/10/2026.", null, null,
+            [new MailboxAttachmentRequest("CO-OP ORDER PROFORMA MON 12.10.2026 depot.xls", "application/vnd.ms-excel", "AA==")]);
+
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+    }
+
+    [Fact]
+    public void SainsburyHaulierPlanSenderAndSubjectAreApproved()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "sainsbury-plan-test", null, "info@lyonshaulage.com", "Backhaul.Requests@sainsburys.co.uk", "Backhaul",
+            "Transport plan for STUART LYONS for 12/10/2026 - Version 1", DateTimeOffset.Parse("2026-10-11T13:09:00Z"),
+            "Please find attached the transport plan.", null, null,
+            [new MailboxAttachmentRequest("Haulier Plan.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "AA==")]);
+
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+    }
+
     [Theory]
     [InlineData("stuart@lyonshaulage.com")]
     [InlineData("MicrosoftExchange329e71ec88ae4615bbc36ab6ce41109e@lyonshaulage.com")]

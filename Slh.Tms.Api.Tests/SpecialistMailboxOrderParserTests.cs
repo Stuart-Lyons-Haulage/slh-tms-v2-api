@@ -172,6 +172,42 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Single(confirmation.LineItems);
     }
 
+    [Fact]
+    public void CompleteSummerBerryTrayConfirmation_IsCleanAndReadyForOrderReview()
+    {
+        var pdf = MinimalTextPdf([
+            "Order Confirmation",
+            "Euro Pool System UK Limited",
+            "Sales order number: 0228874133",
+            "Loading date: 12/10/2026",
+            "Bedford (Euro Pool System Ltd)",
+            "Summer Berry Company - DPP,",
+            "Groves Farm CHICHESTER",
+            "Material Description Load carrier Quality Logistic variant Order Qty LPC Qty Total Qty",
+            "21000022 156-Green tray LPR PR080 EP Conditioned 300 Folded IN 30 252 7.560"
+        ]);
+        var request = new MailboxEmailIntakeRequest(
+            "summerberry-tray-bedford-1", null, "info@lyonshaulage.com", "antoni.hristov@summerberry.co.uk", "Antoni Hristov",
+            "Tray collection Bedford", DateTimeOffset.Parse("2026-10-09T16:04:00Z"),
+            "EPS Bedford\n12/10\nThank you!", null, null,
+            [new MailboxAttachmentRequest("Order confirmation 0228874133.pdf", "application/pdf", Convert.ToBase64String(pdf))]);
+
+        var result = new IntakeParser().TryParse(request);
+
+        var order = Assert.Single(result!.Orders).Payload;
+        Assert.Equal("SUMMERBERRY", order.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-10-12", order.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-10-12", order.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Bedford", order.GetProperty("sellerName").GetString());
+        Assert.Equal("Summer Berry Groves Farm", order.GetProperty("stallNumber").GetString());
+        Assert.Equal(30, order.GetProperty("pallets").GetInt32());
+        Assert.Equal(7560, order.GetProperty("handlingUnitQuantity").GetInt32());
+        Assert.True(order.GetProperty("plannerReady").GetBoolean());
+        Assert.Equal("High", order.GetProperty("intakeConfidence").GetString());
+        Assert.Empty(order.GetProperty("intakeWarnings").EnumerateArray());
+        Assert.Contains("same-day", string.Join(" ", order.GetProperty("intakeNotes").EnumerateArray().Select(note => note.GetString())), StringComparison.OrdinalIgnoreCase);
+    }
+
     private static byte[] CreateTextPdf(params string[] lines)
     {
         var content = new StringBuilder("BT\n/F1 10 Tf\n72 760 Td\n");
