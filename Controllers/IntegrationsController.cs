@@ -51,6 +51,8 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                 lastAttemptUtc = infoMailboxGraphHealth.LastAttemptUtc,
                 lastSuccessUtc = infoMailboxGraphHealth.LastSuccessUtc,
                 lastError = infoMailboxGraphHealth.LastError,
+                lastFailureStage = infoMailboxGraphHealth.LastFailureStage,
+                inProgress = infoMailboxGraphHealth.InProgress,
                 lastMessagesSeen = infoMailboxGraphHealth.LastMessagesSeen,
                 lastMessagesIngested = infoMailboxGraphHealth.LastMessagesIngested
             },

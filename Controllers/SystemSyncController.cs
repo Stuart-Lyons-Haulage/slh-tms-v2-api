@@ -38,6 +38,7 @@ public sealed class SystemSyncController(
             schedules = new
             {
                 roadTech = "tracking live every minute · history every 5 minutes · tacho every 20 minutes",
+                tachoMaster = "every 20 minutes",
                 fleetio = "every hour",
                 sageHr = "05:00 and 14:00 Europe/London daily"
             },

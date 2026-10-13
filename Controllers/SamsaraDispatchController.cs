@@ -734,13 +734,13 @@ public sealed class SamsaraDispatchController(
                 cancellationEndpoint = $"/api/v1/integrations/samsara/dispatch/{runId}"
             });
 
-        if (load.VehicleId is null)
-            return BadRequest(new { message = "Allocate a vehicle before sending the run to Samsara." });
         if (load.Stops.Count < 2)
             return BadRequest(new { message = "Samsara routes require at least two stops." });
 
-        var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
-        if (vehicle is null)
+        var vehicle = load.VehicleId is Guid vehicleId
+            ? await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == vehicleId, ct)
+            : null;
+        if (load.VehicleId is not null && vehicle is null)
             return BadRequest(new { message = "The allocated vehicle could not be found in Vehicle Master." });
 
         var driver = load.DriverId is null
@@ -759,9 +759,12 @@ public sealed class SamsaraDispatchController(
             // validation applies when a driver has been allocated; without a
             // driver we use the saved/planned route start and let Samsara carry
             // the route as vehicle-assigned and unallocated.
+            // An unallocated route may be exported for route visibility and later
+            // resource assignment. Tacho/legal-start validation applies only when
+            // a driver is assigned.
             var firstScheduled = state?.PlannedStartUtc
                 ?? orderedStops[0].PlannedArrivalUtc
-                ?? DateTimeOffset.UtcNow;
+                ?? new DateTimeOffset(load.PlanningDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
             if (driver is not null)
             {
                 var available = (await dispatch.GetAvailableTimesAsync(
@@ -785,11 +788,11 @@ public sealed class SamsaraDispatchController(
             }
 
             var firstPlannedStopTime = orderedStops[0].PlannedArrivalUtc;
-            if (firstPlannedStopTime is DateTimeOffset firstStopTime && firstStopTime < firstScheduled)
+            if (driver is not null && firstPlannedStopTime is DateTimeOffset firstStopTime && firstStopTime < firstScheduled)
                 return BadRequest(new
                 {
-                    message = $"The first planned stop {orderedStops[0].Name} is timed at {firstStopTime:O}, before the driver's legal Tacho start {firstScheduled:O}."
-                });
+                        message = $"The first planned stop {orderedStops[0].Name} is timed at {firstStopTime:O}, before the driver's legal Tacho start {firstScheduled:O}."
+                    });
 
             var orderIds = orderedStops
                 .Where(stop => stop.OrderId is not null)
@@ -1026,12 +1029,16 @@ public sealed class SamsaraDispatchController(
             }
 
             if (load.RelayPlan is { Enabled: true } relay)
+            {
+                if (vehicle is null || driver is null || trailer is null)
+                    return BadRequest(new { message = "Relay runs require collection driver, vehicle and trailer allocation before Samsara export." });
                 return await DispatchRelayAsync(load, relay, vehicle, driver, trailer, state, orderedStops, samsaraStops, sites, ct);
+            }
 
             // Mapping pre-sync normally means these are local lookups only. Keep them
             // sequential because EF Core does not permit concurrent operations on one DbContext.
             var samsaraDriverId = driver is null ? null : await ResolveDriverIdAsync(driver, ct);
-            var samsaraVehicleId = await ResolveVehicleIdAsync(vehicle, ct);
+            var samsaraVehicleId = vehicle is null ? null : await ResolveVehicleIdAsync(vehicle, ct);
 
             var notes = string.Join("\n", new[]
             {
@@ -1039,7 +1046,7 @@ public sealed class SamsaraDispatchController(
                 $"Planning date: {load.PlanningDate:yyyy-MM-dd}",
                 "Planning authority: SLH TMS",
                 driver is null ? null : $"Driver: {driver.DisplayName}",
-                $"Vehicle: {vehicle.Registration}",
+                vehicle is null ? "Vehicle: Unallocated" : $"Vehicle: {vehicle.Registration}",
                 state?.PlannedStartUtc is null ? null : $"Planned yard start: {state.PlannedStartUtc:O}",
                 $"Walkaround/sign-on allowance: {Math.Max(0, options.WalkaroundMinutes)} minutes",
                 $"Default site dwell/wait allowance: {Math.Max(0, options.DefaultStopDwellMinutes)} minutes",
@@ -1095,7 +1102,7 @@ public sealed class SamsaraDispatchController(
                     : !string.IsNullOrWhiteSpace(samsaraVehicleId) ? "vehicle" : "unallocated",
                 samsaraDriverId,
                 samsaraVehicleId,
-                allocatedVehicle = vehicle.Registration,
+                allocatedVehicle = vehicle?.Registration,
                 allocatedDriver = driver?.DisplayName,
                 allocatedTrailer = trailer?.TrailerNumber,
                 stopCount = samsaraStops.Count,
