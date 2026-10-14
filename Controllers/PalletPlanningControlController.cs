@@ -215,21 +215,27 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         if (request.Allocations.Any(item => item.Date != request.Date))
             return BadRequest(new { message = "All allocations in a batch must use the same planning date." });
 
-        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        // SQL Server gets a real transaction. The in-memory provider used by the
+        // integration test host does not support transactions and is already
+        // isolated per test.
+        var supportsTransactions = !string.Equals(db.Database.ProviderName, "Microsoft.EntityFrameworkCore.InMemory", StringComparison.Ordinal);
+        await using var transaction = supportsTransactions
+            ? await db.Database.BeginTransactionAsync(ct)
+            : null;
         var results = new List<object>(request.Allocations.Count);
         foreach (var allocation in request.Allocations)
         {
             var result = await Allocate(allocation, ct);
             if (result is not OkObjectResult ok)
             {
-                await transaction.RollbackAsync(ct);
+                if (transaction is not null) await transaction.RollbackAsync(ct);
                 return result;
             }
 
             if (ok.Value is not null) results.Add(ok.Value);
         }
 
-        await transaction.CommitAsync(ct);
+        if (transaction is not null) await transaction.CommitAsync(ct);
         return Ok(new { date = request.Date, allocationCount = results.Count, allocations = results });
     }
 
