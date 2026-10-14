@@ -5,7 +5,7 @@ namespace Slh.Tms.Api.Services;
 
 public sealed class IntakeMappingService(TmsDbContext db)
 {
-    public async Task<IntakeSiteMatch> MatchSiteAsync(string originalValue, CancellationToken ct)
+    public async Task<IntakeSiteMatch> MatchSiteAsync(string originalValue, CancellationToken ct, string? customerCode = null)
     {
         var normalized = Normalize(originalValue);
         if (normalized.Length == 0)
@@ -19,6 +19,8 @@ public sealed class IntakeMappingService(TmsDbContext db)
         var mappings = await db.IntegrationMappings.AsNoTracking()
             .Where(x => x.Active && x.TmsEntityType == "Site" && x.MappingKind == "SiteAlias")
             .ToListAsync(ct);
+        if (!string.IsNullOrWhiteSpace(customerCode))
+            mappings = mappings.Where(x => string.IsNullOrWhiteSpace(x.SenderPattern) || string.Equals(x.SenderPattern, customerCode.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
         var matching = mappings.Where(x => Normalize(x.NormalizedExternalValue ?? x.ExternalKey) == normalized)
             .Select(x => x.TmsEntityId).Distinct().ToList();
         if (matching.Count != 1)
