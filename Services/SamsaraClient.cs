@@ -352,7 +352,10 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         var body = new Dictionary<string, object?>
         {
             ["name"] = Clip(route.Name, 200),
-            ["notes"] = Clip(route.Notes, 2000),
+            // Samsara rejects the entire route when the note is even one character
+            // over its 2,000-character limit. Preserve the useful prefix and add a
+            // clear truncation marker rather than relying on a hard Clip() cut.
+            ["notes"] = SamsaraNoteRules.LimitJobNotes(route.Notes ?? string.Empty),
             ["externalIds"] = externalIds,
             ["recomputeScheduledTimes"] = options.RecomputeScheduledTimes,
             ["settings"] = new
