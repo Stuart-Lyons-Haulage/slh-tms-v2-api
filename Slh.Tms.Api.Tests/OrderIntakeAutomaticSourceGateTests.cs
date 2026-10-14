@@ -91,6 +91,30 @@ public sealed class OrderIntakeAutomaticSourceGateTests
         Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsManualInputOrder(document.RootElement));
     }
 
+    [Fact]
+    public void Reply_only_production_update_is_evidence_only_not_order_evidence()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "reply-only", null, "info@lyonshaulage.com", "alex@langmeadherbs.co.uk", "Alex",
+            "RE: Ham Farm to Aldi transport THU 15-10-2026 depot.", DateTimeOffset.Parse("2026-10-14T14:45:00Z"),
+            "Unfortunately, production will be finishing order just tomorrow morning at 8:00. (because of Basil)",
+            null, null, []);
+
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.LooksLikeReplyOnlyUpdate(request));
+    }
+
+    [Fact]
+    public void Body_only_booking_with_date_route_and_quantity_remains_eligible_for_review()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "Ham Farm to Aldi transport THU 15-10-2026 depot.", null, "info@lyonshaulage.com", "alex@langmeadherbs.co.uk", "Alex",
+            "Ham Farm to Aldi transport THU 15-10-2026 depot.", DateTimeOffset.Parse("2026-10-14T14:45:00Z"),
+            "Please collect 6 pallets from Ham Farm and deliver to Aldi Neston on 15/10/2026.",
+            null, null, []);
+
+        Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.LooksLikeReplyOnlyUpdate(request));
+    }
+
     private static MailboxEmailIntakeRequest Request(string subject, string body) => new(
         "source-gate-test", null, "info@lyonshaulage.com", "planner@example.test", "Planner",
         subject, DateTimeOffset.Parse("2026-10-05T07:00:00Z"), body, null, null, null);
