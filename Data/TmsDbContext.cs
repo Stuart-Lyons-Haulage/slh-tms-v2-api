@@ -14,6 +14,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<Driver> Drivers => Set<Driver>();
     public DbSet<DriverAvailabilityWindow> DriverAvailabilityWindows => Set<DriverAvailabilityWindow>();
+    public DbSet<DriverAvailabilitySnapshotRecord> DriverAvailabilitySnapshotRecords => Set<DriverAvailabilitySnapshotRecord>();
     public DbSet<Trailer> Trailers => Set<Trailer>();
     public DbSet<Site> Sites => Set<Site>();
     public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
@@ -169,6 +170,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<DriverAvailabilityWindow>().HasIndex(x => new { x.DriverId, x.AvailableFromUtc, x.AvailableUntilUtc })
             .HasDatabaseName("IX_DriverAvailabilityWindows_Driver_Window");
         b.Entity<DriverAvailabilityWindow>().HasOne(x => x.Driver).WithMany().HasForeignKey(x => x.DriverId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<DriverAvailabilitySnapshotRecord>().ToTable("DriverAvailabilitySnapshots");
+        b.Entity<DriverAvailabilitySnapshotRecord>().HasIndex(x => x.PlanningDate).IsUnique();
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
         b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name, x.StandOrLocation });

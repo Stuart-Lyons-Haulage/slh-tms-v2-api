@@ -312,6 +312,7 @@ builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
+builder.Services.AddHostedService<DriverAvailabilitySnapshotBackgroundService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 

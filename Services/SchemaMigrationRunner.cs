@@ -240,7 +240,8 @@ public static class SchemaMigrationRunner
         "084_Canonical_Summer_Berry_Customer.sql",
         "085_Fleetio_Trailer_Status.sql",
         "086_Driver_Availability_Windows.sql",
-        "087_TachoMaster_Shared_Snapshot.sql"
+        "087_TachoMaster_Shared_Snapshot.sql",
+        "088_Driver_Availability_Snapshots.sql"
     ];
 
     internal const string HistoryTableSql = """

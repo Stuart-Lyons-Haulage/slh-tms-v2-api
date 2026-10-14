@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using System.Text.Json;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -12,8 +13,21 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DriverAvailabilityController(TmsDbContext db, SageHrClient sageHr, IMemoryCache cache, ILogger<DriverAvailabilityController> logger) : ControllerBase
 {
     [HttpGet]
-    public async Task<ActionResult<DriverAvailabilitySnapshot>> Get([FromQuery] DateOnly date, CancellationToken ct) =>
-        Ok(await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger, cache));
+    public async Task<ActionResult<DriverAvailabilitySnapshot>> Get([FromQuery] DateOnly date, CancellationToken ct)
+    {
+        try { return Ok(await DriverAvailabilityService.ReadAsync(db, date, ct, sageHr, logger, cache)); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var stored = await db.DriverAvailabilitySnapshotRecords.AsNoTracking().SingleOrDefaultAsync(x => x.PlanningDate == date, ct);
+            if (stored is not null)
+            {
+                var snapshot = JsonSerializer.Deserialize<DriverAvailabilitySnapshot>(stored.PayloadJson);
+                if (snapshot is not null) return Ok(new { snapshot.PlanningDate, snapshot.GeneratedAtUtc, snapshot.Summary, snapshot.Drivers, snapshot.ClassificationMismatchCount, snapshot.SageRosterAvailable, source = "last-known-good" });
+            }
+            logger.LogWarning(ex, "Driver availability could not be calculated and no stored snapshot exists for {PlanningDate}.", date);
+            throw;
+        }
+    }
 
     [HttpGet("classification-review")]
     public async Task<IActionResult> ClassificationReview([FromQuery] DateOnly? date, CancellationToken ct)
