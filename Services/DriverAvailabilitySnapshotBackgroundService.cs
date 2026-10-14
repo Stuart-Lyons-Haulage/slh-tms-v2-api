@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
