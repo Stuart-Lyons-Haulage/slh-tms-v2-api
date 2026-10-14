@@ -86,7 +86,8 @@ public sealed class OrderReviewSiteMatchTests : IClassFixture<CustomWebFactory>
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
         var site = await verifyDb.Sites.AsNoTracking().SingleAsync(row => row.Name == "K&N facility");
         var item = await verifyDb.StagedImports.AsNoTracking().SingleAsync(row => row.Id == stagedId);
-        Assert.Contains("\"stallNumber\":\"K&N facility\"", item.PayloadJson);
+        using var payload = JsonDocument.Parse(item.PayloadJson);
+        Assert.Equal("K&N facility", payload.RootElement.GetProperty("stallNumber").GetString());
         Assert.Contains(verifyDb.IntegrationMappings, row => row.TmsEntityId == site.Id && row.MappingKind == "SiteAlias");
         Assert.Contains(verifyDb.MasterDataAudits, row => row.EntityId == site.Id && row.Action == "OrderReviewMapping");
     }
