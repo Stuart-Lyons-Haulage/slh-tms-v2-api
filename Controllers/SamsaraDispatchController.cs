@@ -179,18 +179,23 @@ public sealed class SamsaraDispatchController(
                     try
                     {
                         var route = await samsara.GetRouteByRunIdAsync(mapping.TmsEntityId, ct, suffix);
-                        return (mapping.TmsEntityType, mapping.TmsEntityId, Exists: route is not null);
+                        return (mapping.TmsEntityType, mapping.TmsEntityId, Exists: route is not null, Route: route);
                     }
                     catch (Exception exception) when (exception is not OperationCanceledException)
                     {
                         logger.LogWarning(exception, "Samsara route verification failed for {EntityType} {EntityId}.", mapping.TmsEntityType, mapping.TmsEntityId);
-                        return (mapping.TmsEntityType, mapping.TmsEntityId, Exists: true);
+                        return (mapping.TmsEntityType, mapping.TmsEntityId, Exists: true, Route: (SamsaraRouteSnapshot?)null);
                     }
                     finally
                     {
                         routeVerificationGate.Release();
                     }
                 }));
+
+            foreach (var item in verification.Where(item => item.Exists && item.Route is not null))
+            {
+                await ReconcileRouteAssignmentAsync(item.TmsEntityId, item.Route!, ct);
+            }
 
             var verificationByKey = verification.ToDictionary(item => (item.TmsEntityType, item.TmsEntityId));
             verifiedMappings = mappings
@@ -1307,6 +1312,49 @@ public sealed class SamsaraDispatchController(
         var registered = await PlanningRegisterStore.GetLoadAsync(db, runId, ct);
         if (registered is not null) return registered;
         return await db.Loads.AsNoTracking().Include(load => load.Stops).SingleOrDefaultAsync(load => load.Id == runId, ct);
+    }
+
+    private async Task ReconcileRouteAssignmentAsync(Guid runId, SamsaraRouteSnapshot route, CancellationToken ct)
+    {
+        var driverId = await ResolveMappedEntityIdAsync("Driver", route.DriverId, ct);
+        var vehicleId = await ResolveMappedEntityIdAsync("Vehicle", route.VehicleId, ct);
+        if (driverId is null && vehicleId is null) return;
+
+        var load = await db.Loads.SingleOrDefaultAsync(item => item.Id == runId, ct);
+        if (load is null) return;
+
+        var changed = false;
+        if (driverId is Guid resolvedDriver && load.DriverId != resolvedDriver)
+        {
+            load.DriverId = resolvedDriver;
+            changed = true;
+        }
+        if (vehicleId is Guid resolvedVehicle && load.VehicleId != resolvedVehicle)
+        {
+            load.VehicleId = resolvedVehicle;
+            changed = true;
+        }
+
+        if (!changed) return;
+        await db.SaveChangesAsync(ct);
+        logger.LogInformation(
+            "Reconciled Samsara assignment for run {RunId}: driver {DriverId}, vehicle {VehicleId}. Tacho remains the legal-duty evidence.",
+            runId, load.DriverId, load.VehicleId);
+    }
+
+    private async Task<Guid?> ResolveMappedEntityIdAsync(string entityType, string? externalKey, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(externalKey)) return null;
+        var matches = await db.IntegrationMappings.AsNoTracking()
+            .Where(item => item.Active &&
+                           item.Provider == "Samsara" &&
+                           item.TmsEntityType == entityType &&
+                           item.ExternalKey == externalKey)
+            .Select(item => item.TmsEntityId)
+            .Distinct()
+            .Take(2)
+            .ToListAsync(ct);
+        return matches.Count == 1 ? matches[0] : null;
     }
 
     private async Task<string?> ResolveVehicleIdAsync(Vehicle vehicle, CancellationToken ct)
