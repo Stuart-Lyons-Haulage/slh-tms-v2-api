@@ -159,7 +159,7 @@ public sealed class DriverDispatchController(
         // office/non-driver records are still excluded.
         var selectedDrivers = driverCandidates.Where(driver =>
                 currentDayDriverIds.Contains(driver.Id) ||
-                (DriverPopulationRules.IsDriver(driver) && HasCurrentSourceEvidence(driver, sage, tachoMaster.IsConfigured))).ToList();
+                (DriverPopulationRules.IsDriver(driver) && HasCurrentSourceEvidence(driver, sage, tachoMaster.IsConfigured, planningDate))).ToList();
 
         if (loads.Count > 0)
             await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
@@ -692,12 +692,14 @@ public sealed class DriverDispatchController(
         return text.Contains("southbound", StringComparison.OrdinalIgnoreCase) ||
             text.Split(new char[] {' ', '-', '_', ':', '|'}, StringSplitOptions.RemoveEmptyEntries).Any(token => token.Equals("SB", StringComparison.OrdinalIgnoreCase));
     }
-    private static bool HasCurrentSourceEvidence(Driver driver, SageDispatchState sage, bool tachoConfigured)
+    private static bool HasCurrentSourceEvidence(Driver driver, SageDispatchState sage, bool tachoConfigured, DateOnly planningDate)
     {
         // Test/local environments may intentionally have neither integration configured; retain
         // positive role evidence there so Dispatch remains usable while clearly reporting the
         // source limitation. Production with either source configured remains fail-closed.
         if (!sage.Available && !tachoConfigured) return DriverPopulationRules.IsDriver(driver);
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        if (!driver.Active && planningDate > today) return DriverPopulationRules.IsDriver(driver);
 
         var employeeNumber = Normalise(driver.EmployeeNumber);
         if (sage.Available && employeeNumber.Length > 0 && sage.ActiveDriverEmployeeNumbers.Contains(employeeNumber)) return true;
