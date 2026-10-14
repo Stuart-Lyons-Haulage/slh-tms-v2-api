@@ -62,6 +62,27 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Allocation_batch_rolls_back_when_one_item_fails()
+    {
+        var seeded = await Seed();
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var payload = JsonSerializer.Serialize(new
+        {
+            date = "2026-08-24",
+            allocations = new object[]
+            {
+                new { orderId = seeded.OrderId, loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 7, sourceLineId = seeded.SourceLineId },
+                new { orderId = Guid.NewGuid(), loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 1 }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync("/api/v1/planning-control/allocations/batch", Json(payload))).StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.DoesNotContain(db.StagedImports, x => x.EntityType == "planningpalletallocation" && x.PayloadJson.Contains(seeded.OrderId.ToString(), StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task Barfoots_sefter_work_is_grouped_by_physical_site_and_temperature()
     {
         var date = new DateOnly(2026, 10, 9);

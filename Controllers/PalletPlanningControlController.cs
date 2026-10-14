@@ -204,6 +204,35 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         });
     }
 
+    [HttpPost("allocations/batch")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> AllocateBatch([FromBody] PalletAllocationBatchRequest request, CancellationToken ct)
+    {
+        if (request.Allocations is null || request.Allocations.Count == 0)
+            return BadRequest(new { message = "At least one allocation is required." });
+        if (request.Allocations.Count > 100)
+            return BadRequest(new { message = "A maximum of 100 allocations can be saved in one planner row." });
+        if (request.Allocations.Any(item => item.Date != request.Date))
+            return BadRequest(new { message = "All allocations in a batch must use the same planning date." });
+
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        var results = new List<object>(request.Allocations.Count);
+        foreach (var allocation in request.Allocations)
+        {
+            var result = await Allocate(allocation, ct);
+            if (result is not OkObjectResult ok)
+            {
+                await transaction.RollbackAsync(ct);
+                return result;
+            }
+
+            if (ok.Value is not null) results.Add(ok.Value);
+        }
+
+        await transaction.CommitAsync(ct);
+        return Ok(new { date = request.Date, allocationCount = results.Count, allocations = results });
+    }
+
     [HttpPost("allocations")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Allocate([FromBody] PalletAllocationRequest request, CancellationToken ct)
@@ -809,6 +838,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
 
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
     public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note, Guid? SourceLineId = null, string? IdempotencyKey = null);
+    public sealed record PalletAllocationBatchRequest(DateOnly Date, IReadOnlyList<PalletAllocationRequest> Allocations);
 
     private sealed class CellAccumulator(string section, string group, string destination)
     {
