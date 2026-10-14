@@ -694,12 +694,15 @@ public sealed class DriverDispatchController(
     }
     private static bool HasCurrentSourceEvidence(Driver driver, SageDispatchState sage, bool tachoConfigured, DateOnly planningDate)
     {
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        // Explicitly inactive records are retained only for future planning review; they cannot
+        // enter today's available workforce. This preserves the planning-review contract without
+        // allowing stale active rows into live Dispatch.
+        if (!driver.Active && planningDate > today) return DriverPopulationRules.IsDriver(driver);
         // Test/local environments may intentionally have neither integration configured; retain
         // positive role evidence there so Dispatch remains usable while clearly reporting the
         // source limitation. Production with either source configured remains fail-closed.
         if (!sage.Available && !tachoConfigured) return DriverPopulationRules.IsDriver(driver);
-        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
-        if (!driver.Active && planningDate > today) return DriverPopulationRules.IsDriver(driver);
 
         var employeeNumber = Normalise(driver.EmployeeNumber);
         if (sage.Available && employeeNumber.Length > 0 && sage.ActiveDriverEmployeeNumbers.Contains(employeeNumber)) return true;
