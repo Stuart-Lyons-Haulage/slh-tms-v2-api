@@ -159,6 +159,7 @@ public sealed class DriverDispatchController(
         // office/non-driver records are still excluded.
         var selectedDrivers = driverCandidates.Where(driver =>
                 currentDayDriverIds.Contains(driver.Id) ||
+                (!driver.Active && planningDate > DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime) && DriverPopulationRules.IsDriver(driver)) ||
                 (DriverPopulationRules.IsDriver(driver) && HasCurrentSourceEvidence(driver, sage, tachoMaster.IsConfigured, planningDate))).ToList();
 
         if (loads.Count > 0)
