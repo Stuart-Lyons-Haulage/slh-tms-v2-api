@@ -148,7 +148,7 @@ public sealed class DriverDispatchController(
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         // Read the same cached Staffing availability snapshot consumed by Dispatch and
         // the availability calendar. This avoids a second full Sage HR read on this path.
-        var sage = loads.Count == 0 ? SageDispatchState.Unavailable : await ReadSageStateAsync(planningDate, ct);
+        var sage = await ReadSageStateAsync(planningDate, ct);
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
@@ -159,8 +159,8 @@ public sealed class DriverDispatchController(
         // office/non-driver records are still excluded.
         var selectedDrivers = driverCandidates.Where(driver =>
                 currentDayDriverIds.Contains(driver.Id) ||
-                DriverPopulationRules.IsDriver(driver) ||
-                DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
+                (!driver.Active && planningDate > DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime) && DriverPopulationRules.IsDriver(driver)) ||
+                (DriverPopulationRules.IsDriver(driver) && HasCurrentSourceEvidence(driver, sage, tachoMaster.IsConfigured, planningDate))).ToList();
 
         if (loads.Count > 0)
             await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
@@ -168,6 +168,31 @@ public sealed class DriverDispatchController(
         // Detail enrichment supplies agency name, coding and skills, but does not
         // change the Master Data employment classification.
         selectedDrivers = selectedDrivers.OrderBy(driver => driver.DisplayName).ToList();
+
+        // Dispatch must show the dispatchable workforce, not the whole Driver Master.
+        // Use the same Sage/working-pattern/agency evidence used by Availability, then
+        // apply a live Tacho legal-hours gate. Already allocated drivers remain visible
+        // so their run cards can still be managed and show their allocated state.
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(
+            db, planningDate, ct, sageHr, logger, cache);
+        var availabilityByDriver = availabilitySnapshot.Drivers
+            .ToDictionary(item => item.DriverId);
+        var beforeAvailabilityGate = selectedDrivers.Count;
+        selectedDrivers = selectedDrivers.Where(driver =>
+        {
+            if (currentDayDriverIds.Contains(driver.Id)) return true;
+            if (!driver.Active && planningDate > DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime) && DriverPopulationRules.IsDriver(driver)) return true;
+            if (!availabilityByDriver.TryGetValue(driver.Id, out var availability)) return false;
+            if (!availability.Dispatchable) return false;
+            if (availabilitySnapshot.SageRosterAvailable &&
+                availability.EmploymentType == "Employed" &&
+                availability.ClassificationMismatch) return false;
+            if (availability.EmploymentType == "Subcontractor") return true;
+            return TachoAllowsDispatch(driver, planningDate, tachoMaster.IsConfigured);
+        }).ToList();
+        logger.LogInformation(
+            "Driver Dispatch availability gate reduced {BeforeCount} roster records to {AfterCount} visible drivers for {PlanningDate}; Sage={SageRosterAvailable}.",
+            beforeAvailabilityGate, selectedDrivers.Count, planningDate, availabilitySnapshot.SageRosterAvailable);
 
         // Start the bounded Tacho history read before the remaining planning enrichment so its
         // network latency overlaps with the local database/assistant work below.
@@ -576,7 +601,14 @@ public sealed class DriverDispatchController(
                 if (string.IsNullOrWhiteSpace(item.EmployeeNumber)) continue;
                 leave[Normalise(item.EmployeeNumber)] = new LeaveState("Leave", "Leave is recorded in Staffing availability.", false);
             }
-            return new SageDispatchState(snapshot.SageRosterAvailable, new HashSet<string>(StringComparer.OrdinalIgnoreCase), leave);
+            var activeDriverEmployeeNumbers = snapshot.SageRosterAvailable
+                ? snapshot.Drivers
+                    .Where(item => item.EmploymentType == "Employed" && !item.ClassificationMismatch)
+                    .Select(item => Normalise(item.EmployeeNumber))
+                    .Where(value => value.Length > 0)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new SageDispatchState(snapshot.SageRosterAvailable, activeDriverEmployeeNumbers, leave);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -662,6 +694,37 @@ public sealed class DriverDispatchController(
         return text.Contains("southbound", StringComparison.OrdinalIgnoreCase) ||
             text.Split(new char[] {' ', '-', '_', ':', '|'}, StringSplitOptions.RemoveEmptyEntries).Any(token => token.Equals("SB", StringComparison.OrdinalIgnoreCase));
     }
+    private static bool HasCurrentSourceEvidence(Driver driver, SageDispatchState sage, bool tachoConfigured, DateOnly planningDate)
+    {
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        // Explicitly inactive records are retained only for future planning review; they cannot
+        // enter today's available workforce. This preserves the planning-review contract without
+        // allowing stale active rows into live Dispatch.
+        if (!driver.Active && planningDate > today) return DriverPopulationRules.IsDriver(driver);
+        // Test/local environments may intentionally have neither integration configured; retain
+        // positive role evidence there so Dispatch remains usable while clearly reporting the
+        // source limitation. Production with either source configured remains fail-closed.
+        if (!sage.Available && !tachoConfigured) return DriverPopulationRules.IsDriver(driver);
+
+        var employeeNumber = Normalise(driver.EmployeeNumber);
+        if (sage.Available && employeeNumber.Length > 0 && sage.ActiveDriverEmployeeNumbers.Contains(employeeNumber)) return true;
+        return !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
+               driver.LastTachoSyncUtc is DateTimeOffset lastSync &&
+               DateTimeOffset.UtcNow - lastSync <= TimeSpan.FromDays(28);
+    }
+
+    private static bool TachoAllowsDispatch(Driver driver, DateOnly planningDate, bool tachoConfigured)
+    {
+        if (!tachoConfigured || string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)) return false;
+        if (driver.LastTachoSyncUtc is not DateTimeOffset syncedAt ||
+            DateTimeOffset.UtcNow - syncedAt > TimeSpan.FromHours(6)) return false;
+
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        if (planningDate != today) return true;
+        return driver.TachoDriveAvailableTodayMinutes is > 0 &&
+               driver.TachoWorkAvailableWeekMinutes is > 0;
+    }
+
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private sealed record LeaveState(string? PolicyName, string? Details, bool IsPartOfDay);
