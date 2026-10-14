@@ -169,6 +169,30 @@ public sealed class DriverDispatchController(
         // change the Master Data employment classification.
         selectedDrivers = selectedDrivers.OrderBy(driver => driver.DisplayName).ToList();
 
+        // Dispatch must show the dispatchable workforce, not the whole Driver Master.
+        // Use the same Sage/working-pattern/agency evidence used by Availability, then
+        // apply a live Tacho legal-hours gate. Already allocated drivers remain visible
+        // so their run cards can still be managed and show their allocated state.
+        var availabilitySnapshot = await DriverAvailabilityService.ReadAsync(
+            db, planningDate, ct, sageHr, logger, cache);
+        var availabilityByDriver = availabilitySnapshot.Drivers
+            .ToDictionary(item => item.DriverId);
+        var beforeAvailabilityGate = selectedDrivers.Count;
+        selectedDrivers = selectedDrivers.Where(driver =>
+        {
+            if (currentDayDriverIds.Contains(driver.Id)) return true;
+            if (!availabilityByDriver.TryGetValue(driver.Id, out var availability)) return false;
+            if (!availability.Dispatchable) return false;
+            if (availabilitySnapshot.SageRosterAvailable &&
+                availability.EmploymentType == "Employed" &&
+                availability.ClassificationMismatch) return false;
+            if (availability.EmploymentType == "Subcontractor") return true;
+            return TachoAllowsDispatch(driver, planningDate, tachoMaster.IsConfigured);
+        }).ToList();
+        logger.LogInformation(
+            "Driver Dispatch availability gate reduced {BeforeCount} roster records to {AfterCount} visible drivers for {PlanningDate}; Sage={SageRosterAvailable}.",
+            beforeAvailabilityGate, selectedDrivers.Count, planningDate, availabilitySnapshot.SageRosterAvailable);
+
         // Start the bounded Tacho history read before the remaining planning enrichment so its
         // network latency overlaps with the local database/assistant work below.
         // With no built runs there is no route context to score or Tacho-cycle against.
@@ -662,6 +686,18 @@ public sealed class DriverDispatchController(
         return text.Contains("southbound", StringComparison.OrdinalIgnoreCase) ||
             text.Split(new char[] {' ', '-', '_', ':', '|'}, StringSplitOptions.RemoveEmptyEntries).Any(token => token.Equals("SB", StringComparison.OrdinalIgnoreCase));
     }
+    private static bool TachoAllowsDispatch(Driver driver, DateOnly planningDate, bool tachoConfigured)
+    {
+        if (!tachoConfigured || string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)) return false;
+        if (driver.LastTachoSyncUtc is not DateTimeOffset syncedAt ||
+            DateTimeOffset.UtcNow - syncedAt > TimeSpan.FromHours(6)) return false;
+
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        if (planningDate != today) return true;
+        return driver.TachoDriveAvailableTodayMinutes is > 0 &&
+               driver.TachoWorkAvailableWeekMinutes is > 0;
+    }
+
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private sealed record LeaveState(string? PolicyName, string? Details, bool IsPartOfDay);
