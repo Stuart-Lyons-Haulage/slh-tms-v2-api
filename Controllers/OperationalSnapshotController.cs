@@ -63,6 +63,30 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
         });
     }
 
+    // Single read model for wallboards and mobile clients.  The existing specialised
+    // endpoints remain available for compatibility; this endpoint gives consumers one
+    // consistent generated-at timestamp and avoids racing separate HTTP refreshes.
+    [HttpGet("full-snapshot")]
+    public async Task<IActionResult> FullSnapshot([FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        var readiness = await Readiness(date, ct);
+        if (readiness is not OkObjectResult readinessResult)
+            return readiness;
+
+        var attention = await Attention(date, ct);
+        if (attention is not OkObjectResult attentionResult)
+            return attention;
+
+        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
+        return Ok(new
+        {
+            planningDate = day,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            readiness = readinessResult.Value,
+            attention = attentionResult.Value
+        });
+    }
+
     [HttpGet("attention-snapshot")]
     public async Task<IActionResult> Attention([FromQuery] DateOnly? date, CancellationToken ct)
     {
