@@ -236,20 +236,32 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             return Conflict(new { message = "Allocation exceeds the approved load-unit quantity.", approvedPallets = permitted, allocatedElsewhere, requestedPallets = request.Pallets });
         var now = DateTimeOffset.UtcNow;
         var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name, request.SourceLineId);
-        var allocationKey = $"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}";
+        // Retries must be safe. A deterministic fallback treats the same quantity
+        // written to the same order/load/source-line as the same operation; clients
+        // can provide a request key when they need to distinguish two identical
+        // corrections. The previous timestamp/GUID key made a slow mobile retry
+        // create a second ledger entry.
+        var allocationKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
+            ? $"palletallocation:{request.Date:yyyyMMdd}:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{request.Pallets}"
+            : $"palletallocation:{request.IdempotencyKey.Trim()}";
         if (allocationKey.Length > 200) allocationKey = allocationKey[..200];
-        db.StagedImports.Add(new StagedImport
+        var allocationAlreadyRecorded = await db.StagedImports.AsNoTracking()
+            .AnyAsync(x => x.EntityType == AllocationType && x.IdempotencyKey == allocationKey, ct);
+        if (!allocationAlreadyRecorded)
         {
-            EntityType = AllocationType,
-            IdempotencyKey = allocationKey,
-            PayloadJson = JsonSerializer.Serialize(payload, JsonOptions),
-            Source = "Pallet planning control",
-            Status = StagingStatus.Promoted,
-            ReviewedAtUtc = now,
-            ReviewedBy = User.Identity?.Name,
-            ReviewNote = $"Run load-unit allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
-        });
-        await db.SaveChangesAsync(ct);
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = AllocationType,
+                IdempotencyKey = allocationKey,
+                PayloadJson = JsonSerializer.Serialize(payload, JsonOptions),
+                Source = "Pallet planning control",
+                Status = StagingStatus.Promoted,
+                ReviewedAtUtc = now,
+                ReviewedBy = User.Identity?.Name,
+                ReviewNote = $"Run load-unit allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
+            });
+            await db.SaveChangesAsync(ct);
+        }
         db.ChangeTracker.Clear();
 
         await EnsureOrderOnRun(load, order, detail, ct);
@@ -796,7 +808,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     }
 
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
-    public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note, Guid? SourceLineId = null);
+    public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note, Guid? SourceLineId = null, string? IdempotencyKey = null);
 
     private sealed class CellAccumulator(string section, string group, string destination)
     {
