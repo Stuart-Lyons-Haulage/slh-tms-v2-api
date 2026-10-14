@@ -130,7 +130,7 @@ public sealed class DriverAvailabilitySnapshotRecord
     public DateOnly PlanningDate { get; set; }
     public DateTimeOffset GeneratedAtUtc { get; set; }
     [MaxLength(40)] public required string Source { get; set; }
-    public required string PayloadJson { get; set; }
+    public string PayloadJson { get; set; } = "{}";
     public DateTimeOffset StoredAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 public sealed class Trailer
