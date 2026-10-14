@@ -353,6 +353,9 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
 
     private static string AppendAlias(string? existing, string alias) => string.Join("; ", (existing ?? string.Empty).Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Append(alias.Trim()).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase));
 
+    private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
+    private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
+
     private static string? Text(JsonObject payload, params string[] names) => names.Select(name => payload.FirstOrDefault(property => string.Equals(new string(property.Key.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray()), new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray()), StringComparison.OrdinalIgnoreCase)).Value?.ToString()).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
     private static string? DeliveryName(JsonElement payload) =>
