@@ -238,6 +238,7 @@ public sealed class IntegrationSyncCoordinator(
         var staleArchived = await db.Drivers
             .Where(driver => driver.Active &&
                              !currentSageNumbers.Contains(driver.EmployeeNumber) &&
+                             !DriverPopulationRules.IsSubcontractor(driver) &&
                              (driver.LastTachoSyncUtc == null || driver.LastTachoSyncUtc < staleSourceCutoff))
             .ExecuteUpdateAsync(setters => setters.SetProperty(driver => driver.Active, false), ct);
         if (staleArchived > 0)
