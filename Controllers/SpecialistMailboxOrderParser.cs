@@ -880,12 +880,44 @@ public sealed class SpecialistMailboxOrderParser
                     }
 
                     var headers = HeaderMap(rows[headerIndex]);
+                    // Summer Berry have used two workbook layouts for the same
+                    // movement.  The older layout calls these fields "Depot
+                    // Description" and "Pallets"; the Lyons Collections layout
+                    // calls them "Delivery Destination" and "Pallets Ordered".
+                    // Keep the aliases explicit so retailer/customer identity is
+                    // still derived from the destination, never from a loose
+                    // workbook or email subject match.
                     var collectionIndex = FindColumn(headers, "collectionsite", "collection", "collectfrom");
-                    var dateIndex = FindColumn(headers, "date", "deliverydate", "bookingdate");
-                    var depotIndex = FindColumn(headers, "depotdescription", "depot", "destination", "deliverysite");
-                    var palletsIndex = FindColumn(headers, "pallets", "pallet", "qty", "quantity");
-                    var requestTimeIndex = FindColumn(headers, "requesttime", "requestedtime", "bookingtime", "deliverytime");
-                    var availableTimeIndex = FindColumn(headers, "availabletime", "collectiontime", "readytime");
+                    var dateIndex = FindColumn(
+                        headers,
+                        "date",
+                        "deliverydate",
+                        "bookingdate",
+                        "collectiondate",
+                        "collectionsitearrdate",
+                        "arrdate");
+                    var depotIndex = FindColumn(
+                        headers,
+                        "depotdescription",
+                        "depot",
+                        "destination",
+                        "deliverysite",
+                        "deliverydestination");
+                    var palletsIndex = FindColumn(headers, "pallets", "pallet", "palletsordered", "qty", "quantity");
+                    var requestTimeIndex = FindColumn(
+                        headers,
+                        "requesttime",
+                        "requestedtime",
+                        "bookingtime",
+                        "deliverytime",
+                        "plannedcollecttimefrom");
+                    var availableTimeIndex = FindColumn(
+                        headers,
+                        "availabletime",
+                        "collectiontime",
+                        "readytime",
+                        "plannedcollecttimeto");
+                    var loadNumberIndex = FindColumn(headers, "loadnumber", "load", "loadno", "loadid");
 
                     if (depotIndex < 0 || palletsIndex < 0)
                         continue;
@@ -930,9 +962,18 @@ public sealed class SpecialistMailboxOrderParser
                         if (string.IsNullOrWhiteSpace(rawPo))
                             warnings.Add("No customer PO/reference was found in the email.");
 
+                        var loadNumber = CellText(row, loadNumberIndex);
                         var baseReference = rawPo ?? StableEmailReference(request.MessageId);
-                        var reference = BuildReference(baseReference, destination);
-                        var naturalKey = NaturalKey(request, identity.Value.CustomerCode, collection, destination, rowDate.Value, pallets.Value);
+                        var reference = BuildReference(
+                            string.IsNullOrWhiteSpace(loadNumber) ? baseReference : $"{baseReference}/LOAD-{loadNumber}",
+                            destination);
+                        var naturalKey = WorkbookNaturalKey(
+                            request,
+                            identity.Value.CustomerCode,
+                            collection,
+                            destination,
+                            rowDate.Value,
+                            string.IsNullOrWhiteSpace(loadNumber) ? pallets.Value.ToString(CultureInfo.InvariantCulture) : loadNumber);
                         var payload = BuildPayload(
                             request,
                             reference,
@@ -951,6 +992,14 @@ public sealed class SpecialistMailboxOrderParser
                             "Summer Berry Morrisons/Aldi workbook",
                             warnings,
                             identity.Value.RetailerCode);
+
+                        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                        root["loadNumber"] = loadNumber;
+                        root["sourceCollectionLabel"] = CellText(row, collectionIndex);
+                        root["retailerCode"] = identity.Value.RetailerCode;
+                        root["intakeProfile"] = "SUMMER_BERRY_MORRISONS_ALDI_WORKBOOK";
+                        root["intakeNaturalKey"] = naturalKey;
+                        payload = JsonSerializer.SerializeToElement(root);
 
                         orders.Add(new ParsedEmailOrder(
                             $"summerberry-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}",
@@ -1722,7 +1771,19 @@ public sealed class SpecialistMailboxOrderParser
     private static bool IsSummerBerryBookingHeader(object?[] row)
     {
         var keys = row.Select(CellText).Where(value => !string.IsNullOrWhiteSpace(value)).Select(NormaliseKey).ToHashSet();
-        return keys.Contains("PALLETS") && keys.Contains("COLLECTIONSITE") && keys.Contains("DEPOTDESCRIPTION");
+        var hasCollection = keys.Contains("COLLECTIONSITE") ||
+                            keys.Contains("COLLECTION") ||
+                            keys.Contains("COLLECTFROM");
+        var hasDestination = keys.Contains("DEPOTDESCRIPTION") ||
+                             keys.Contains("DELIVERYDESTINATION") ||
+                             keys.Contains("DESTINATION") ||
+                             keys.Contains("DELIVERYSITE");
+        var hasPallets = keys.Contains("PALLETS") ||
+                         keys.Contains("PALLETSORDERED") ||
+                         keys.Contains("PALLET") ||
+                         keys.Contains("QTY") ||
+                         keys.Contains("QUANTITY");
+        return hasCollection && hasDestination && hasPallets;
     }
 
     private static Dictionary<string, int> HeaderMap(object?[] row)
@@ -1860,3 +1921,4 @@ public sealed class SpecialistMailboxOrderParser
     private static string NormaliseKey(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
+
