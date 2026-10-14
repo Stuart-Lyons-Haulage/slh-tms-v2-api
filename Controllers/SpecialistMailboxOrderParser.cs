@@ -294,7 +294,9 @@ public sealed class SpecialistMailboxOrderParser
                                 rowIndex + 1,
                                 "NWF confirmed ALDI collection workbook",
                                 rowWarnings,
-                                "ALDI");
+                                "ALDI",
+                                "Trays",
+                                "Trays");
 
                             var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
                             root["transportPo"] = transportPo;
@@ -1669,7 +1671,9 @@ public sealed class SpecialistMailboxOrderParser
         int sourceRow,
         string parser,
         IReadOnlyList<string> warnings,
-        string? retailer = null)
+        string? retailer = null,
+        string? handlingUnitType = null,
+        string? handlingPalletType = null)
     {
         var instructions = string.Join(" · ", new[]
         {
@@ -1693,8 +1697,8 @@ public sealed class SpecialistMailboxOrderParser
             ["collectionDate"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             ["deliveryDate"] = deliveryDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             ["pallets"] = pallets,
-            ["unitType"] = "Pallets",
-            ["palletType"] = "Pallets",
+            ["unitType"] = handlingUnitType ?? "Pallets",
+            ["palletType"] = handlingPalletType ?? handlingUnitType ?? "Pallets",
             ["sellerName"] = collection,
             ["collectionSite"] = collection,
             ["collectionPoint"] = collection,
