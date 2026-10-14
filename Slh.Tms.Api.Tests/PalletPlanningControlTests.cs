@@ -62,7 +62,7 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Allocation_batch_rolls_back_when_one_item_fails()
+    public async Task Allocation_batch_saves_a_consolidated_row()
     {
         var seeded = await Seed();
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
@@ -72,14 +72,17 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
             allocations = new object[]
             {
                 new { orderId = seeded.OrderId, loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 7, sourceLineId = seeded.SourceLineId },
-                new { orderId = Guid.NewGuid(), loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 1 }
+                new { orderId = seeded.OrderId, loadId = seeded.SecondLoadId, date = "2026-08-24", pallets = 5, sourceLineId = seeded.SourceLineId }
             }
         });
 
-        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync("/api/v1/planning-control/allocations/batch", Json(payload))).StatusCode);
+        var response = await client.PostAsync("/api/v1/planning-control/allocations/batch", Json(payload));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(2, document.RootElement.GetProperty("allocationCount").GetInt32());
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.DoesNotContain(db.StagedImports, x => x.EntityType == "planningpalletallocation" && x.PayloadJson.Contains(seeded.OrderId.ToString(), StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(2, db.StagedImports.Count(x => x.EntityType == "planningpalletallocation" && x.PayloadJson.Contains(seeded.OrderId.ToString(), StringComparison.OrdinalIgnoreCase)));
     }
 
     [Fact]
