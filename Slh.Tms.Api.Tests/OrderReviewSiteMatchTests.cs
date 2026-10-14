@@ -89,7 +89,7 @@ public sealed class OrderReviewSiteMatchTests : IClassFixture<CustomWebFactory>
         using var payload = JsonDocument.Parse(item.PayloadJson);
         Assert.Equal("K&N facility", payload.RootElement.GetProperty("stallNumber").GetString());
         Assert.Contains(verifyDb.IntegrationMappings, row => row.TmsEntityId == site.Id && row.MappingKind == "SiteAlias");
-        Assert.Contains(verifyDb.MasterDataAudits, row => row.EntityId == site.Id && row.Action == "OrderReviewMapping");
+        Assert.Contains(verifyDb.StagedImportEvents, row => row.StagedImportId == stagedId && row.EventType == "SiteMappingUpdated");
     }
 
     [Fact]
