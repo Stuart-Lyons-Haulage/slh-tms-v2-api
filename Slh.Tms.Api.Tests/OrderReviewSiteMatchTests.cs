@@ -51,4 +51,75 @@ public sealed class OrderReviewSiteMatchTests : IClassFixture<CustomWebFactory>
         Assert.Equal("Canonical Depot", alignment.DeliveryName);
         Assert.Contains(verifyDb.StagedImportEvents, row => row.StagedImportId == stagedId && row.EventType == "DeliverySiteMasterMatched");
     }
+
+    [Fact]
+    public async Task Create_destination_site_is_duplicate_safe_and_updates_pending_order()
+    {
+        var stagedId = Guid.NewGuid();
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                Id = stagedId,
+                EntityType = "order",
+                IdempotencyKey = $"create-site-{Guid.NewGuid():N}",
+                PayloadJson = "{\"poNumber\":\"PO-2\",\"customerCode\":\"SUMMERBERRY\",\"collectionDate\":\"2026-10-14\",\"stallNumber\":\"K&N facility\"}",
+                Status = StagingStatus.PendingReview,
+                Source = "test"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com");
+        var response = await client.PostAsJsonAsync($"/api/v1/staging/{stagedId}/create-site", new
+        {
+            field = "destination",
+            name = "K&N facility",
+            address = "Building 1235, Eastern Perimeter Road, London Heathrow Airport, Hounslow, TW6 2SQ",
+            alias = "K&N facility",
+            customerCode = "SUMMERBERRY"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await using var verifyScope = _factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var site = await verifyDb.Sites.AsNoTracking().SingleAsync(row => row.Name == "K&N facility");
+        var item = await verifyDb.StagedImports.AsNoTracking().SingleAsync(row => row.Id == stagedId);
+        Assert.Contains("\"stallNumber\":\"K&N facility\"", item.PayloadJson);
+        Assert.Contains(verifyDb.IntegrationMappings, row => row.TmsEntityId == site.Id && row.MappingKind == "SiteAlias");
+        Assert.Contains(verifyDb.MasterDataAudits, row => row.EntityId == site.Id && row.Action == "OrderReviewMapping");
+    }
+
+    [Fact]
+    public async Task Match_site_rejects_alias_already_owned_by_another_site()
+    {
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        var stagedId = Guid.NewGuid();
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Sites.AddRange(
+                new Site { Id = firstId, ExternalCode = "SITE-A", Name = "Canonical A", Active = true },
+                new Site { Id = secondId, ExternalCode = "SITE-B", Name = "Canonical B", Active = true });
+            db.IntegrationMappings.Add(new IntegrationMapping
+            {
+                Provider = "InfoMailbox", ExternalKey = "Shared depot", NormalizedExternalValue = "shareddepot",
+                MappingKind = "SiteAlias", TmsEntityType = "Site", TmsEntityId = firstId, Active = true
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                Id = stagedId, EntityType = "order", IdempotencyKey = $"match-conflict-{Guid.NewGuid():N}",
+                PayloadJson = "{\"poNumber\":\"PO-3\",\"customerCode\":\"SUMMERBERRY\",\"collectionDate\":\"2026-10-14\",\"stallNumber\":\"Shared depot\"}",
+                Status = StagingStatus.PendingReview, Source = "test"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com");
+        var response = await client.PostAsJsonAsync($"/api/v1/staging/{stagedId}/match-site", new { field = "destination", siteId = secondId, alias = "Shared depot" });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
 }
