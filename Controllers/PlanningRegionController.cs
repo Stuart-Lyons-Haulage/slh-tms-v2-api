@@ -114,6 +114,10 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
             destinationLabels = labels,
             destinationSiteCodes = siteCodes,
             unmatchedDestinations = presentation.Count(item => !item.Value.MasterMatched),
+            unmatchedDestinationNames = presentation.Where(item => !item.Value.MasterMatched)
+                .Select(item => item.Key)
+                .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
             temperatureConflicts = temperatureSync.Conflicts,
             temperatureUpdatedLoads = temperatureSync.UpdatedLoads,
             temperatureUpdatedOrders = temperatureSync.UpdatedOrders,
@@ -132,3 +136,4 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
 
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
+
