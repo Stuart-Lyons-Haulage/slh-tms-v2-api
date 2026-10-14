@@ -860,7 +860,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private static string NormaliseIntakeValue(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string ClipIntakeText(string? value, int limit) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Length <= limit ? value : value[..limit];
 
-    private static bool IsVerifiedRetainedBodyFormat(MailboxEmailIntakeRequest request)
+    internal static bool IsVerifiedRetainedBodyFormat(MailboxEmailIntakeRequest request)
     {
         var sender = request.SenderAddress ?? string.Empty;
         var subject = request.Subject ?? string.Empty;
@@ -878,7 +878,18 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                               body.Contains("Total Pallets", StringComparison.OrdinalIgnoreCase) &&
                               body.Contains("Collect from", StringComparison.OrdinalIgnoreCase);
 
-        return barfootsWaitroseWave || summerBerryCoop;
+        // Spinneys/JHF is a verified Summer Berry labelled-body format. Keep the
+        // sender, retailer, and required order fields together so the generic
+        // labelled parser can process it without widening the automatic lane.
+        var summerBerrySpinneys = sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase) &&
+                                  Regex.IsMatch(string.Join("\n", subject, body), @"\bSpinneys\s*/\s*JHF\b", RegexOptions.IgnoreCase) &&
+                                  Regex.IsMatch(body, @"(?im)^\s*Customer\s*[:=-].+") &&
+                                  Regex.IsMatch(body, @"(?im)^\s*Depot\s+Date\s*[:=-].+") &&
+                                  Regex.IsMatch(body, @"(?im)^\s*Collection\s*[:=-].+") &&
+                                  Regex.IsMatch(body, @"(?im)^\s*Pallets?\s*[:=-]?\s*\d+\b") &&
+                                  Regex.IsMatch(body, @"(?im)^\s*Ad(?:d)?ress\s+of\s+delivery\s*[:=-].+");
+
+        return barfootsWaitroseWave || summerBerryCoop || summerBerrySpinneys;
     }
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)

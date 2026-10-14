@@ -164,6 +164,29 @@ BARBOG Nisa Retail Ltd Nisa Retail Ltd (Stoke) 30/09/2026 5168878/3565163 15 1
     }
 
     [Fact]
+    public void SummerBerrySpinneysLabelledBody_IsAllowedThroughProductionIntakeGate()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "message-summerberry-spinneys-gate", null, "info@lyonshaulage.com",
+            "Ioana-Andreea.Pascalau@summerberry.co.uk", "Ioana",
+            "15.10.2026 Spinneys/JHF delivery", DateTimeOffset.Parse("2026-10-14T07:07:00Z"),
+            """
+            Customer : Spinneys/JHF order
+            Depot Date: 15.10.2026
+            Collection : 14.10.2026 17:00
+            Pallets : 8
+            Adress of delivery : K&N facility
+            Building 1235, Eastern Perimeter Road,
+            London Heathrow Airport,
+            Hounslow,
+            TW6 2SQ
+            To be there not later than 8AM on the Depot Date
+            """, null, null, null);
+
+        Assert.True(OrderIntakeController.IsVerifiedRetainedBodyFormat(request));
+    }
+
+    [Fact]
     public void SummerBerryLabelledPalletBody_IsStaged()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
