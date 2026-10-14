@@ -181,6 +181,7 @@ public sealed class DriverDispatchController(
         selectedDrivers = selectedDrivers.Where(driver =>
         {
             if (currentDayDriverIds.Contains(driver.Id)) return true;
+            if (!driver.Active && planningDate > DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime) && DriverPopulationRules.IsDriver(driver)) return true;
             if (!availabilityByDriver.TryGetValue(driver.Id, out var availability)) return false;
             if (!availability.Dispatchable) return false;
             if (availabilitySnapshot.SageRosterAvailable &&
