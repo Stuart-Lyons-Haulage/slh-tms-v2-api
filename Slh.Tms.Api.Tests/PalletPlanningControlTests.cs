@@ -176,6 +176,34 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Incomplete_source_line_quantity_does_not_hide_approved_order()
+    {
+        var date = new DateOnly(2026, 10, 14);
+        var reference = $"QTY-{Guid.NewGuid():N}"[..20];
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var staged = new StagedImport
+            {
+                EntityType = "order", IdempotencyKey = $"qty-{Guid.NewGuid():N}", Status = StagingStatus.Approved,
+                PayloadJson = JsonSerializer.Serialize(new { poNumber = reference, customerCode = "SUMMER_BERRY", collectionDate = date.ToString("yyyy-MM-dd"), pallets = 8, collectionSite = "Selsey", deliverySite = "Covent Garden" })
+            };
+            var movement = new OrderMovement { CustomerCode = "SUMMER_BERRY", StableMovementKey = $"SB:{Guid.NewGuid():N}", LifecycleStatus = OrderMovementStatus.PlannerReady };
+            var revision = new OrderRevision { MovementId = movement.Id, StagedImportId = staged.Id, RevisionNumber = 1, PayloadJson = staged.PayloadJson };
+            movement.CurrentRevisionId = revision.Id;
+            db.Add(new OrderSourceLine { RevisionId = revision.Id, SourceRowKey = "row-without-qty", CollectionSite = "Selsey", DeliverySite = "Covent Garden", CollectionDate = date, DeliveryDate = date, Pallets = null, PayloadJson = "{}" });
+            db.Add(new TransportOrder { SourceStagedImportId = staged.Id, SourceMovementId = movement.Id, Reference = reference, CustomerCode = "SUMMER_BERRY", CollectionDate = date, DeliveryDate = date, Pallets = 8 });
+            db.AddRange(staged, movement, revision);
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Read");
+        using var response = JsonDocument.Parse(await (await client.GetAsync($"/api/v1/planning-control/pallets?date={date:yyyy-MM-dd}")).Content.ReadAsStringAsync());
+        var order = Assert.Single(response.RootElement.GetProperty("orders").EnumerateArray().Where(x => x.GetProperty("reference").GetString() == reference));
+        Assert.Equal(8, order.GetProperty("orderedPallets").GetInt32());
+    }
+
+    [Fact]
     public async Task Pending_review_register_order_does_not_appear_in_orders_to_plan()
     {
         var date = new DateOnly(2026, 9, 6);

@@ -44,7 +44,14 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             details.TryGetValue(Normalise(order.Reference), out var detail);
             sourceLines.TryGetValue(order.Id, out var orderSourceLines);
             orderSourceLines ??= [];
-            var ordered = orderSourceLines.Count > 0 ? orderSourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0)) : EffectiveOrderedPallets(order, detail);
+            // Source-line evidence is preferred when it contains usable quantities,
+            // but incomplete parser rows must never hide an otherwise valid approved
+            // order from Planner. This can happen when a revision was written before
+            // the quantity mapping completed or when a parser supplied line metadata
+            // without a pallet count. Fall back to the authoritative order/detail
+            // total in that case.
+            var sourceOrdered = orderSourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0));
+            var ordered = sourceOrdered > 0 ? sourceOrdered : EffectiveOrderedPallets(order, detail);
             if (ordered <= 0) continue;
 
             var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
