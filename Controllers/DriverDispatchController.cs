@@ -148,7 +148,7 @@ public sealed class DriverDispatchController(
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         // Read the same cached Staffing availability snapshot consumed by Dispatch and
         // the availability calendar. This avoids a second full Sage HR read on this path.
-        var sage = loads.Count == 0 ? SageDispatchState.Unavailable : await ReadSageStateAsync(planningDate, ct);
+        var sage = await ReadSageStateAsync(planningDate, ct);
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
@@ -159,8 +159,7 @@ public sealed class DriverDispatchController(
         // office/non-driver records are still excluded.
         var selectedDrivers = driverCandidates.Where(driver =>
                 currentDayDriverIds.Contains(driver.Id) ||
-                DriverPopulationRules.IsDriver(driver) ||
-                DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
+                (DriverPopulationRules.IsDriver(driver) && HasCurrentSourceEvidence(driver, sage))).ToList();
 
         if (loads.Count > 0)
             await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
@@ -600,7 +599,14 @@ public sealed class DriverDispatchController(
                 if (string.IsNullOrWhiteSpace(item.EmployeeNumber)) continue;
                 leave[Normalise(item.EmployeeNumber)] = new LeaveState("Leave", "Leave is recorded in Staffing availability.", false);
             }
-            return new SageDispatchState(snapshot.SageRosterAvailable, new HashSet<string>(StringComparer.OrdinalIgnoreCase), leave);
+            var activeDriverEmployeeNumbers = snapshot.SageRosterAvailable
+                ? snapshot.Drivers
+                    .Where(item => item.EmploymentType == "Employed" && !item.ClassificationMismatch)
+                    .Select(item => Normalise(item.EmployeeNumber))
+                    .Where(value => value.Length > 0)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new SageDispatchState(snapshot.SageRosterAvailable, activeDriverEmployeeNumbers, leave);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -686,6 +692,15 @@ public sealed class DriverDispatchController(
         return text.Contains("southbound", StringComparison.OrdinalIgnoreCase) ||
             text.Split(new char[] {' ', '-', '_', ':', '|'}, StringSplitOptions.RemoveEmptyEntries).Any(token => token.Equals("SB", StringComparison.OrdinalIgnoreCase));
     }
+    private static bool HasCurrentSourceEvidence(Driver driver, SageDispatchState sage)
+    {
+        var employeeNumber = Normalise(driver.EmployeeNumber);
+        if (sage.Available && employeeNumber.Length > 0 && sage.ActiveDriverEmployeeNumbers.Contains(employeeNumber)) return true;
+        return !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
+               driver.LastTachoSyncUtc is DateTimeOffset lastSync &&
+               DateTimeOffset.UtcNow - lastSync <= TimeSpan.FromDays(28);
+    }
+
     private static bool TachoAllowsDispatch(Driver driver, DateOnly planningDate, bool tachoConfigured)
     {
         if (!tachoConfigured || string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)) return false;
