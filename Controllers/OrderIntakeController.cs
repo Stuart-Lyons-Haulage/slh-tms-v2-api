@@ -543,6 +543,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private static bool HasOrderEvidence(MailboxEmailIntakeRequest request)
     {
+        // Replies and status-only updates are retained as mailbox evidence, but must
+        // never manufacture an empty order when the original booking is absent.
+        // A reply may still be staged when it carries a real order document; the
+        // document parser will then decide whether it is a new order or an amendment.
+        if (LooksLikeReplyOnlyUpdate(request)) return false;
+
         var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
             string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
         var supportedAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true && IsSupportedOrderAttachment(item.Name));
@@ -551,8 +557,38 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                                     (request.SenderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
                                     (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
                                     (request.SenderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase);
-        return supportedAttachment ||
-               (trustedCustomerSender && Regex.IsMatch(source, @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b|\b(?:booking|load plan)\b", RegexOptions.IgnoreCase));
+        if (supportedAttachment) return true;
+        if (!trustedCustomerSender) return false;
+
+        var signals = 0;
+        if (Regex.IsMatch(source, @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b", RegexOptions.IgnoreCase)) signals++;
+        if (Regex.IsMatch(source, @"\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b", RegexOptions.IgnoreCase)) signals++;
+        if (Regex.IsMatch(source, @"\b(?:0?[1-9]|[12]\d|3[01])[./-](?:0?[1-9]|1[0-2])(?:[./-](?:20\d{2}|\d{2}))?\b", RegexOptions.IgnoreCase)) signals++;
+        if (Regex.IsMatch(source, @"\b(?:collect|collection|deliver|delivery|depot|transport)\b", RegexOptions.IgnoreCase)) signals++;
+
+        // A body-only booking needs at least two independent order signals, including
+        // a quantity or an explicit reference. Generic words such as “booking” alone
+        // are not sufficient evidence.
+        var hasStrongSignal = Regex.IsMatch(source, @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b", RegexOptions.IgnoreCase);
+        return signals >= 2 && hasStrongSignal;
+    }
+
+    internal static bool LooksLikeReplyOnlyUpdate(MailboxEmailIntakeRequest request)
+    {
+        var subject = request.Subject?.Trim() ?? string.Empty;
+        var source = string.Join("\n", subject, request.BodyText, request.BodyHtml);
+        var hasOperationalAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true);
+        if (hasOperationalAttachment) return false;
+
+        var replySubject = Regex.IsMatch(subject, @"^\s*(?:re|fw|fwd)\s*:", RegexOptions.IgnoreCase);
+        var statusOnlyLanguage = Regex.IsMatch(source,
+            @"\b(?:production|amend(?:ed|ment)?|update|updated|confirmed|confirmation|collected|collection|cancel(?:led|lation)?|delay(?:ed)?|running late|finished|finishing)\b",
+            RegexOptions.IgnoreCase);
+        var explicitOrderData = Regex.IsMatch(source,
+            @"\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b|\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b",
+            RegexOptions.IgnoreCase);
+
+        return (replySubject || statusOnlyLanguage) && !explicitOrderData;
     }
 
     private static bool IsManualOnlySource(MailboxEmailIntakeRequest request)
