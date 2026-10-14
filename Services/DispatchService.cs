@@ -706,7 +706,10 @@ public sealed class DispatchService(
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            // Keep the read path responsive when TachoMaster is slow. This is
+            // only a roster enrichment budget; allocation and lock validation
+            // remain fail-closed in their own server-side checks.
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
             using var gate = new SemaphoreSlim(4, 4);
             var dutyDates = Enumerable.Range(0, through.DayNumber - from.DayNumber + 1)
                 .Select(offset => from.AddDays(offset));
