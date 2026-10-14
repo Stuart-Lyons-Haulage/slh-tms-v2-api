@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/intake-health")]
 [Authorize]
-public sealed class IntakeHealthController(TmsDbContext db) : ControllerBase
+public sealed class IntakeHealthController(TmsDbContext db, InfoMailboxGraphOptions graphOptions, InfoMailboxGraphHealthState graphHealth) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateTimeOffset? fromUtc, CancellationToken ct)
@@ -47,6 +47,16 @@ public sealed class IntakeHealthController(TmsDbContext db) : ControllerBase
             .FirstOrDefaultAsync(ct);
 
         var warnings = new List<string>();
+        var graphNow = DateTimeOffset.UtcNow;
+        if (graphOptions.Enabled)
+        {
+            if (graphHealth.LastAttemptUtc is null)
+                warnings.Add("The Info mailbox poller has not recorded an attempt yet.");
+            else if (graphHealth.LastSuccessUtc is null || graphHealth.LastSuccessUtc.Value < graphNow.AddMinutes(-10))
+                warnings.Add("The Info mailbox poller has not completed successfully in the last 10 minutes.");
+            if (!string.IsNullOrWhiteSpace(graphHealth.LastError))
+                warnings.Add($"The last Info mailbox poll failed during {graphHealth.LastFailureStage ?? "an unknown stage"}: {graphHealth.LastError}");
+        }
         if (evidenceEmails > 0 && orderRecords == 0)
             warnings.Add("Mailbox evidence has been received but no transport orders have been staged in this seven day window.");
         if (failed > 0)
@@ -71,6 +81,16 @@ public sealed class IntakeHealthController(TmsDbContext db) : ControllerBase
             lastEmailReceivedUtc,
             lastOrderStagedUtc,
             lastPromotedUtc,
+            mailboxPoll = new
+            {
+                lastAttemptUtc = graphHealth.LastAttemptUtc,
+                lastSuccessUtc = graphHealth.LastSuccessUtc,
+                inProgress = graphHealth.InProgress,
+                lastMessagesSeen = graphHealth.LastMessagesSeen,
+                lastMessagesIngested = graphHealth.LastMessagesIngested,
+                lastFailureStage = graphHealth.LastFailureStage,
+                lastError = graphHealth.LastError
+            },
             healthy = warnings.Count == 0,
             warnings,
             note = "Evidence emails count messages retained by the TMS intake path over the last seven days by default. Unrelated mail deliberately ignored before evidence retention is not counted here."
