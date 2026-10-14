@@ -22,7 +22,9 @@ public sealed class OperationsControlController(
     SageHrClient sageHr,
     TachoMasterClient tachoMaster,
     DotTrackingOptions tracking,
-    FleetioClient fleetioClient) : ControllerBase
+    FleetioClient fleetioClient,
+    InfoMailboxGraphOptions graphOptions,
+    InfoMailboxGraphHealthState graphHealth) : ControllerBase
 {
     /// <summary>
     /// Integration confidence dashboard — shows whether each integration is
@@ -220,6 +222,10 @@ public sealed class OperationsControlController(
         var vehiclesSeenToday = liveStatuses.Count(s => s.LastEventTimeUtc.Date == now.Date);
 
         var stagingPending = await SafeCount(db.StagedImports.Where(s => s.Status == StagingStatus.PendingReview), ct);
+        var stagingFailed = await SafeCount(db.StagedImports.Where(s => s.Status == StagingStatus.Failed), ct);
+        var mappingExceptions = await SafeCount(db.StagedImports.Where(s => s.Status == StagingStatus.PendingReview && s.PayloadJson.Contains("MappingException")), ct);
+        var allocationRecords = await SafeCount(db.StagedImports.Where(s => s.EntityType == "planningpalletallocation" && s.PayloadJson.Contains(planningDate.ToString("yyyy-MM-dd"))), ct);
+        var auditOutboxPending = await SafeCount(db.AuditOutboxes.Where(s => s.ProcessedAt == null && s.FailedAt == null), ct);
 
         return Ok(new
         {
@@ -254,6 +260,23 @@ public sealed class OperationsControlController(
             staging = new
             {
                 pendingReview = stagingPending,
+                failed = stagingFailed,
+                mappingExceptions,
+                allocationRecords,
+            }
+            ,audit = new
+            {
+                pendingOutbox = auditOutboxPending,
+                mailboxPoll = graphOptions.Enabled ? new
+                {
+                    lastAttemptUtc = graphHealth.LastAttemptUtc,
+                    lastSuccessUtc = graphHealth.LastSuccessUtc,
+                    inProgress = graphHealth.InProgress,
+                    lastMessagesSeen = graphHealth.LastMessagesSeen,
+                    lastMessagesIngested = graphHealth.LastMessagesIngested,
+                    lastFailureStage = graphHealth.LastFailureStage,
+                    lastError = graphHealth.LastError
+                } : null
             }
         });
     }
