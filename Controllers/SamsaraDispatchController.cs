@@ -867,8 +867,7 @@ public sealed class SamsaraDispatchController(
                 using var addressGate = new SemaphoreSlim(4, 4);
                 var sitesToSync = physicalStops
                     .Where(item => item.Representative.SiteId is not null &&
-                                   item.Representative.Latitude is not null &&
-                                   item.Representative.Longitude is not null &&
+                                   !string.IsNullOrWhiteSpace(item.Representative.Address) &&
                                    !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
                     .GroupBy(item => item.Representative.SiteId!.Value)
                     .Select(group => group.First())
@@ -886,8 +885,8 @@ public sealed class SamsaraDispatchController(
                                 site.ExternalCode,
                                 site.DriverTextName ?? site.Name,
                                 item.Representative.Address!,
-                                item.Representative.Latitude!.Value,
-                                item.Representative.Longitude!.Value,
+                                item.Representative.Latitude,
+                                item.Representative.Longitude,
                                 site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
                             ct);
                         return new AddressSyncResult(site.Id, result.AddressId);
@@ -949,18 +948,22 @@ public sealed class SamsaraDispatchController(
                     missingSchedule.Add(physicalStopName);
                     continue;
                 }
-                if (representative.Latitude is null || representative.Longitude is null)
-                {
-                    missingLocations.Add(physicalStopName);
-                    continue;
-                }
-
                 string? samsaraAddressId = null;
                 if (samsara.AddressSyncEnabled && representative.SiteId is Guid siteId)
                 {
                     samsaraAddressBySiteId.TryGetValue(siteId, out samsaraAddressId);
                     if (addressFallbackBySiteId.Contains(siteId))
                         addressFallbacks.Add(physicalStopName);
+                }
+
+                // Samsara accepts a reusable Address ID without local coordinates;
+                // its Addresses API geocodes the physical address. Coordinates are
+                // only required when we must fall back to an inline single-use stop.
+                if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
+                    (representative.Latitude is null || representative.Longitude is null))
+                {
+                    missingLocations.Add(physicalStopName);
+                    continue;
                 }
 
                 var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
@@ -984,8 +987,8 @@ public sealed class SamsaraDispatchController(
                     physicalStopName,
                     samsaraAddressId,
                     representative.Address ?? CleanStopName(stop.Name),
-                    representative.Latitude.Value,
-                    representative.Longitude.Value,
+                    representative.Latitude,
+                    representative.Longitude,
                     representativeSite is not null
                         ? representativeSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters
                         : samsara.StopRadiusMeters,
@@ -997,7 +1000,7 @@ public sealed class SamsaraDispatchController(
             if (missingLocations.Count > 0)
                 return BadRequest(new
                 {
-                    message = $"Samsara needs coordinates for every route stop. Complete Site Master/geofence mapping for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    message = $"Samsara needs a physical address or coordinates for every route stop. Complete the Site Master address for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
                     missingStops = missingLocations
                 });
 
