@@ -231,6 +231,18 @@ public sealed class IntegrationSyncCoordinator(
             updated++;
         }
         var now = DateTimeOffset.UtcNow;
+        var currentSageNumbers = candidates
+            .Select(employee => ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var staleSourceCutoff = now.AddDays(-28);
+        var staleArchived = await db.Drivers
+            .Where(driver => driver.Active &&
+                             !currentSageNumbers.Contains(driver.EmployeeNumber) &&
+                             (driver.LastTachoSyncUtc == null || driver.LastTachoSyncUtc < staleSourceCutoff))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(driver => driver.Active, false), ct);
+        if (staleArchived > 0)
+            logger.LogInformation("Sage HR sync archived {StaleDriverCount} Driver Master records with no Sage or TachoMaster evidence in the last 28 days.", staleArchived);
+
         var activeDriverEmployeeNumbers = candidates
             .Select(employee => ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -273,7 +285,7 @@ public sealed class IntegrationSyncCoordinator(
         }
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return new("Sage HR", true, now, $"Sage HR enriched {updated} existing driver record(s); {skipped} Sage candidate(s) were not allowed to create Driver Master rows.", updated);
+        return new("Sage HR", true, now, $"Sage HR enriched {updated} existing driver record(s), archived {staleArchived} stale record(s) with no Sage/TachoMaster evidence in 28 days; {skipped} Sage candidate(s) were not allowed to create Driver Master rows.", updated + staleArchived);
     }
 
     public async Task<IntegrationSyncResult> SyncFleetioAsync(string actor, CancellationToken ct)
