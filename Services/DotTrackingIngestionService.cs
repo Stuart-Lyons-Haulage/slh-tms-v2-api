@@ -36,21 +36,9 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 await store.PersistAsync(records, stoppingToken, markAsLiveReceipt: true);
                 await TryRepairProviderVehicleMappingsAsync(db, records.Select(record => record.VehicleIdentifier), "current", stoppingToken);
 
-                // Live ENTER/EXIT detection is authoritative from the active SQL SiteGeofences
-                // maintained through Site Master. The embedded payload remains a resilience-only
-                // fallback when no active SQL geofence catalogue exists.
-                try
-                {
-                    await GeofenceRunProgression.ProcessTelemetryAsync(db, records, stoppingToken);
-                }
-                catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
-                {
-                    db.ChangeTracker.Clear();
-                    logger.LogWarning(exception, "Site Master geofence hit processing failed for current RoadTech telemetry; tracking ingestion will continue.");
-                }
-
-                // RoadTech retains historical journeys. Do not fetch or replay them into SQL;
-                // current polls above create only operational enter/exit events.
+                // Samsara owns live route progress and geofence execution. The TMS stores
+                // RoadTech telemetry for resilience, but never turns it into site visits or
+                // uses a geofence to advance a run.
             }
             catch (InvalidOperationException exception) { logger.LogDebug(exception, "DOT tracking ingestion is not configured."); }
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }

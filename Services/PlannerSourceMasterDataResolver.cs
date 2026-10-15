@@ -116,6 +116,16 @@ public sealed class PlannerSourceMasterDataResolver
             linkedGeofence is not null);
     }
 
+    /// <summary>Returns only coordinates stored against the matched Site Master row.</summary>
+    public (decimal Longitude, decimal Latitude)? ResolveSiteMasterCoordinates(string? sourceLabel)
+    {
+        if (string.IsNullOrWhiteSpace(sourceLabel)) return null;
+        var site = MatchSite(sourceLabel);
+        return site?.Latitude is decimal latitude && site.Longitude is decimal longitude
+            ? (longitude, latitude)
+            : null;
+    }
+
     /// <summary>
     /// Returns a canonical Site Master decision for a planned stop versus a physical
     /// embedded geofence. True/false is authoritative when both sides resolve to Site

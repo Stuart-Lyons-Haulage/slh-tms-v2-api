@@ -31,9 +31,9 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
         var pendingReview = await PendingOrdersForDate(day, ct);
         var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.TryGetValue(id, out var vehicle) && IsVor(vehicle));
         var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.TryGetValue(id, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName));
-        var geofenceGaps = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
+        var stopCoordinateGaps = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
-        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingReview.Count == 0;
+        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && stopCoordinateGaps == 0 && pendingReview.Count == 0;
 
         PlanLockInfo? planLock = null;
         try { planLock = await PlanLockStore.GetAsync(db, day, ct); }
@@ -57,7 +57,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
             missingAllocations,
             vorConflicts,
             tachoConcerns,
-            geofenceGaps,
+            stopCoordinateGaps,
             unreviewedOrders = pendingReview.Count,
             planLock
         });
@@ -121,13 +121,24 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
                 items.Add(Item(load, "Medium", "TachoMapping", $"Driver missing Tacho mapping: {driver.DisplayName}", "Tacho-aware planning cannot be fully validated."));
         }
 
-        // Needs Attention is an operational queue. A missing latitude/longitude is a mapping
-        // diagnostic, not proof that the route cannot be geofenced. Use the same Site Master
-        // and geofence resolver as the wallboards so this queue reflects actual geofence gaps.
-        try
+        // Needs Attention is an operational queue. Samsara owns geofence/progression
+        // behaviour; the TMS only flags missing physical Site Master coordinates.
+        foreach (var load in loads.Where(load => load.Stops.Count > 0))
         {
-            var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
-            foreach (var load in loads.Where(load => load.Stops.Count > 0))
+            var gaps = OperationalStopOrdering.Order(load.Stops)
+                .Select((stop, index) => new { Stop = stop, Sequence = index + 1 })
+                .Where(item => item.Stop.Latitude is null || item.Stop.Longitude is null || string.IsNullOrWhiteSpace(item.Stop.Address))
+                .ToList();
+            if (gaps.Count == 0) continue;
+            var examples = string.Join(", ", gaps.Take(3).Select(item => $"{item.Sequence}. {item.Stop.Name}"));
+            if (gaps.Count > 3) examples += $" + {gaps.Count - 3} more";
+            items.Add(Item(load, "Medium", "SiteLocationData",
+                $"Run has {gaps.Count} stop{(gaps.Count == 1 ? "" : "s")} without complete Site Master location data",
+                $"Correct the physical address and latitude/longitude in Site Master. {examples}."));
+        }
+
+        /* Legacy geofence diagnostics intentionally no longer participate in readiness.
+        try
             {
                 var gaps = OperationalStopOrdering.Order(load.Stops)
                     .Select((stop, index) => new { Stop = stop, Sequence = index + 1, Resolution = resolver.Resolve(stop.Name) })
@@ -155,30 +166,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
             logger.LogDebug(ex, "Geofence linkage attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
             db.ChangeTracker.Clear();
         }
-
-        try
-        {
-            var loadIds = loads.Select(x => x.Id).ToList();
-            if (loadIds.Count > 0)
-            {
-                var visits = await db.GeofenceVisits.AsNoTracking()
-                    .Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value) && (x.Status == "SiteDelay" || x.Status == "PassThrough"))
-                    .OrderByDescending(x => x.UpdatedAtUtc).Take(100).ToListAsync(ct);
-                foreach (var visit in visits)
-                {
-                    var load = loads.FirstOrDefault(x => x.Id == visit.LoadId);
-                    if (load is null) continue;
-                    items.Add(Item(load, visit.Status == "SiteDelay" ? "High" : "Medium", visit.Status,
-                        visit.Status == "SiteDelay" ? "Site dwell exceeded limit" : "Possible missed/short site visit",
-                        visit.StatusReason ?? $"Dwell {visit.DwellMinutes} min"));
-                }
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogDebug(ex, "Geofence attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
-            db.ChangeTracker.Clear();
-        }
+        */
 
         return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, source, count = items.Count, items });
     }

@@ -653,7 +653,7 @@ public sealed class SamsaraDispatchController(
             var stop = orderedStops[index];
             var resolved = ResolveLocation(stop, sites);
             if (resolved.Latitude is null || resolved.Longitude is null)
-                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Complete Site Master/geofence mapping for {stop.Name}." });
+                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Correct the physical address and latitude/longitude in Site Master for {stop.Name}." });
 
             orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
             var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
