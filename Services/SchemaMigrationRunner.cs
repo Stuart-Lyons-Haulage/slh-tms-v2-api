@@ -242,7 +242,8 @@ public static class SchemaMigrationRunner
         "086_Driver_Availability_Windows.sql",
         "087_TachoMaster_Shared_Snapshot.sql",
         "088_Driver_Availability_Snapshots.sql",
-        "089_Planning_Query_Index_Refinements.sql"
+        "089_Planning_Query_Index_Refinements.sql",
+        "090_Transport_Order_SharePoint_Archive.sql"
     ];
 
     internal const string HistoryTableSql = """
