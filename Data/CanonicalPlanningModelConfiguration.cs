@@ -57,7 +57,9 @@ internal static class CanonicalPlanningModelConfiguration
             entity.HasIndex(x => new { x.RunId, x.OrderId })
                 .IsUnique()
                 .HasDatabaseName("UX_RunOrderAllocations_RunId_OrderId");
-            entity.HasIndex(x => x.OrderId).HasDatabaseName("IX_RunOrderAllocations_OrderId");
+            entity.HasIndex(x => x.OrderId)
+                .HasDatabaseName("IX_RunOrderAllocations_OrderId")
+                .IncludeProperties(x => new { x.RunId, x.Pallets, x.Trolleys, x.Trays, x.CapacityUnits });
             entity.HasIndex(x => x.SourceRevisionId).HasDatabaseName("IX_RunOrderAllocations_SourceRevisionId");
             entity.HasOne(x => x.Run)
                 .WithMany(x => x.OrderAllocations)
