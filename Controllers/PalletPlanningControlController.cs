@@ -308,8 +308,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         await EnsureOrderOnRun(load, order, detail, ct);
         var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
 
-        var allLatest = await ReadLatestAllocations(request.Date, ct);
-        var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
+        // Keep the in-memory snapshot in sync with the save instead of querying it again.
+        latest[(request.OrderId, request.LoadId, request.SourceLineId)] = payload;
+        var totalPlanned = latest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
         var ordered = sourceLines.Count > 0 ? sourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0)) : EffectiveOrderedPallets(order, detail);
         return Ok(new
         {
