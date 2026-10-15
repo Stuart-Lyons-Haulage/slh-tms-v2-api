@@ -487,19 +487,19 @@ public sealed class SpecialistMailboxOrderParser
                 var collection = CleanDropName(prose.Groups["from"].Value);
                 var destination = CleanDropName(prose.Groups["to"].Value);
                 var reference = StableEmailReference(request.MessageId);
-                var warnings = new List<string>
+                var proseWarnings = new List<string>
                 {
                     "IFCO prose notice parsed; confirm empty-crate/tray equipment type before approval."
                 };
                 var keys = BuildIfcoMatchKeys(date, reference, null, null, collection, destination);
                 var payload = BuildIfcoPayload(request, BuildReference(reference, destination), reference, null, null,
-                    date, date, proseQuantity, collection, destination, "Prose IFCO/OCADO collection notice.", warnings, keys);
+                    date, date, proseQuantity, collection, destination, "Prose IFCO/OCADO collection notice.", proseWarnings, keys);
                 var mutable = JsonNode.Parse(payload.GetRawText())!.AsObject();
                 mutable["equipmentType"] = body.Contains("crate", StringComparison.OrdinalIgnoreCase) ? "IFCO empty crates" : "IFCO trays";
                 mutable["intakeParser"] = "IFCO prose route";
                 mutable["intakeNaturalKey"] = NaturalKey(request, "IFCO", destination, date, reference);
                 return new EmailIntakeParseResult(
-                    [new ParsedEmailOrder("ifco-prose-route", NaturalKey(request, "IFCO", destination, date, reference), JsonSerializer.SerializeToElement(mutable), warnings)],
+                    [new ParsedEmailOrder("ifco-prose-route", NaturalKey(request, "IFCO", destination, date, reference), JsonSerializer.SerializeToElement(mutable), proseWarnings)],
                     [], null);
             }
         }
