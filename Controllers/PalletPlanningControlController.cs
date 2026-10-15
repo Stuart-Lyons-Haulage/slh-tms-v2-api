@@ -246,6 +246,196 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         return Ok(new { date = request.Date, allocationCount = results.Count, allocations = results });
     }
 
+    [HttpPost("allocations/bulk")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> AllocateBulk([FromBody] PalletAllocationRequest[]? requests, CancellationToken ct)
+    {
+        if (requests is null || requests.Length == 0)
+            return BadRequest(new { message = "At least one allocation is required." });
+        if (requests.Length > 100)
+            return BadRequest(new { message = "A maximum of 100 allocations can be saved in one bulk request." });
+
+        var date = requests[0].Date;
+        if (requests.Any(x => x.Date != date))
+            return BadRequest(new { message = "All allocations in a bulk request must use the same planning date." });
+        if (requests.Any(x => x.Pallets < 0))
+            return BadRequest(new { message = "Allocated load units cannot be negative." });
+        if (requests.GroupBy(x => (x.OrderId, x.LoadId, x.SourceLineId)).Any(group => group.Count() > 1))
+            return BadRequest(new { message = "A bulk request cannot contain the same order, run and source line more than once." });
+
+        var orders = await ReadOrders(date, ct);
+        var ordersById = orders.ToDictionary(x => x.Id);
+        foreach (var request in requests)
+            if (!ordersById.ContainsKey(request.OrderId))
+                return NotFound(new { message = "The order could not be found for this planning date.", orderId = request.OrderId });
+
+        var loads = await ReadLoads(date, ct);
+        var loadsById = loads.ToDictionary(x => x.Id);
+        foreach (var request in requests)
+        {
+            if (!loadsById.TryGetValue(request.LoadId, out var load))
+                return NotFound(new { message = "The selected run could not be found for this planning date.", loadId = request.LoadId });
+            if (load.Status == LoadStatus.Cancelled)
+                return BadRequest(new { message = "Load units cannot be allocated to a cancelled run.", loadId = request.LoadId });
+        }
+
+        var latest = await ReadLatestAllocations(date, ct);
+        var originalLatest = new Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>(latest);
+        var detailMap = await ReadOrderDetails(date, ct);
+        var requestedOrders = requests.Select(x => ordersById[x.OrderId]).DistinctBy(x => x.Id).ToList();
+        var sourceLineMap = await ReadCurrentSourceLines(requestedOrders, ct);
+        var prepared = new List<(PalletAllocationRequest Request, TransportOrder Order, Load Load, OrderDetail? Detail, List<OrderSourceLine> SourceLines, AllocationState Payload, string AllocationKey, int PreviousPallets, int Permitted)>();
+
+        // Validate the complete request before tracking any writes. Mutating the
+        // snapshot as we go also accounts for earlier entries in this same bulk
+        // request when checking an order split over several runs.
+        foreach (var request in requests)
+        {
+            var order = ordersById[request.OrderId];
+            var load = loadsById[request.LoadId];
+            detailMap.TryGetValue(Normalise(order.Reference), out var detail);
+            sourceLineMap.TryGetValue(order.Id, out var sourceLines);
+            sourceLines ??= [];
+
+            var permitted = request.SourceLineId is Guid sourceLineId
+                ? sourceLines.SingleOrDefault(x => x.Id == sourceLineId)?.Pallets
+                : sourceLines.Count > 0
+                    ? sourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0))
+                    : EffectiveOrderedPallets(order, detail);
+            if (permitted is null)
+                return BadRequest(new { message = "The selected source line could not be found for this order.", orderId = request.OrderId, sourceLineId = request.SourceLineId });
+
+            var key = (request.OrderId, request.LoadId, request.SourceLineId);
+            originalLatest.TryGetValue(key, out var previous);
+            var previousPallets = previous?.Pallets ?? 0;
+
+            var now = DateTimeOffset.UtcNow;
+            var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, date, now, User.Identity?.Name, request.SourceLineId);
+            var allocationKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
+                ? $"palletallocation:{Guid.NewGuid():N}"
+                : $"palletallocation:{request.IdempotencyKey.Trim()}";
+            if (allocationKey.Length > 200) allocationKey = allocationKey[..200];
+
+            prepared.Add((request, order, load, detail, sourceLines, payload, allocationKey, previousPallets, permitted.Value));
+            latest[key] = payload;
+        }
+
+        // Evaluate the final bulk state, rather than transient intermediate states.
+        // This allows a quantity to move between runs in one request without the
+        // temporary old allocation making the new allocation look like an overage.
+        foreach (var item in prepared)
+        {
+            var allocatedElsewhere = latest.Values
+                .Where(x => x.OrderId == item.Order.Id && x.LoadId != item.Request.LoadId &&
+                    (item.Request.SourceLineId is null || x.SourceLineId is null || x.SourceLineId == item.Request.SourceLineId))
+                .Sum(x => Math.Max(x.Pallets, 0));
+            if (allocatedElsewhere + item.Request.Pallets > item.Permitted)
+                return Conflict(new
+                {
+                    message = "Allocation exceeds the approved load-unit quantity.",
+                    orderId = item.Request.OrderId,
+                    loadId = item.Request.LoadId,
+                    approvedPallets = item.Permitted,
+                    allocatedElsewhere,
+                    requestedPallets = item.Request.Pallets
+                });
+        }
+
+        if (prepared.Select(x => x.AllocationKey).Distinct(StringComparer.Ordinal).Count() != prepared.Count)
+            return BadRequest(new { message = "Each allocation in a bulk request must have a unique idempotency key." });
+
+        var allocationKeys = prepared.Select(x => x.AllocationKey).ToArray();
+        var recordedKeys = await db.StagedImports.AsNoTracking()
+            .Where(x => x.EntityType == AllocationType && allocationKeys.Contains(x.IdempotencyKey))
+            .Select(x => x.IdempotencyKey)
+            .ToHashSetAsync(ct);
+        var newImports = prepared
+            .Where(x => !recordedKeys.Contains(x.AllocationKey))
+            .Select(x => new StagedImport
+            {
+                EntityType = AllocationType,
+                IdempotencyKey = x.AllocationKey,
+                PayloadJson = JsonSerializer.Serialize(x.Payload, JsonOptions),
+                Source = "Pallet planning control",
+                Status = StagingStatus.Promoted,
+                ReviewedAtUtc = x.Payload.UpdatedAtUtc,
+                ReviewedBy = User.Identity?.Name,
+                ReviewNote = $"Run load-unit allocation changed from {x.PreviousPallets} to {x.Request.Pallets}. {x.Request.Note}".Trim()
+            })
+            .ToList();
+
+        var supportsTransactions = !string.Equals(db.Database.ProviderName, "Microsoft.EntityFrameworkCore.InMemory", StringComparison.Ordinal);
+        await using var transaction = supportsTransactions ? await db.Database.BeginTransactionAsync(ct) : null;
+        try
+        {
+            if (newImports.Count > 0)
+            {
+                db.StagedImports.AddRange(newImports);
+                // One database save for all allocation ledger rows in this request.
+                await db.SaveChangesAsync(ct);
+            }
+            db.ChangeTracker.Clear();
+
+            // Add each missing order to its run once, then recalculate capacity once
+            // per affected run instead of repeating that expensive work per row.
+            foreach (var item in prepared
+                .GroupBy(x => (x.Request.LoadId, x.Request.OrderId))
+                .Select(group => group.First()))
+            {
+                await EnsureOrderOnRun(item.Load, item.Order, item.Detail, ct);
+            }
+
+            var capacities = new Dictionary<Guid, PalletCapacityResult?>();
+            foreach (var loadId in prepared.Select(x => x.Request.LoadId).Distinct())
+                capacities[loadId] = await UpdateRunPalletTotal(loadId, date, ct);
+
+            var results = prepared.Select(item =>
+            {
+                var totalPlanned = latest.Values
+                    .Where(x => x.OrderId == item.Order.Id)
+                    .Sum(x => Math.Max(x.Pallets, 0));
+                var ordered = item.SourceLines.Count > 0
+                    ? item.SourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0))
+                    : EffectiveOrderedPallets(item.Order, item.Detail);
+                capacities.TryGetValue(item.Request.LoadId, out var capacity);
+
+                return new
+                {
+                    orderId = item.Order.Id,
+                    orderReference = item.Order.Reference,
+                    sourceLineId = item.Request.SourceLineId,
+                    loadId = item.Load.Id,
+                    loadReference = item.Load.Reference,
+                    allocatedToRun = item.Request.Pallets,
+                    plannedPallets = totalPlanned,
+                    orderedPallets = ordered,
+                    outstandingPallets = Math.Max(ordered - totalPlanned, 0),
+                    overplannedPallets = Math.Max(totalPlanned - ordered, 0),
+                    runCapacityStatus = capacity?.Status,
+                    runUtilisationPercent = capacity?.UtilisationPercent,
+                    standardPallets = capacity?.StandardPallets,
+                    euroPallets = capacity?.EuroPallets,
+                    standardCapacity = capacity?.StandardCapacity,
+                    euroCapacity = capacity?.EuroCapacity,
+                    runCapacityMessage = capacity?.Message,
+                    trolleyUtilisationPercent = capacity?.TrolleyUtilisationPercent,
+                    trolleyPositionsRemaining = capacity?.TrolleyPositionsRemaining,
+                    updatedAtUtc = item.Payload.UpdatedAtUtc
+                };
+            }).ToArray();
+
+            if (transaction is not null) await transaction.CommitAsync(ct);
+            return Ok(results);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            if (transaction is not null) await transaction.RollbackAsync(ct);
+            logger.LogError(ex, "Bulk pallet allocation failed for planning date {PlanningDate} and {AllocationCount} allocations.", date, requests.Length);
+            return Problem(title: "Bulk allocation could not be saved.", statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+
     [HttpPost("allocations")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Allocate([FromBody] PalletAllocationRequest request, CancellationToken ct)
