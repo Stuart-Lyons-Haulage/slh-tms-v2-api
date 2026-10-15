@@ -27,12 +27,23 @@ public sealed class SharePointOrderRetentionBackgroundService(
         await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await ArchiveExpiredEvidenceAsync(stoppingToken); }
+            try
+            {
+                await ArchiveExpiredEvidenceAsync(stoppingToken);
+                await ArchiveCompletedOrdersAsync(stoppingToken);
+            }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-            catch (Exception ex) { logger.LogError(ex, "SharePoint order attachment retention pass failed; expired evidence will be retried."); }
+            catch (Exception ex) { logger.LogError(ex, "SharePoint retention pass failed; eligible records will be retried."); }
 
             await Task.Delay(PollInterval, stoppingToken);
         }
+    }
+
+    private async Task ArchiveCompletedOrdersAsync(CancellationToken ct)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var archive = scope.ServiceProvider.GetRequiredService<SharePointOrderArchiveService>();
+        await archive.ArchiveOrdersOlderThan72Hours(ct);
     }
 
     private async Task ArchiveExpiredEvidenceAsync(CancellationToken ct)
