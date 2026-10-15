@@ -400,7 +400,10 @@ public sealed class TachoDriverMasterSyncService(
     public async Task<TachoDriverMasterQuality> QualityAsync(CancellationToken ct)
     {
         var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
-        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        // Health is reporting the canonical Driver Master rows. Do not hydrate
+        // every active driver from the historical master-detail snapshots here:
+        // that bounded-but-large JSON read made the anonymous health probe time
+        // out in production and does not change any of the quality counts below.
         var duplicateMembers = DuplicateIdentities(drivers, driver => driver.TachoMasterDriverId);
         var duplicateCards = DuplicateIdentities(drivers, driver => driver.TachoCardNumber);
         var memberGroups = duplicateMembers.Count;
