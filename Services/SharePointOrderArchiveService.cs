@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -46,6 +47,93 @@ public sealed class SharePointOrderArchiveService(
     /// Archives source attachments once their 72-hour SQL retention window has elapsed.
     /// The evidence row is only trimmed after every customer archive upload succeeds.
     /// </summary>
+    /// <summary>Archives delivered orders whose completion time is more than 72 hours old.</summary>
+    public async Task<SharePointOrderArchiveSummary> ArchiveOrdersOlderThan72Hours(CancellationToken ct)
+    {
+        if (!options.IsConfigured)
+        {
+            logger.LogInformation("SharePoint order archive is disabled or not configured.");
+            return new SharePointOrderArchiveSummary(0, 0, true);
+        }
+
+        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromHours(72);
+        var orders = await db.TransportOrders
+            .Where(order => order.Status == OrderStatus.Delivered &&
+                order.CompletedAtUtc != null && order.CompletedAtUtc <= cutoff && order.ArchivedAtUtc == null)
+            .OrderBy(order => order.CompletedAtUtc)
+            .Take(100)
+            .ToListAsync(ct);
+
+        var succeeded = 0;
+        var failed = 0;
+        foreach (var order in orders)
+        {
+            if (ct.IsCancellationRequested) break;
+            try
+            {
+                var client = await CreateGraphClientAsync(ct);
+                var driveId = await ResolveDriveIdAsync(client, ct);
+                var year = (order.CompletedAtUtc ?? order.CreatedAtUtc).UtcDateTime.ToString("yyyy", CultureInfo.InvariantCulture);
+                var month = (order.CompletedAtUtc ?? order.CreatedAtUtc).UtcDateTime.ToString("MM", CultureInfo.InvariantCulture);
+                var folder = await EnsureFolderAsync(client, driveId, [options.ArchiveRoot, year, month], ct);
+                var uploaded = await UploadOrderToSharePoint(client, driveId, folder.Id, order, ct);
+                order.ArchivedAtUtc = DateTimeOffset.UtcNow;
+                order.ArchiveLocation = uploaded.WebUrl ?? $"{options.ArchiveRoot}/{year}/{month}/Order-{SafeFileName(order.Reference)}.json";
+                await db.SaveChangesAsync(ct);
+                succeeded++;
+                logger.LogInformation("Archived order {OrderId} ({Reference}) to SharePoint at {ArchiveLocation}.", order.Id, order.Reference, order.ArchiveLocation);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch (Exception ex)
+            {
+                failed++;
+                db.Entry(order).State = EntityState.Detached;
+                logger.LogError(ex, "SharePoint archive failed for delivered order {OrderId} ({Reference}); it remains in SQL for retry.", order.Id, order.Reference);
+            }
+        }
+
+        logger.LogInformation("SharePoint order archive pass completed. Candidates {Candidates}, succeeded {Succeeded}, failed {Failed}.", orders.Count, succeeded, failed);
+        return new SharePointOrderArchiveSummary(succeeded, failed, false);
+    }
+
+    /// <summary>Serialises and uploads one order manifest after its target folder exists.</summary>
+    public async Task<DriveItem> UploadOrderToSharePoint(HttpClient client, string driveId, string folderId, TransportOrder order, CancellationToken ct)
+    {
+        var stops = await db.LoadStops.AsNoTracking()
+            .Where(stop => stop.OrderId == order.Id)
+            .OrderBy(stop => stop.Sequence)
+            .Select(stop => new { stop.Sequence, stop.Name, stop.Address, stop.Latitude, stop.Longitude })
+            .ToListAsync(ct);
+        var payload = new
+        {
+            order.Id,
+            order.Reference,
+            order.CustomerCode,
+            order.CollectionDate,
+            order.DeliveryDate,
+            order.CompletedAtUtc,
+            order.TotalValue,
+            order.ItemCount,
+            order.Pallets,
+            order.Status,
+            order.CreatedAtUtc,
+            Stops = stops
+        };
+        var json = JsonSerializer.Serialize(payload, JsonOptionsIndented);
+        var fileName = $"Order-{SafeFileName(order.Reference)}.json";
+        logger.LogDebug("Uploading order {OrderId} archive {FileName} to SharePoint.", order.Id, fileName);
+        return await UploadAsync(client, driveId, folderId, fileName, Encoding.UTF8.GetBytes(json), "application/json", ct);
+    }
+
+    /// <summary>Creates each folder segment and returns the final folder.</summary>
+    public async Task<DriveItem> EnsureSharePointFolder(HttpClient client, string driveId, string path, CancellationToken ct)
+    {
+        var segments = path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return await EnsureFolderAsync(client, driveId, segments, ct);
+    }
+
+    private static readonly JsonSerializerOptions JsonOptionsIndented = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+
     public async Task<bool> ArchiveExpiredEvidenceAsync(StagedImport evidence, CancellationToken ct)
     {
         if (!options.IsConfigured || !options.RemoveAttachmentPayloadAfterVerifiedExport ||
@@ -354,8 +442,9 @@ public sealed class SharePointOrderArchiveService(
         return SafeSegment(string.IsNullOrWhiteSpace(domain) ? "unknown-sender" : domain);
     }
 
-    private sealed record ArchiveAttachment(string Name, string ContentType, string? ContentBase64);
-    private sealed record DriveItem(string Id, string? WebUrl);
+    public sealed record SharePointOrderArchiveSummary(int Succeeded, int Failed, bool Disabled);
+    public sealed record ArchiveAttachment(string Name, string ContentType, string? ContentBase64);
+    public sealed record DriveItem(string Id, string? WebUrl);
     private sealed record ArchiveResult(bool Success, string? Error, string? ArchiveUrl, string? CustomerFolder, int AttachmentCount)
     {
         public static ArchiveResult Completed(string? url, string customer, int count) => new(true, null, url, customer, count);
