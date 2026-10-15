@@ -11,6 +11,21 @@ public sealed class EmailOrderIntakeServiceTests
     private readonly EmailOrderIntakeService service = new();
 
     [Fact]
+    public void LabelledBody_ParsesDottedCollectionDate()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "ifco-dotted-date", null, "info@lyonshaulage.com", "admin@vitacress.com", "Vitacress",
+            "IFCO OCADO TRAYS/COLLECTION-DELIVERY", DateTimeOffset.Parse("2026-10-15T10:15:00Z"),
+            "Could you please collect 16 pallets of empty IFCO crates from Bracknell and deliver back to Vitacress Runcton. Collection date : 16.10.2026",
+            null, null, []));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("2026-10-16", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-10-16", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal(16, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void EwaLangmeadAldiXlsm_IsParsedIntoLangmeadReviewOrders()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "29.09.2026.xlsm");

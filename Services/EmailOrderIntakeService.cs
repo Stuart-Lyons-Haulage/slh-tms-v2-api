@@ -513,12 +513,14 @@ public sealed class EmailOrderIntakeService
                              || !string.IsNullOrWhiteSpace(deliveryAddress);
         if (!hasStrongLabel) return null;
 
+        // Do not stop at a period before the date. Several verified suppliers use
+        // dd.MM.yyyy, and the old [^.] prefix truncated the date before extraction.
         var collectionDate = ExtractDate(explicitCollection ?? string.Empty, receivedAt)
-                             ?? ExtractDateAfter(body, @"collection[^.\r\n]*?")
-                             ?? ExtractDateAfter(body, @"collect[^.\r\n]*?");
+                             ?? ExtractDateAfter(body, @"collection[^0-9\r\n]*")
+                             ?? ExtractDateAfter(body, @"collect[^0-9\r\n]*");
         var deliveryDate = ExtractDate(explicitDeliveryDate ?? string.Empty, receivedAt)
-                           ?? ExtractDateAfter(body, @"depot\s+date[^.\r\n]*?")
-                           ?? ExtractDateAfter(body, @"delivery\s+date[^.\r\n]*?")
+                           ?? ExtractDateAfter(body, @"depot\s+date[^0-9\r\n]*")
+                           ?? ExtractDateAfter(body, @"delivery\s+date[^0-9\r\n]*")
                            ?? ExtractDate(request.Subject ?? string.Empty, receivedAt);
         if (collectionDate is null && deliveryDate is null) return null;
 

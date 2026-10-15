@@ -925,7 +925,20 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                                   Regex.IsMatch(body, @"(?im)^\s*Pallets?\s*[:=-]?\s*\d+\b") &&
                                   Regex.IsMatch(body, @"(?im)^\s*Ad(?:d)?ress\s+of\s+delivery\s*[:=-].+");
 
-        return barfootsWaitroseWave || summerBerryCoop || summerBerrySpinneys;
+        // IFCO crate returns can arrive as a plain email with no structured
+        // attachment. Keep this lane specific: an IFCO collection date, an explicit
+        // pallet count, and both route endpoints must be present in the body.
+        var ifcoCollectionBody = Regex.IsMatch(string.Join("\n", subject, body), @"\bIFCO\b", RegexOptions.IgnoreCase) &&
+                                 Regex.IsMatch(body, @"\bcollect\s+\d{1,3}\s+pallets?\b", RegexOptions.IgnoreCase) &&
+                                 Regex.IsMatch(body, @"\bcollection\s+date\s*[:=-]?\s*\d{1,2}[./-]\d{1,2}[./-](?:20\d{2}|\d{2})\b", RegexOptions.IgnoreCase) &&
+                                 Regex.IsMatch(body, @"\bfrom\s+.+?\s+and\s+deliver\s+(?:back\s+)?to\s+.+", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+        var barfootsSingleCollection = sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) &&
+                                       Regex.IsMatch(subject, @"\bcollection\b", RegexOptions.IgnoreCase) &&
+                                       Regex.IsMatch(string.Join("\n", subject, body), @"\b\d{1,3}\s*(?:pallets?|plts?)\b", RegexOptions.IgnoreCase) &&
+                                       Regex.IsMatch(string.Join("\n", subject, body), @"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b", RegexOptions.IgnoreCase);
+
+        return barfootsWaitroseWave || summerBerryCoop || summerBerrySpinneys || ifcoCollectionBody || barfootsSingleCollection;
     }
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)

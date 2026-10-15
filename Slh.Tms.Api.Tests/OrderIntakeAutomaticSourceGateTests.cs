@@ -33,6 +33,16 @@ public sealed class OrderIntakeAutomaticSourceGateTests
     }
 
     [Fact]
+    public void ExplicitIfcoPalletCollectionWithDottedDateIsVerified()
+    {
+        var request = Request("IFCO OCADO TRAYS/COLLECTION-DELIVERY",
+            "Could you please collect 16 pallets of empty IFCO crates from Bracknell and deliver back to Vitacress Runcton. Collection date : 16.10.2026.");
+
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsVerifiedRetainedBodyFormat(request));
+    }
+
+    [Fact]
     public void LangmeadCoopBookingWithProformaAttachmentIsApproved()
     {
         var request = new MailboxEmailIntakeRequest(
