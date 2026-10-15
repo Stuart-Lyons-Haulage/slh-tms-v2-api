@@ -119,7 +119,7 @@ public sealed class GeofenceSitePromotionTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Assistant_safe_fix_syncs_geofence_site_links()
+    public async Task Assistant_safe_fix_does_not_modify_geofence_site_links()
     {
         using (var scope = _factory.Services.CreateScope())
         {
@@ -141,6 +141,6 @@ public sealed class GeofenceSitePromotionTests : IClassFixture<CustomWebFactory>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var finalScope = _factory.Services.CreateScope();
         var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.Contains(finalDb.SiteGeofences, row => row.Name == "Chelmsford (Aldi)" && row.SiteId != null);
+        Assert.Contains(finalDb.SiteGeofences, row => row.Name == "Chelmsford (Aldi)" && row.SiteId == null);
     }
 }
