@@ -13,7 +13,7 @@ public sealed class OperationalStopCoordinatesTests
     [InlineData("NWF-Selsey")]
     [InlineData("Collect · NWF-Selsey")]
     [InlineData("Collection · NWF-Selsey")]
-    public void Missing_site_coordinates_fall_back_to_unique_approved_geofence(string stopName)
+    public void Missing_site_coordinates_do_not_fall_back_to_geofence(string stopName)
     {
         var stop = new LoadStop
         {
@@ -24,11 +24,7 @@ public sealed class OperationalStopCoordinatesTests
 
         var coordinate = OperationalStopCoordinates.Resolve(stop);
 
-        Assert.NotNull(coordinate);
-        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences
-            .Where(candidate => GeofencePlanningMatch.SamePhysicalSite(stop, candidate)));
-        var expected = OperationalRunOrigin.FenceCentre(fence);
-        Assert.Equal(expected, coordinate);
+        Assert.Null(coordinate);
     }
 
     [Fact]
@@ -134,7 +130,7 @@ public sealed class OperationalStopCoordinatesTests
     }
 
     [Fact]
-    public async Task Manually_linked_geofence_supplies_coordinate_when_site_master_has_no_lat_lon()
+    public async Task Linked_geofence_does_not_supply_coordinates_when_site_master_has_no_lat_lon()
     {
         var fence = EmbeddedGeofenceEngine.ApprovedFences.First(candidate =>
             candidate.Name.Contains("Selsey", StringComparison.OrdinalIgnoreCase));
@@ -181,7 +177,7 @@ public sealed class OperationalStopCoordinatesTests
             Name = "Collect · BAR-Selsey Linked"
         };
 
-        Assert.Equal(OperationalRunOrigin.FenceCentre(fence), OperationalStopCoordinates.Resolve(stop, resolver));
+        Assert.Null(OperationalStopCoordinates.Resolve(stop, resolver));
     }
 
     [Fact]
@@ -199,7 +195,7 @@ public sealed class OperationalStopCoordinatesTests
     }
 
     [Fact]
-    public void Address_without_coordinates_requests_geofence_or_master_data_geocoding()
+    public void Address_without_coordinates_requests_site_master_coordinates()
     {
         var stop = new LoadStop
         {
@@ -210,6 +206,6 @@ public sealed class OperationalStopCoordinatesTests
         };
 
         Assert.Null(OperationalStopCoordinates.Resolve(stop));
-        Assert.Contains("Link the approved geofence or geocode the site in Master Data", OperationalStopCoordinates.MissingLocationReason(stop));
+        Assert.Contains("Site Master has no latitude/longitude", OperationalStopCoordinates.MissingLocationReason(stop));
     }
 }
