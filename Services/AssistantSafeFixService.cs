@@ -238,3 +238,21 @@ public sealed class AssistantSafeFixService(
             foreach (var key in keys) { if (!groups.TryGetValue(key, out var set)) groups[key] = set = []; set.Add(site); }
         }
         return DistinctGroups(groups.Values.Where(x => x.Count > 1));
+    }
+    private static List<List<Site>> FindLikelySiteDuplicateGroups(IReadOnlyCollection<Site> sites)
+    {
+        var groups = new Dictionary<string, HashSet<Site>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var site in sites) { var name = Normalise(site.Name); var address = NormaliseAddress(site.CollectionAddress); foreach (var key in new[] { name.Length >= 5 ? $"name:{name}" : "", address.Length >= 8 ? $"address:{address}" : "" }.Where(x => x.Length > 0)) { if (!groups.TryGetValue(key, out var set)) groups[key] = set = []; set.Add(site); } }
+        return DistinctGroups(groups.Values.Where(x => x.Count > 1));
+    }
+    private static List<List<Site>> DistinctGroups(IEnumerable<HashSet<Site>> source) { var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase); return source.Select(group => group.OrderBy(x => x.ExternalCode, StringComparer.OrdinalIgnoreCase).ToList()).Where(group => seen.Add(string.Join('|', group.Select(x => x.Id).OrderBy(x => x)))).ToList(); }
+    private static int Completeness(Site site) => new object?[] { site.MapLink, site.CollectionInstructions, site.DriverTextName, site.CollectionAddress, site.Latitude, site.Longitude, site.Aliases }.Count(x => x is not null && !string.IsNullOrWhiteSpace(x.ToString()));
+    private static int MarketCompleteness(MarketContact contact) => new[] { contact.StandOrLocation, contact.Salesman, contact.Sender }.Count(x => !string.IsNullOrWhiteSpace(x));
+    private static string MergeAliases(Site canonical, IReadOnlyCollection<Site> duplicates) => string.Join(", ", new[] { canonical.Name, canonical.DriverTextName, canonical.Aliases }.Concat(duplicates.SelectMany(x => new[] { x.Name, x.DriverTextName, x.Aliases, x.ExternalCode })).Where(x => !string.IsNullOrWhiteSpace(x)).SelectMany(x => x!.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).Distinct(StringComparer.OrdinalIgnoreCase));
+    private static string CanonicalMarket(string? value) { var clean = Clean(value) ?? "General"; var normal = Normalise(clean); if (normal.Contains("covent")) return "Covent"; if (normal.Contains("spit")) return "Spitalfields"; if (normal.Contains("western")) return "Western"; if (normal.Contains("sender")) return "Sender"; return clean; }
+    private static string? InferStand(string? name) { if (string.IsNullOrWhiteSpace(name)) return null; var bracket = Regex.Match(name, @"\(([^)]+)\)\s*$", RegexOptions.IgnoreCase); if (bracket.Success) return bracket.Groups[1].Value.Trim(); var labelled = Regex.Match(name, @"\b(?:stall|stand)\s*#?\s*([a-z]?\d{1,4}[a-z]?)\s*$", RegexOptions.IgnoreCase); return labelled.Success ? labelled.Groups[1].Value.Trim() : null; }
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : Regex.Replace(value.Trim(), @"\s+", " ");
+    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+    private static string NormaliseAddress(string? value) => Normalise(Regex.Replace(value ?? string.Empty, @"\b(road|rd|street|st|avenue|ave|lane|ln|drive|dr)\b", string.Empty, RegexOptions.IgnoreCase));
+    private static string? ExtractPostcode(string? value) { if (string.IsNullOrWhiteSpace(value)) return null; var match = Regex.Match(value.ToUpperInvariant(), @"\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b"); return match.Success ? Regex.Replace(match.Groups[1].Value, @"\s+", string.Empty) : null; }
+}
