@@ -60,6 +60,13 @@ public sealed class SpecialistMailboxOrderParser
         @"(?m)^IFCO\s*\|(?<fields>.+)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Some IFCO/OCADO notices are short prose rather than the pipe-delimited
+    // export.  Keep the route and equipment quantity from that notice instead of
+    // falling through to the generic parser (which can reverse the route).
+    private static readonly Regex IfcoProseRouteRegex = new(
+        @"\b(?:collect|collection)\b\s+(?<qty>\d{1,4})\s*(?:empty\s+)?(?:IFCO\s+)?(?:crates?|trays?|pallets?)\b.*?\bfrom\s+(?<from>[A-Za-z][^\r\n,.;]{2,100}?)\s+to\s+(?<to>[A-Za-z][^\r\n,.;]{2,120}?)(?:\s+on\s+|\s+for\s+|[.!?]|$)(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Singleline);
+
     private static readonly Regex IfcoSubjectRouteRegex = new(
         @"\bIFCO\s+(?:trays?\s+)?collection\s+(?:on\s+)?(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\s+from\s+(?<from>.+?)\s+to\s+(?<to>.+?)(?:,\s*(?<ref>\d{6,}))?$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -121,8 +128,7 @@ public sealed class SpecialistMailboxOrderParser
             return ParseAmazon(request, subject, body);
         }
 
-        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase) &&
-            combined.Contains("|", StringComparison.Ordinal))
+        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase))
         {
             var ifco = ParseIfcoCollections(request, body);
             if (ifco is not null) return ifco;
@@ -469,6 +475,33 @@ public sealed class SpecialistMailboxOrderParser
                 deliveryDate.Value, quantity, collection, destination, notes, rowWarnings, matchKeys);
 
             orders.Add(new ParsedEmailOrder($"ifco-row-{rowNumber}", naturalKey, payload, rowWarnings));
+        }
+
+        if (orders.Count == 0)
+        {
+            var prose = IfcoProseRouteRegex.Match(body);
+            if (prose.Success && int.TryParse(prose.Groups["qty"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var proseQuantity) && proseQuantity > 0)
+            {
+                var dateText = prose.Groups["date"].Value;
+                var date = ParseFlexibleNumericDate(dateText, received.Year) ?? LocalDate(received);
+                var collection = CleanDropName(prose.Groups["from"].Value);
+                var destination = CleanDropName(prose.Groups["to"].Value);
+                var reference = StableEmailReference(request.MessageId);
+                var warnings = new List<string>
+                {
+                    "IFCO prose notice parsed; confirm empty-crate/tray equipment type before approval."
+                };
+                var keys = BuildIfcoMatchKeys(date, reference, null, null, collection, destination);
+                var payload = BuildIfcoPayload(request, BuildReference(reference, destination), reference, null, null,
+                    date, date, proseQuantity, collection, destination, "Prose IFCO/OCADO collection notice.", warnings, keys);
+                var mutable = JsonNode.Parse(payload.GetRawText())!.AsObject();
+                mutable["equipmentType"] = body.Contains("crate", StringComparison.OrdinalIgnoreCase) ? "IFCO empty crates" : "IFCO trays";
+                mutable["intakeParser"] = "IFCO prose route";
+                mutable["intakeNaturalKey"] = NaturalKey(request, "IFCO", destination, date, reference);
+                return new EmailIntakeParseResult(
+                    [new ParsedEmailOrder("ifco-prose-route", NaturalKey(request, "IFCO", destination, date, reference), JsonSerializer.SerializeToElement(mutable), warnings)],
+                    [], null);
+            }
         }
 
         if (orders.Count == 0) return null;

@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net;
@@ -8,7 +7,6 @@ using System.Text.RegularExpressions;
 using Azure.Core;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Data.SqlClient;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Controllers;
@@ -33,10 +31,8 @@ public sealed class InfoMailboxGraphOptions
     // Graph delivery order is not a reliable watermark: a later-received message can
     // be visible before an earlier one. Revisit a full operational day so that such
     // messages cannot be skipped merely because another email was retained first.
-    // Revisit a short recovery window for delayed Graph delivery without
-    // re-querying a full operational day on every minute poll. Evidence is
-    // persisted in StagedImports, so older messages remain replayable there.
-    public int OverlapMinutes { get; set; } = 15;
+    // Evidence is persisted in StagedImports, so the overlap is idempotent.
+    public int OverlapMinutes { get; set; } = 1440;
     public int MaxMessagesPerPoll { get; set; } = 250;
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
 
@@ -120,6 +116,17 @@ public sealed class InfoMailboxGraphPollingService(
         ".xls", ".xlsx", ".xlsm", ".csv", ".pdf"
     };
 
+    // Keep the mailbox scan useful even when a new sender has not yet been added
+    // to CustomerEmailRoutes.  The parser and source gate remain authoritative;
+    // this list only decides which messages are eligible for the second Graph scan.
+    private static readonly string[] KnownOrderSenderDomains =
+    [
+        "nwfltd.co.uk", "barfoots.co.uk", "summerberry.co.uk", "langmeadherbs.co.uk",
+        "langmeadfarms.co.uk", "vitacress.com", "sainsburys.co.uk", "ocado.com",
+        "waitrose.co.uk", "johnlewis.co.uk", "morrisonsplc.co.uk", "doubleh.co.uk",
+        "hillsplants.com", "apsgroup.uk.com", "pmtransport.co.uk"
+    ];
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!options.Enabled)
@@ -143,9 +150,9 @@ public sealed class InfoMailboxGraphPollingService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            DateOnly? manualReceivedDate = null;
             try
             {
+                DateOnly? manualReceivedDate;
                 lock (manualPollGate)
                 {
                     manualReceivedDate = queuedManualReceivedDates.Count > 0
@@ -156,13 +163,7 @@ public sealed class InfoMailboxGraphPollingService(
                 // SQL or a parser can occasionally fail to honour a lower-level
                 // timeout, so bound the complete pass and let the next cycle retry.
                 using var pollTimeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                // Attachment downloads are deliberately bounded per message, but a
-                // mailbox can contain a much larger backlog.  A five-minute budget
-                // cancelled the whole pass halfway through a 114-message window.
-                // Process a bounded oldest-first batch below and allow enough time
-                // for that batch to finish; the next cycle continues from the
-                // evidence watermark.
-                pollTimeout.CancelAfter(TimeSpan.FromMinutes(20));
+                pollTimeout.CancelAfter(TimeSpan.FromMinutes(5));
                 await PollOnceAsync(pollTimeout.Token, manualReceivedDate);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -171,21 +172,7 @@ public sealed class InfoMailboxGraphPollingService(
             }
             catch (Exception ex)
             {
-                if (manualReceivedDate is { } retryDate && !stoppingToken.IsCancellationRequested)
-                {
-                    // A manual day scan can exceed the poll time budget. Keep its date
-                    // queued so the next pass resumes idempotently; staged evidence is
-                    // keyed by Graph message ID and already completed messages are skipped.
-                    lock (manualPollGate) queuedManualReceivedDates.Enqueue(retryDate);
-                    logger.LogWarning(
-                        ex,
-                        "Info mailbox Graph poll for {ReceivedDate} failed and was re-queued for retry after the normal poll interval.",
-                        retryDate);
-                }
-                else
-                {
-                    logger.LogError(ex, "Info mailbox Graph polling failed. The next scheduled poll will retry.");
-                }
+                logger.LogError(ex, "Info mailbox Graph polling failed. The next scheduled poll will retry.");
             }
 
             try
@@ -206,20 +193,6 @@ public sealed class InfoMailboxGraphPollingService(
         manualPollSignal.Release();
         logger.LogInformation("An immediate Info mailbox Graph poll for mailbox-received day {ReceivedDate} was queued.", receivedDate);
         return receivedDate;
-    }
-
-    private static bool IsMessageTimeout(Exception exception, CancellationToken messageToken)
-    {
-        if (messageToken.IsCancellationRequested) return true;
-
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is TimeoutException or TaskCanceledException) return true;
-            if (current is Win32Exception { NativeErrorCode: 258 }) return true;
-            if (current is SqlException { Number: -2 }) return true;
-        }
-
-        return false;
     }
 
     internal static DateOnly CurrentMailboxDate() =>
@@ -284,21 +257,11 @@ public sealed class InfoMailboxGraphPollingService(
         var customerDomains = mappedDomains.Select(NormalizeDomain).Where(item => item is not null).Select(item => item!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var domain in KnownOrderSenderDomains)
+            customerDomains.Add(domain);
 
         stage = "Graph mailbox scan";
         var messages = await FetchMessagesAsync(client, token.Token, since, until, customerDomains, ct);
-        const int maxMessagesPerPass = 25;
-        if (messages.Count > maxMessagesPerPass)
-        {
-            messages = messages
-                .OrderBy(item => item.ReceivedAtUtc)
-                .Take(maxMessagesPerPass)
-                .ToList();
-            logger.LogInformation(
-                "Info mailbox Graph poll {PollId} found a backlog; processing the oldest {BatchSize} messages this pass and continuing on the next cycle.",
-                pollId, messages.Count);
-        }
-
         var seen = messages.Count;
         var ingested = 0;
 
@@ -319,24 +282,40 @@ public sealed class InfoMailboxGraphPollingService(
 
             var evidenceKey = SourceEvidenceKeyBuilder.For(message.Id, message.InternetMessageId);
             var linkedUrls = ExtractSupportedDocumentLinks(message.BodyHtml, message.BodyPreview);
-            var existingEvidence = linkedUrls.Count == 0
-                ? null
-                : await db.StagedImports.AsNoTracking()
-                    .Where(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey)
-                    .Select(item => item.PayloadJson)
-                    .FirstOrDefaultAsync(messageCt);
-            if (existingEvidence is not null && linkedUrls.All(url =>
-                    existingEvidence.Contains(url, StringComparison.Ordinal) &&
-                    !existingEvidence.Contains("retrievalError", StringComparison.Ordinal)))
-                continue;
-            if (existingEvidence is null && linkedUrls.Count == 0 && await db.StagedImports.AsNoTracking()
-                .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, messageCt))
+            var existingEvidence = await db.StagedImports.AsNoTracking()
+                .Where(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey)
+                .Select(item => item.PayloadJson)
+                .FirstOrDefaultAsync(messageCt);
+            if (existingEvidence is not null && !EvidenceNeedsReplay(existingEvidence, message, linkedUrls))
                 continue;
 
-            var attachments = message.HasAttachments
-                ? await FetchAttachmentsSafelyAsync(client, token.Token, message.Id, messageCt)
-                : [];
-            attachments.AddRange(await FetchLinkedDocumentAttachmentsAsync(client, token.Token, message, messageCt));
+            List<MailboxAttachmentRequest> attachments;
+            try
+            {
+                attachments = message.HasAttachments
+                    ? await FetchAttachmentsSafelyAsync(client, token.Token, message.Id, messageCt)
+                    : [];
+                attachments.AddRange(await FetchLinkedDocumentAttachmentsAsync(client, token.Token, message, messageCt));
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // The per-message budget expired while Graph was downloading an
+                // attachment. Still retain the message/body as evidence so it is
+                // visible for replay instead of disappearing from intake.
+                attachments =
+                [
+                    new MailboxAttachmentRequest(
+                        "outlook-attachment-unavailable",
+                        null,
+                        null,
+                        false,
+                        null,
+                        null,
+                        null,
+                        null,
+                        "Graph attachment retrieval exceeded the per-message intake budget.")
+                ];
+            }
 
             var request = ToIntakeRequest(message, attachments, options.Mailbox);
 
@@ -353,19 +332,13 @@ public sealed class InfoMailboxGraphPollingService(
 
             try
             {
-                await controller.Intake(request, messageCt);
+                // If attachment retrieval used the full per-message budget, use
+                // the poll token for the short SQL/evidence write that follows.
+                await controller.Intake(request, messageCt.IsCancellationRequested ? ct : messageCt);
             }
-            catch (Exception ex) when (
-                !ct.IsCancellationRequested &&
-                IsMessageTimeout(ex, messageCt))
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && messageCt.IsCancellationRequested)
             {
-                // HTTP and SQL clients can report a per-message timeout using different
-                // exception types. Treat only explicit timeout/cancellation signals as a
-                // message-level failure; the poll-level token still fails the whole pass.
-                logger.LogWarning(
-                    ex,
-                    "Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.",
-                    message.Id);
+                logger.LogWarning("Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.", message.Id);
                 continue;
             }
             ingested++;
@@ -444,6 +417,7 @@ public sealed class InfoMailboxGraphPollingService(
             var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
             foreach (var customerMessage in customerMessages)
             {
+                if (messages.Count >= limit) break;
                 if (knownIds.Add(customerMessage.Id)) messages.Add(customerMessage);
             }
         }
@@ -480,12 +454,8 @@ public sealed class InfoMailboxGraphPollingService(
         var knownIds = messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         while (!string.IsNullOrWhiteSpace(next) && messages.Count < limit)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, next);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            request.Headers.TryAddWithoutValidation("Prefer", "outlook.body-content-type=\"html\"");
-            request.Headers.TryAddWithoutValidation("ConsistencyLevel", "eventual");
-            using var response = await client.SendAsync(request, ct);
-            await EnsureGraphSuccessAsync(response, request.RequestUri, ct);
+            using var response = await SendGraphRequestWithRetryAsync(client, accessToken, next, ct);
+            await EnsureGraphSuccessAsync(response, response.RequestMessage?.RequestUri, ct);
 
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var root = document.RootElement;
@@ -520,58 +490,66 @@ public sealed class InfoMailboxGraphPollingService(
         var encodedMessageId = Uri.EscapeDataString(messageId);
         var metadataUrl =
             $"users/{mailbox}/messages/{encodedMessageId}/attachments" +
-            "?$select=id,name,contentType,size,isInline";
+            "?$select=id,name,contentType,size,isInline&$top=50";
 
-        using var metadataResponse = await SendGraphRequestWithRetryAsync(client, accessToken, metadataUrl, ct);
-        await EnsureGraphSuccessAsync(metadataResponse, metadataResponse.RequestMessage?.RequestUri, ct);
-
-        using var document = JsonDocument.Parse(await metadataResponse.Content.ReadAsStringAsync(ct));
         var result = new List<MailboxAttachmentRequest>();
-        if (!document.RootElement.TryGetProperty("value", out var value) || value.ValueKind != JsonValueKind.Array)
-            return result;
-
-        foreach (var item in value.EnumerateArray())
+        string? next = metadataUrl;
+        while (!string.IsNullOrWhiteSpace(next))
         {
-            var name = Text(item, "name");
-            var isInline = Bool(item, "isInline") ?? false;
-            if (isInline || string.IsNullOrWhiteSpace(name) || !SupportedExtensions.Contains(Path.GetExtension(name)))
-                continue;
+            using var metadataResponse = await SendGraphRequestWithRetryAsync(client, accessToken, next, ct);
+            await EnsureGraphSuccessAsync(metadataResponse, metadataResponse.RequestMessage?.RequestUri, ct);
 
-            var size = Long(item, "size");
-            if (size is > 0 && size > options.MaxAttachmentBytes)
-                throw new InvalidOperationException($"Supported order attachment '{name}' is {size:N0} bytes and exceeds the configured Graph intake limit.");
-
-            var attachmentId = Text(item, "id");
-            if (string.IsNullOrWhiteSpace(attachmentId))
-                continue;
-
-            var payloadUrl = $"users/{mailbox}/messages/{encodedMessageId}/attachments/{Uri.EscapeDataString(attachmentId)}";
-            try
+            using var document = JsonDocument.Parse(await metadataResponse.Content.ReadAsStringAsync(ct));
+            if (document.RootElement.TryGetProperty("value", out var value) && value.ValueKind == JsonValueKind.Array)
             {
-                using var payloadResponse = await SendGraphRequestWithRetryAsync(client, accessToken, payloadUrl, ct);
-                await EnsureGraphSuccessAsync(payloadResponse, payloadResponse.RequestMessage?.RequestUri, ct);
+                foreach (var item in value.EnumerateArray())
+                {
+                    var name = Text(item, "name");
+                    var isInline = Bool(item, "isInline") ?? false;
+                    if (isInline || string.IsNullOrWhiteSpace(name) || !SupportedExtensions.Contains(Path.GetExtension(name)))
+                        continue;
 
-                using var payloadDocument = JsonDocument.Parse(await payloadResponse.Content.ReadAsStringAsync(ct));
-                var payload = payloadDocument.RootElement;
-                var contentBytes = Text(payload, "contentBytes");
-                if (string.IsNullOrWhiteSpace(contentBytes))
-                    throw new InvalidOperationException($"Graph did not return file content for supported order attachment '{name}'.");
+                    var size = Long(item, "size");
+                    if (size is > 0 && size > options.MaxAttachmentBytes)
+                        throw new InvalidOperationException($"Supported order attachment '{name}' is {size:N0} bytes and exceeds the configured Graph intake limit.");
 
-                result.Add(new MailboxAttachmentRequest(
-                    name,
-                    Text(payload, "contentType") ?? Text(item, "contentType"),
-                    null,
-                    false,
-                    Text(payload, "contentId") ?? Text(item, "contentId"),
-                    Long(payload, "size") ?? size,
-                    contentBytes));
+                    var attachmentId = Text(item, "id");
+                    if (string.IsNullOrWhiteSpace(attachmentId))
+                        continue;
+
+                    var payloadUrl = $"users/{mailbox}/messages/{encodedMessageId}/attachments/{Uri.EscapeDataString(attachmentId)}";
+                    try
+                    {
+                        using var payloadResponse = await SendGraphRequestWithRetryAsync(client, accessToken, payloadUrl, ct);
+                        await EnsureGraphSuccessAsync(payloadResponse, payloadResponse.RequestMessage?.RequestUri, ct);
+
+                        using var payloadDocument = JsonDocument.Parse(await payloadResponse.Content.ReadAsStringAsync(ct));
+                        var payload = payloadDocument.RootElement;
+                        var contentBytes = Text(payload, "contentBytes");
+                        if (string.IsNullOrWhiteSpace(contentBytes))
+                            throw new InvalidOperationException($"Graph did not return file content for supported order attachment '{name}'.");
+
+                        result.Add(new MailboxAttachmentRequest(
+                            name,
+                            Text(payload, "contentType") ?? Text(item, "contentType"),
+                            null,
+                            false,
+                            Text(payload, "contentId") ?? Text(item, "contentId"),
+                            Long(payload, "size") ?? size,
+                            contentBytes));
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                    {
+                        var detail = $"Graph attachment retrieval failed: {ex.GetBaseException().Message}";
+                        logger.LogWarning(ex, "Could not retrieve Graph attachment {AttachmentName} for message {MessageId}; retaining it for replay.", name, messageId);
+                        result.Add(new MailboxAttachmentRequest(name, Text(item, "contentType"), null, false, null, size, null, null, detail));
+                    }
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-            {
-                var detail = $"Graph attachment retrieval failed: {ex.GetBaseException().Message}";
-                logger.LogWarning(ex, "Could not retrieve Graph attachment {AttachmentName} for message {MessageId}; retaining it for replay.", name, messageId);
-                result.Add(new MailboxAttachmentRequest(name, Text(item, "contentType"), null, false, null, size, null, null, detail));
-            }
+
+            next = document.RootElement.TryGetProperty("@odata.nextLink", out var nextLink) && nextLink.ValueKind == JsonValueKind.String
+                ? nextLink.GetString()
+                : null;
         }
 
         return result;
@@ -621,13 +599,23 @@ public sealed class InfoMailboxGraphPollingService(
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, relativeUrl);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            request.Headers.TryAddWithoutValidation("Prefer", "outlook.body-content-type=\"html\"");
+            request.Headers.TryAddWithoutValidation("ConsistencyLevel", "eventual");
             try
             {
                 var response = await client.SendAsync(request, ct);
                 if (!IsTransientGraphResponse(response) || attempt == maxAttempts)
                     return response;
 
+                var retryAfter = response.Headers.RetryAfter?.Delta
+                    ?? (response.Headers.RetryAfter?.Date is { } retryAt
+                        ? retryAt - DateTimeOffset.UtcNow
+                        : null);
+                var delay = retryAfter is { } serverDelay && serverDelay > TimeSpan.Zero
+                    ? TimeSpan.FromSeconds(Math.Min(serverDelay.TotalSeconds, 30))
+                    : TimeSpan.FromSeconds(attempt * 2);
                 response.Dispose();
+                await Task.Delay(delay, ct);
             }
             catch (TaskCanceledException) when (!ct.IsCancellationRequested && attempt < maxAttempts)
             {
@@ -638,7 +626,6 @@ public sealed class InfoMailboxGraphPollingService(
                 // Retry transient transport failures from the Azure-hosted Graph client.
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct);
         }
 
         throw new InvalidOperationException("Graph request retry loop ended unexpectedly.");
@@ -731,6 +718,34 @@ public sealed class InfoMailboxGraphPollingService(
             }
         }
         return links;
+    }
+
+    private static bool EvidenceNeedsReplay(string payloadJson, GraphMailboxMessage message, IReadOnlyList<string> linkedUrls)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            var root = document.RootElement;
+            if (linkedUrls.Any(url => !payloadJson.Contains(url, StringComparison.Ordinal) || payloadJson.Contains("retrievalError", StringComparison.Ordinal)))
+                return true;
+            if (!message.HasAttachments) return false;
+            if (!root.TryGetProperty("attachments", out var attachments) || attachments.ValueKind != JsonValueKind.Array)
+                return true;
+            foreach (var attachment in attachments.EnumerateArray())
+            {
+                if (Bool(attachment, "isInline") == true) continue;
+                var name = Text(attachment, "name");
+                if (string.IsNullOrWhiteSpace(name) || !SupportedExtensions.Contains(Path.GetExtension(name))) continue;
+                if (string.IsNullOrWhiteSpace(Text(attachment, "contentBase64")) &&
+                    string.IsNullOrWhiteSpace(Text(attachment, "sourceUrl")))
+                    return true;
+            }
+            return false;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     internal static string ToGraphShareId(string url)
