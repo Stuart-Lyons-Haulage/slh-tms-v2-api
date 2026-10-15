@@ -484,6 +484,11 @@ public sealed class TransportOrder
     public bool NeedsReplan { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.ReadyToPlan;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? CompletedAtUtc { get; set; }
+    public DateTimeOffset? ArchivedAtUtc { get; set; }
+    [MaxLength(500)] public string? ArchiveLocation { get; set; }
+    public decimal? TotalValue { get; set; }
+    public int? ItemCount { get; set; }
 }
 public enum LoadStatus { Draft, Planned, Dispatched, InProgress, Completed, Cancelled }
 public sealed class Load
