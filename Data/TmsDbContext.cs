@@ -82,14 +82,15 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         foreach (var loadId in completionTransitions)
             await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(this, loadId, cancellationToken);
 
-        foreach (var entry in ChangeTracker.Entries<TransportOrder>().Where(entry =>
-            entry.Entity.Status == OrderStatus.Delivered &&
-            (entry.State == EntityState.Added ||
-             (entry.State == EntityState.Modified && entry.Property(order => order.Status).IsModified &&
-              entry.Property(order => order.Status).OriginalValue != OrderStatus.Delivered)))
-        {
+        var deliveredOrders = ChangeTracker.Entries<TransportOrder>()
+            .Where(entry => entry.Entity.Status == OrderStatus.Delivered)
+            .Where(entry => entry.State == EntityState.Added ||
+                (entry.State == EntityState.Modified &&
+                 entry.Property(order => order.Status).IsModified &&
+                 entry.Property(order => order.Status).OriginalValue != OrderStatus.Delivered));
+
+        foreach (var entry in deliveredOrders)
             entry.Entity.CompletedAtUtc ??= DateTimeOffset.UtcNow;
-        }
 
         NormalizeMarketOrderProjection();
         EnqueuePendingMasterDataAudits();
