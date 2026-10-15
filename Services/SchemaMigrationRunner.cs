@@ -241,7 +241,8 @@ public static class SchemaMigrationRunner
         "085_Fleetio_Trailer_Status.sql",
         "086_Driver_Availability_Windows.sql",
         "087_TachoMaster_Shared_Snapshot.sql",
-        "088_Driver_Availability_Snapshots.sql"
+        "088_Driver_Availability_Snapshots.sql",
+        "089_Planning_Query_Index_Refinements.sql"
     ];
 
     internal const string HistoryTableSql = """

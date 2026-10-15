@@ -229,6 +229,10 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<StagedImportEvent>().HasIndex(x => new { x.StagedImportId, x.OccurredAtUtc });
         b.Entity<StagedImportEvent>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<OrderMovement>().HasIndex(x => new { x.CustomerCode, x.StableMovementKey }).IsUnique();
+        b.Entity<OrderMovement>()
+            .HasIndex(x => new { x.LifecycleStatus, x.CustomerCode, x.StableMovementKey })
+            .HasDatabaseName("IX_OrderMovements_LifecycleStatus_CustomerCode_StableMovementKey")
+            .IncludeProperties(x => x.CurrentRevisionId);
         b.Entity<OrderRevision>().HasIndex(x => new { x.MovementId, x.RevisionNumber }).IsUnique();
         b.Entity<OrderRevision>().HasIndex(x => x.StagedImportId).IsUnique();
         b.Entity<OrderRevision>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.MovementId).OnDelete(DeleteBehavior.Restrict);
@@ -294,9 +298,13 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<TransportOrder>().HasIndex(x => x.SourceMovementId);
         b.Entity<TransportOrder>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.SourceMovementId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
-        b.Entity<Load>().HasIndex(x => x.PlanningDate);
         b.Entity<Load>().HasIndex(x => new { x.PlanningDate, x.Status })
             .HasDatabaseName("IX_Loads_PlanningDate_Status");
+        b.Entity<Load>()
+            .HasIndex(x => new { x.VehicleId, x.PlanningDate, x.CreatedAtUtc })
+            .IsDescending(false, true, true)
+            .HasDatabaseName("IX_Loads_VehicleId_PlanningDate_CreatedAtUtc")
+            .IncludeProperties(x => new { x.Reference, x.DriverId, x.TrailerId, x.Status });
         b.Entity<LoadStop>().HasIndex(x => new { x.LoadId, x.Sequence }).IsUnique();
         b.Entity<Load>().HasMany(x => x.Stops).WithOne().HasForeignKey(x => x.LoadId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
