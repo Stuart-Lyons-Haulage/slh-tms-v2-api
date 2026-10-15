@@ -104,7 +104,8 @@ public sealed class SchemaResourceTests
             "086_Driver_Availability_Windows.sql",
             "087_TachoMaster_Shared_Snapshot.sql",
             "088_Driver_Availability_Snapshots.sql",
-            "089_Planning_Query_Index_Refinements.sql"
+            "089_Planning_Query_Index_Refinements.sql",
+            "090_Transport_Order_SharePoint_Archive.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }
