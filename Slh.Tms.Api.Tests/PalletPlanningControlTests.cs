@@ -51,7 +51,7 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     {
         var seeded = await Seed();
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
-        var body = Json(JsonSerializer.Serialize(new { orderId = seeded.OrderId, loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 7, sourceLineId = seeded.SourceLineId }));
+        var body = Json(JsonSerializer.Serialize(new { orderId = seeded.OrderId, loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 7, sourceLineId = seeded.SourceLineId, idempotencyKey = Guid.NewGuid().ToString("N") }));
 
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/v1/planning-control/allocations", body)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/v1/planning-control/allocations", body)).StatusCode);
@@ -59,6 +59,31 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
         Assert.Equal(1, db.StagedImports.Count(x => x.EntityType == "planningpalletallocation" && x.PayloadJson.Contains(seeded.OrderId.ToString(), StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
+    public async Task Returning_to_a_previous_quantity_persists_the_newest_value()
+    {
+        var seeded = await Seed();
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        foreach (var pallets in new[] { 7, 9, 7 })
+        {
+            var response = await client.PostAsync("/api/v1/planning-control/allocations", Json(JsonSerializer.Serialize(new
+            {
+                orderId = seeded.OrderId,
+                loadId = seeded.FirstLoadId,
+                date = "2026-08-24",
+                pallets,
+                sourceLineId = seeded.SourceLineId,
+                idempotencyKey = Guid.NewGuid().ToString("N")
+            })));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        using var responseDocument = JsonDocument.Parse(await (await client.GetAsync("/api/v1/planning-control/pallets?date=2026-08-24")).Content.ReadAsStringAsync());
+        var order = Assert.Single(responseDocument.RootElement.GetProperty("orders").EnumerateArray().Where(x => x.GetProperty("id").GetGuid() == seeded.OrderId));
+        var allocation = Assert.Single(order.GetProperty("allocations").EnumerateArray().Where(x => x.GetProperty("loadId").GetGuid() == seeded.FirstLoadId));
+        Assert.Equal(7, allocation.GetProperty("pallets").GetInt32());
     }
 
     [Fact]

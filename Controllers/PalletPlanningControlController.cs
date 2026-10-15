@@ -278,13 +278,12 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             return Conflict(new { message = "Allocation exceeds the approved load-unit quantity.", approvedPallets = permitted, allocatedElsewhere, requestedPallets = request.Pallets });
         var now = DateTimeOffset.UtcNow;
         var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name, request.SourceLineId);
-        // Retries must be safe. A deterministic fallback treats the same quantity
-        // written to the same order/load/source-line as the same operation; clients
-        // can provide a request key when they need to distinguish two identical
-        // corrections. The previous timestamp/GUID key made a slow mobile retry
-        // create a second ledger entry.
+        // A caller-supplied key makes a retry of this exact save idempotent. Never
+        // derive the key from quantity: changing 24 -> 12 -> 24 must append three
+        // states, otherwise the second 24 is mistaken for the first and SQL keeps
+        // returning 12 as the latest allocation.
         var allocationKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
-            ? $"palletallocation:{request.Date:yyyyMMdd}:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{request.Pallets}"
+            ? $"palletallocation:{Guid.NewGuid():N}"
             : $"palletallocation:{request.IdempotencyKey.Trim()}";
         if (allocationKey.Length > 200) allocationKey = allocationKey[..200];
         var allocationAlreadyRecorded = await db.StagedImports.AsNoTracking()
