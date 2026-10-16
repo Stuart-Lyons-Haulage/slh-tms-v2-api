@@ -33,7 +33,7 @@ public sealed class SamsaraDispatchController(
                 driverCount = 0,
                 planningAuthority = "SLH TMS",
                 samsaraRole = "Execution and route progress",
-                recomputeScheduledTimes = options.RecomputeScheduledTimes,
+                recomputeScheduledTimes = true,
                 addressSyncEnabled = options.EnableAddressSync,
                 assetSyncEnabled = options.EnableAssetSync,
                 routeProgressSyncEnabled = options.EnableRouteProgressSync,
@@ -53,7 +53,7 @@ public sealed class SamsaraDispatchController(
                 summary.DriverCount,
                 planningAuthority = "SLH TMS",
                 samsaraRole = "Execution and route progress",
-                recomputeScheduledTimes = options.RecomputeScheduledTimes,
+                recomputeScheduledTimes = true,
                 addressSyncEnabled = options.EnableAddressSync,
                 assetSyncEnabled = options.EnableAssetSync,
                 routeProgressSyncEnabled = options.EnableRouteProgressSync,
@@ -76,7 +76,7 @@ public sealed class SamsaraDispatchController(
                 driverCount = 0,
                 planningAuthority = "SLH TMS",
                 samsaraRole = "Execution and route progress",
-                recomputeScheduledTimes = options.RecomputeScheduledTimes,
+                recomputeScheduledTimes = true,
                 addressSyncEnabled = options.EnableAddressSync,
                 routeProgressSyncEnabled = options.EnableRouteProgressSync,
                 routeProgressPollSeconds = options.RouteProgressPollSeconds,
@@ -857,76 +857,62 @@ public sealed class SamsaraDispatchController(
                 .GroupBy(item => item.TmsEntityId)
                 .ToDictionary(group => group.Key, group => group.First().ExternalKey);
 
-            // Address creation is the only genuinely per-site first-export work. Reuse
-            // the local mapping on later exports, and keep first-time provider calls
-            // bounded so a route with many stops cannot spend the whole API request in
-            // a serial GET -> POST/PATCH loop.
+            // Submit physical addresses to Samsara's Address API. Samsara geocodes and
+            // owns location/geofencing; TMS does not require or calculate coordinates.
+            // Stable site/stop IDs prevent duplicate remote addresses on retries.
             var addressFallbackBySiteId = new HashSet<Guid>();
-            if (samsara.AddressSyncEnabled)
+            using (var addressGate = new SemaphoreSlim(4, 4))
             {
-                using var addressGate = new SemaphoreSlim(4, 4);
                 var sitesToSync = physicalStops
-                    .Where(item => item.Representative.SiteId is not null &&
-                                   !string.IsNullOrWhiteSpace(item.Representative.Address) &&
-                                   !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
-                    .GroupBy(item => item.Representative.SiteId!.Value)
+                    .Where(item => !string.IsNullOrWhiteSpace(item.Representative.Address) &&
+                        !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId ?? item.Representative.StopId))
+                    .GroupBy(item => item.Representative.SiteId ?? item.Representative.StopId)
                     .Select(group => group.First())
                     .ToList();
-
-                var addressResults = await Task.WhenAll(sitesToSync.Select(async item =>
+                var results = await Task.WhenAll(sitesToSync.Select(async item =>
                 {
-                    var site = sites.Single(site => site.Id == item.Representative.SiteId!.Value);
+                    var reference = item.Representative.SiteId ?? item.Representative.StopId;
+                    var site = item.Representative.SiteId is Guid siteId
+                        ? sites.FirstOrDefault(candidate => candidate.Id == siteId)
+                        : null;
                     await addressGate.WaitAsync(ct);
                     try
                     {
-                        var result = await samsara.UpsertAddressAsync(
-                            new SamsaraAddressRequest(
-                                site.Id,
-                                site.ExternalCode,
-                                site.DriverTextName ?? site.Name,
-                                item.Representative.Address!,
-                                item.Representative.Latitude,
-                                item.Representative.Longitude,
-                                site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
-                            ct);
-                        return new AddressSyncResult(site.Id, result.AddressId);
+                        var response = await samsara.UpsertAddressAsync(new SamsaraAddressRequest(
+                            reference,
+                            site?.ExternalCode ?? reference.ToString("N"),
+                            site?.DriverTextName ?? site?.Name ?? item.Representative.Name,
+                            item.Representative.Address!,
+                            null,
+                            null,
+                            samsara.StopRadiusMeters), ct);
+                        return new AddressSyncResult(reference, response.AddressId);
                     }
                     catch (Exception exception) when (exception is not OperationCanceledException)
                     {
-                        logger.LogWarning(
-                            exception,
-                            "Samsara reusable address sync failed for site {SiteId}; route stop will use a single-use location.",
-                            site.Id);
-                        return new AddressSyncResult(site.Id, null);
+                        logger.LogWarning(exception,
+                            "Samsara address geocoding failed for {Reference}; no local coordinate fallback will be required.",
+                            reference);
+                        return new AddressSyncResult(reference, null);
                     }
-                    finally
-                    {
-                        addressGate.Release();
-                    }
+                    finally { addressGate.Release(); }
                 }));
-
-                foreach (var addressResult in addressResults)
+                foreach (var result in results)
                 {
-                    if (!string.IsNullOrWhiteSpace(addressResult.AddressId))
+                    if (!string.IsNullOrWhiteSpace(result.AddressId))
                     {
-                        samsaraAddressBySiteId[addressResult.SiteId] = addressResult.AddressId;
-                        await SaveMappingAsync(
-                            "Site",
-                            addressResult.SiteId,
-                            addressResult.AddressId,
-                            sites.Single(item => item.Id == addressResult.SiteId).Name,
-                            ct);
+                        samsaraAddressBySiteId[result.SiteId] = result.AddressId;
+                        var site = sites.FirstOrDefault(candidate => candidate.Id == result.SiteId);
+                        if (site is not null)
+                            await SaveMappingAsync("Site", site.Id, result.AddressId, site.Name, ct);
                     }
                     else
-                    {
-                        addressFallbackBySiteId.Add(addressResult.SiteId);
-                    }
+                        addressFallbackBySiteId.Add(result.SiteId);
                 }
             }
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
             var missingLocations = new List<string>();
-            var missingSchedule = new List<string>();
             var addressFallbacks = new List<string>();
             var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
             var departLastStop = !string.Equals(options.RouteCompletionCondition, "arriveLastStop", StringComparison.OrdinalIgnoreCase);
@@ -943,43 +929,28 @@ public sealed class SamsaraDispatchController(
                 var isFirst = index == 0;
                 var isLast = index == physicalStops.Count - 1;
                 var plannedArrival = physicalStop.Group.EarliestPlannedArrivalUtc;
-                if (!options.RecomputeScheduledTimes && !isFirst && plannedArrival is null)
-                {
-                    missingSchedule.Add(physicalStopName);
-                    continue;
-                }
                 string? samsaraAddressId = null;
-                if (samsara.AddressSyncEnabled && representative.SiteId is Guid siteId)
-                {
-                    samsaraAddressBySiteId.TryGetValue(siteId, out samsaraAddressId);
-                    if (addressFallbackBySiteId.Contains(siteId))
-                        addressFallbacks.Add(physicalStopName);
-                }
+                var addressReference = representative.SiteId ?? representative.StopId;
+                samsaraAddressBySiteId.TryGetValue(addressReference, out samsaraAddressId);
+                if (addressFallbackBySiteId.Contains(addressReference))
+                    addressFallbacks.Add(physicalStopName);
 
-                // Samsara accepts a reusable Address ID without local coordinates;
-                // its Addresses API geocodes the physical address. Coordinates are
-                // only required when we must fall back to an inline single-use stop.
-                if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
-                    (representative.Latitude is null || representative.Longitude is null))
+                if (string.IsNullOrWhiteSpace(samsaraAddressId))
                 {
                     missingLocations.Add(physicalStopName);
                     continue;
                 }
 
                 var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
-                DateTimeOffset? scheduledArrival = isFirst && departFirstStop
-                    ? null
-                    : options.RecomputeScheduledTimes
-                        ? null
-                        : plannedArrival ?? firstScheduled;
+                // TMS sets only the journey start; Samsara calculates stop schedules.
+                DateTimeOffset? scheduledArrival = isFirst && !departFirstStop
+                    ? plannedArrival ?? firstScheduled : null;
                 var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
                 var scheduledDeparture = isFirst && departFirstStop
                     ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
                         ? plannedFirstDeparture
                         : earliestFirstDeparture
-                    : isLast && departLastStop
-                        ? plannedArrival
-                        : null;
+                    : null;
 
                 samsaraStops.Add(new SamsaraRouteStopRequest(
                     representative.StopId,
@@ -987,11 +958,9 @@ public sealed class SamsaraDispatchController(
                     physicalStopName,
                     samsaraAddressId,
                     representative.Address ?? CleanStopName(stop.Name),
-                    representative.Latitude,
-                    representative.Longitude,
-                    representativeSite is not null
-                        ? representativeSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters
-                        : samsara.StopRadiusMeters,
+                    null,
+                    null,
+                    samsara.StopRadiusMeters,
                     scheduledArrival,
                     scheduledDeparture,
                     stopNotes));
@@ -1000,15 +969,8 @@ public sealed class SamsaraDispatchController(
             if (missingLocations.Count > 0)
                 return BadRequest(new
                 {
-                    message = $"Samsara needs a physical address or coordinates for every route stop. Complete the Site Master address for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    message = $"Samsara could not resolve an address for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}. Check the stop address and Samsara Address API access.",
                     missingStops = missingLocations
-                });
-
-            if (!options.RecomputeScheduledTimes && missingSchedule.Count > 0)
-                return BadRequest(new
-                {
-                    message = $"Every Samsara stop after the route start needs a planned arrival time because SLH TMS owns the schedule. Complete the plan for: {string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase))}.",
-                    missingStops = missingSchedule
                 });
 
             // Validate the exact payload that will be sent, not only the source
@@ -1104,7 +1066,7 @@ public sealed class SamsaraDispatchController(
                 result.Created,
                 result.Updated,
                 planningAuthority = "SLH TMS",
-                samsaraRecomputedSchedule = options.RecomputeScheduledTimes,
+                samsaraRecomputedSchedule = true,
                 assignment = !string.IsNullOrWhiteSpace(samsaraDriverId)
                     ? "driver"
                     : !string.IsNullOrWhiteSpace(samsaraVehicleId) ? "vehicle" : "unallocated",
@@ -1166,8 +1128,8 @@ public sealed class SamsaraDispatchController(
         var handoverSite = relay.HandoverSiteId is Guid handoverSiteId
             ? sites.FirstOrDefault(site => site.Id == handoverSiteId)
             : sites.FirstOrDefault(site => SameSite(site, relay.HandoverSite));
-        if (handoverSite is null || handoverSite.Latitude is null || handoverSite.Longitude is null)
-            return BadRequest(new { message = $"The relay handover site '{relay.HandoverSite}' must be an active Site Master location with coordinates." });
+        if (handoverSite is null || string.IsNullOrWhiteSpace(handoverSite.CollectionAddress))
+            return BadRequest(new { message = $"The relay handover site '{relay.HandoverSite}' requires a valid Site Master postal address." });
 
         var split = relay.HandoverAfterStopSequence is int requestedSplit
             ? requestedSplit
@@ -1180,15 +1142,21 @@ public sealed class SamsaraDispatchController(
             return BadRequest(new { message = $"The planned relay handover is before {deliveryDriver.DisplayName}'s legal Tacho start." });
 
         var handoverId = StableRelayGuid(load.Id, "handover");
+        var handoverAddress = await samsara.UpsertAddressAsync(new SamsaraAddressRequest(
+            handoverSite.Id, handoverSite.ExternalCode, handoverSite.DriverTextName ?? handoverSite.Name,
+            handoverSite.CollectionAddress!, null, null, samsara.StopRadiusMeters), ct);
+        if (string.IsNullOrWhiteSpace(handoverAddress.AddressId))
+            return StatusCode(StatusCodes.Status502BadGateway,
+                new { message = "Samsara could not resolve the relay handover address." });
         var handoverStop = new SamsaraRouteStopRequest(
             handoverId,
             split + 1,
             handoverSite.DriverTextName ?? handoverSite.Name,
+            handoverAddress.AddressId,
+            handoverSite.CollectionAddress!,
             null,
-            handoverSite.CollectionAddress ?? handoverSite.Name,
-            (double)handoverSite.Latitude.Value,
-            (double)handoverSite.Longitude.Value,
-            handoverSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters,
+            null,
+            samsara.StopRadiusMeters,
             handoverTime,
             handoverTime,
             $"Trailer swap / relay handover. Collection driver: {collectionDriver.DisplayName}. Delivery driver: {deliveryDriver.DisplayName}. Trailer: {collectionTrailer?.TrailerNumber ?? "not allocated"} → {deliveryTrailer.TrailerNumber}.");

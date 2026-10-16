@@ -331,16 +331,17 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             {
                 payload["addressId"] = stop.AddressId;
             }
-            else
+            else if (stop.Latitude is not null && stop.Longitude is not null)
             {
                 payload["singleUseLocation"] = new
                 {
                     address = stop.Address,
                     latitude = stop.Latitude,
-                    longitude = stop.Longitude,
-                    radiusMeters = stop.RadiusMeters
+                    longitude = stop.Longitude
                 };
             }
+            else
+                throw new InvalidOperationException($"Samsara address is unresolved for stop {stop.Name}. An Address ID is required.");
 
             if (stop.ScheduledArrivalTime is not null)
                 payload["scheduledArrivalTime"] = stop.ScheduledArrivalTime.Value.UtcDateTime.ToString("O");
@@ -357,7 +358,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             // clear truncation marker rather than relying on a hard Clip() cut.
             ["notes"] = SamsaraNoteRules.LimitJobNotes(route.Notes ?? string.Empty),
             ["externalIds"] = externalIds,
-            ["recomputeScheduledTimes"] = options.RecomputeScheduledTimes,
+            ["recomputeScheduledTimes"] = true, // Samsara calculates route arrival/departure times; TMS does not.
             ["settings"] = new
             {
                 routeStartingCondition = NormaliseStartingCondition(options.RouteStartingCondition),
@@ -392,13 +393,6 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             ["externalIds"] = new Dictionary<string, string>
             {
                 [options.SiteExternalIdKey] = address.SiteReference
-            },
-            ["geofence"] = new
-            {
-                circle = new
-                {
-                    radiusMeters = Math.Clamp(address.RadiusMeters, 50, 5000)
-                }
             }
         };
 
