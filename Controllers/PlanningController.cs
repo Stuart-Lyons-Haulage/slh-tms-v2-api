@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, MasterAssignmentComplianceService compliance, PlanningStopTimingService stopTiming) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, DriverSmsDispatchService sms, MasterAssignmentComplianceService compliance, PlanningStopTimingService stopTiming) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -248,16 +248,6 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         return Ok(load);
     }
 
-    [HttpGet("loads/{id:guid}/route")]
-    public async Task<IActionResult> Route(Guid id, CancellationToken ct)
-    {
-        var (load, _) = await FindLoadAsync(id, includeStops: true, asTracking: false, ct);
-        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
-        var points = load.Stops.Where(stop => stop.Longitude is not null && stop.Latitude is not null).OrderBy(stop => stop.Sequence)
-            .Select(stop => (stop.Longitude!.Value, stop.Latitude!.Value)).ToList();
-        return Ok(await maps.Directions(points, ct));
-    }
-
     [HttpGet("loads/{id:guid}/dispatch")]
     public async Task<IActionResult> Dispatch(Guid id, CancellationToken ct)
     {
@@ -379,13 +369,6 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     }
 
     private static string MarketKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
-    [HttpGet("maps/geocode")]
-    public async Task<IActionResult> Geocode([FromQuery] string address, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(address)) return BadRequest("An address is required.");
-        return Ok(await maps.SearchAddress(address, ct));
-    }
 
     private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool asTracking, CancellationToken ct)
     {

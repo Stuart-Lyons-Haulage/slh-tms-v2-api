@@ -9,7 +9,7 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/runs"), Authorize]
-public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMapsRouteClient maps, MasterAssignmentComplianceService compliance, DispatchService dispatch) : ControllerBase
+public sealed class RunAllocationResilienceController(TmsDbContext db, MasterAssignmentComplianceService compliance, DispatchService dispatch) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Runs([FromQuery] DateOnly? date, CancellationToken ct)
@@ -238,19 +238,6 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         await SaveCoreLoadAsync(load, register, ct);
         await RunOperationalStore.EnrichAsync(db, [load], ct);
         return Ok(load);
-    }
-
-    [HttpGet("{id:guid}/route")]
-    public async Task<IActionResult> Route(Guid id, CancellationToken ct)
-    {
-        var (load, _) = await FindLoadAsync(id, includeStops: true, tracking: false, ct);
-        if (load is null) return NotFound(new { message = "The run could not be found." });
-        var points = OperationalStopOrdering.Order(load.Stops)
-            .Where(x => x.Longitude is not null && x.Latitude is not null)
-            .Select(x => (x.Longitude!.Value, x.Latitude!.Value))
-            .ToList();
-        if (points.Count < 2) return BadRequest(new { message = "At least two mapped stops are required before calculating a route." });
-        return Ok(await maps.Directions(points, ct));
     }
 
     [HttpGet("{id:guid}/dispatch")]
