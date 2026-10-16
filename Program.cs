@@ -117,6 +117,7 @@ builder.Services.AddHttpClient("SharePointOrderArchive", client =>
     client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
     client.Timeout = TimeSpan.FromSeconds(90);
 });
+builder.Services.AddScoped<SharePointClientFactory>();
 
 var infoMailboxGraphOptions = new InfoMailboxGraphOptions();
 builder.Configuration.GetSection("Integrations:InfoMailboxGraph").Bind(infoMailboxGraphOptions);
