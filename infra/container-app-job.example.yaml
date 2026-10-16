@@ -1,5 +1,5 @@
 # Azure Container Apps Job ARM/YAML shape. Create four resources from this template
-# with TMS_JOB_KIND and schedule changed to tachomaster, fleetio, sagehr and eta.
+# with TMS_JOB_KIND and schedule changed to tachomaster, fleetio or sagehr. ETA jobs are retired; execution is owned by Samsara.
 name: slh-tms-job-fleetio
 location: uksouth
 type: Microsoft.App/jobs

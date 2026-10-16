@@ -310,8 +310,6 @@ builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>()
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();
 builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
-builder.Services.AddHostedService<LiveEtaService>();
-builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
 builder.Services.AddHostedService<DriverAvailabilitySnapshotBackgroundService>();
 
@@ -340,7 +338,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
             var accessToken = ctx.Request.Query["access_token"];
             var path = ctx.HttpContext.Request.Path;
             if (!string.IsNullOrWhiteSpace(accessToken) &&
-                (path.StartsWithSegments("/dispatch-hub") || path.StartsWithSegments("/eta-hub")))
+                path.StartsWithSegments("/dispatch-hub"))
                 ctx.Token = accessToken;
             return Task.CompletedTask;
         },
@@ -489,7 +487,6 @@ app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 
 app.MapControllers();
 app.MapHub<DispatchHub>("/dispatch-hub").WithMetadata(new DisableRequestTimeoutAttribute());
-app.MapHub<EtaHub>("/eta-hub").WithMetadata(new DisableRequestTimeoutAttribute());
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
 app.Run();

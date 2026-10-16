@@ -56,7 +56,6 @@ builder.Services.AddHttpClient<DotTrackingClient>();
 builder.Services.AddHttpClient<TachoMasterClient>().AddHttpMessageHandler<TachoMasterRetryHandler>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<FleetioClient>();
-builder.Services.AddHttpClient("eta-job");
 builder.Services.AddScoped<DistributedLeaseManager>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddScoped<TachoObservedDriverSyncService>();
@@ -65,7 +64,6 @@ builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoMasterScheduledJob>();
 builder.Services.AddScoped<SageHrScheduledJob>();
-builder.Services.AddScoped<EtaRecalculationJob>();
 builder.Services.AddScoped<ScheduledJobRunner>();
 
 using var host = builder.Build();
@@ -88,9 +86,7 @@ var exitCode = jobKind switch
     }, shutdown.Token),
     "sagehr" => await runner.RunAsync("SageHR", "job:sagehr", TimeSpan.FromMinutes(45),
         services.GetRequiredService<SageHrScheduledJob>().RunAsync, shutdown.Token),
-    "eta" => await runner.RunAsync("ETARecalculation", "job:eta-recalculation", TimeSpan.FromMinutes(10),
-        services.GetRequiredService<EtaRecalculationJob>().RunAsync, shutdown.Token),
-    _ => throw new InvalidOperationException($"Unsupported TMS_JOB_KIND '{jobKind}'. Expected tachomaster, fleetio, sagehr or eta.")
+    _ => throw new InvalidOperationException($"Unsupported TMS_JOB_KIND '{jobKind}'. Expected tachomaster, fleetio or sagehr.")
 };
 
 Environment.ExitCode = exitCode;
