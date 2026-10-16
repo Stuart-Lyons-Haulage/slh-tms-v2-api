@@ -897,17 +897,17 @@ public sealed class SamsaraDispatchController(
                     }
                     finally { addressGate.Release(); }
                 }));
-                foreach (var result in results)
+                foreach (var syncedAddress in results)
                 {
-                    if (!string.IsNullOrWhiteSpace(result.AddressId))
+                    if (!string.IsNullOrWhiteSpace(syncedAddress.AddressId))
                     {
-                        samsaraAddressBySiteId[result.SiteId] = result.AddressId;
-                        var site = sites.FirstOrDefault(candidate => candidate.Id == result.SiteId);
+                        samsaraAddressBySiteId[syncedAddress.SiteId] = syncedAddress.AddressId;
+                        var site = sites.FirstOrDefault(candidate => candidate.Id == syncedAddress.SiteId);
                         if (site is not null)
-                            await SaveMappingAsync("Site", site.Id, result.AddressId, site.Name, ct);
+                            await SaveMappingAsync("Site", site.Id, syncedAddress.AddressId, site.Name, ct);
                     }
                     else
-                        addressFallbackBySiteId.Add(result.SiteId);
+                        addressFallbackBySiteId.Add(syncedAddress.SiteId);
                 }
             }
 
@@ -946,7 +946,7 @@ public sealed class SamsaraDispatchController(
                 DateTimeOffset? scheduledArrival = isFirst && !departFirstStop
                     ? plannedArrival ?? firstScheduled : null;
                 var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
-                var scheduledDeparture = isFirst && departFirstStop
+                DateTimeOffset? scheduledDeparture = isFirst && departFirstStop
                     ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
                         ? plannedFirstDeparture
                         : earliestFirstDeparture
