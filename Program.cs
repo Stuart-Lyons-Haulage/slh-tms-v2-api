@@ -302,13 +302,13 @@ builder.Services.AddHttpClient<SamsaraClient>()
 builder.Services.Configure<HostOptions>(options =>
     options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
-builder.Services.AddHostedService<DotTrackingIngestionService>();
+// Legacy RoadTech vehicle-position ingestion retired; Samsara owns live execution.
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<TachoDriverHoursRefreshWorker>();
 builder.Services.AddHostedService<IntegrationSyncSchedulerBackgroundService>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
-builder.Services.AddHostedService<BackloadTriggerHostedService>();
+// Geofence/position-triggered backload engine retired; TMS performs capacity-only planning.
 builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
 builder.Services.AddHostedService<DriverAvailabilitySnapshotBackgroundService>();
