@@ -106,7 +106,7 @@ public sealed class SamsaraClientTests
     }
 
     [Fact]
-    public async Task Address_upsert_uses_site_external_id_and_geofence()
+    public async Task Address_upsert_lets_Samsara_own_geofencing()
     {
         string? postedBody = null;
         var handler = new StubHandler(async request =>
@@ -145,7 +145,7 @@ public sealed class SamsaraClientTests
         using var document = JsonDocument.Parse(postedBody!);
         var root = document.RootElement;
         Assert.Equal("SITE123", root.GetProperty("externalIds").GetProperty("slhTmsSite").GetString());
-        Assert.Equal(300, root.GetProperty("geofence").GetProperty("circle").GetProperty("radiusMeters").GetInt32());
+        Assert.False(root.TryGetProperty("geofence", out _));
         Assert.Equal(50.84, root.GetProperty("latitude").GetDouble(), 2);
         Assert.Equal(-0.67, root.GetProperty("longitude").GetDouble(), 2);
     }
