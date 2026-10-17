@@ -63,4 +63,8 @@ jobs:
           python power-automate/customer-load-plan-dispatch/test_validate_workflow.py
 
       - name: Run tests
-        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore --logger "trx" --results-directory TestResults
+
+      - name: Annotate failed tests
+        if: failure()
+        run: python3 ops/annotate-test-failures.py TestResults
