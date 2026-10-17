@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Assistant;
+using Slh.Tms.Api.Controllers;
 
 namespace Slh.Tms.Api.Services;
 

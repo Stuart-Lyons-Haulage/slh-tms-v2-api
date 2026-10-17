@@ -72,3 +72,36 @@ public sealed class LegacyBetaPlanningStub : IBetaHgvRouteProvider
         throw new NotImplementedException("Legacy beta planning is no longer supported. Use the production planning system instead.");
     }
 }
+
+/// <summary>
+/// Route optimiser service (legacy, no longer supported).
+/// During transition to production system, route optimization is handled
+/// by the assistant AI system instead of this legacy beta service.
+/// </summary>
+public sealed record BetaOptimisationDay(
+    DateOnly PlanningDate,
+    int RoutedRunCount = 0,
+    int UnroutedRunCount = 0,
+    decimal SavingMiles = 0,
+    int SavingDriveMinutes = 0,
+    decimal? CO2SavingTonnes = null);
+
+/// <summary>
+/// Obsolete route optimiser service (kept for type resolution only).
+/// </summary>
+public sealed class BetaOptimiserService
+{
+    /// <summary>
+    /// Not implemented - this service is obsolete.
+    /// Route optimization is now handled by the AI assistant.
+    /// </summary>
+    public Task<BetaOptimisationDay> AnalyseDayAsync(DateOnly planningDate, CancellationToken ct)
+    {
+        return Task.FromResult(new BetaOptimisationDay(
+            PlanningDate: planningDate,
+            RoutedRunCount: 0,
+            UnroutedRunCount: 0,
+            SavingMiles: 0,
+            SavingDriveMinutes: 0));
+    }
+}
