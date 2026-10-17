@@ -283,16 +283,7 @@ public sealed class EmailOrderIntakeService
         if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk"))
             return [];
 
-        // Read only the order content: stop at the sign-off or quoted history so the
-        // signature's registered-office farms and earlier messages are never parsed.
-        var lines = new List<string>();
-        foreach (var raw in body.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-        {
-            var line = Regex.Replace(raw, @"\s+", " ").Trim();
-            if (OrderContentEndRegex.IsMatch(line)) break;
-            if (line.Length > 0) lines.Add(line);
-        }
-
+        var lines = OrderContentLines(body);
         var headerIndexes = lines
             .Select((line, index) => (line, index))
             .Where(item => DepotDateBlockHeaderRegex.IsMatch(item.line))
@@ -372,6 +363,34 @@ public sealed class EmailOrderIntakeService
         }
 
         return orders;
+    }
+
+    /// <summary>
+    /// True when a Summer Berry email carries at least one "… depot date" order block
+    /// with a pallet total in its own content (not only in quoted reply history).
+    /// Used by the intake gate so this verified body format reaches the parser.
+    /// </summary>
+    internal static bool LooksLikeSummerBerryDepotDateEmail(MailboxEmailIntakeRequest request)
+    {
+        if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk"))
+            return false;
+        var lines = OrderContentLines(NormaliseBody(request.BodyText, request.BodyHtml));
+        return lines.Any(line => DepotDateBlockHeaderRegex.IsMatch(line)) &&
+               lines.Any(line => TotalPalletsRegex.IsMatch(line));
+    }
+
+    // Read only the order content: stop at the sign-off or quoted history so the
+    // signature's registered-office farms and earlier messages are never parsed.
+    private static List<string> OrderContentLines(string body)
+    {
+        var lines = new List<string>();
+        foreach (var raw in (body ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            var line = Regex.Replace(raw, @"\s+", " ").Trim();
+            if (OrderContentEndRegex.IsMatch(line)) break;
+            if (line.Length > 0) lines.Add(line);
+        }
+        return lines;
     }
 
     private static string? SummerBerrySubjectDestination(string? subject)

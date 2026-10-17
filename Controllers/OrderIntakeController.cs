@@ -878,7 +878,11 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                               body.Contains("Total Pallets", StringComparison.OrdinalIgnoreCase) &&
                               body.Contains("Collect from", StringComparison.OrdinalIgnoreCase);
 
-        return barfootsWaitroseWave || summerBerryCoop;
+        // Summer Berry (TSBC) weekly template, e.g. "TSBC - Reynolds": one block per
+        // "Monday 19th October depot date" with PO, Total Pallets and Collection time.
+        var summerBerryDepotDate = EmailOrderIntakeService.LooksLikeSummerBerryDepotDateEmail(request);
+
+        return barfootsWaitroseWave || summerBerryCoop || summerBerryDepotDate;
     }
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)
