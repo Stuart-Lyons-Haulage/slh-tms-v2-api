@@ -16,19 +16,35 @@ public sealed class CustomerCommunicationExtractionService
     private static readonly Regex Acceptance = new(@"\b(?:accept|acceptance)\s*(?:until|up to)\s*(?<time>\d{1,2}:\d{2})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex Url = new(@"https?://[^\s<>]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // A customer asking SLH to do or confirm something about existing work, e.g.
+    // "push back all collections for as late as possible", "send over the Waitrose
+    // delivery times", "no order for Wed". Not a new order.
+    private static readonly Regex RequestSignal = new(
+        @"\b(?:push(?:ed)?\s+(?:it\s+|them\s+|all\s+\w+\s+)?back|bring\s+(?:it\s+|them\s+)?forward|as\s+(?:late|early)\s+as\s+possible|postpone|re-?schedul\w*|change\s+(?:the\s+)?(?:collection|delivery)\s+(?:time|date)s?|(?:delivery|collection)\s+times|no\s+order\s+for|not\s+(?:be\s+)?required|cancel(?:led|lation)?|would\s+(?:you\s+)?be\s+able|can\s+(?:i|we)\s+(?:please\s+)?have|please\s+confirm|can\s+you\s+(?:please\s+)?confirm|has\s+not\s+arrived|not\s+arrived\s+yet|still\s+waiting|where\s+is)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static bool LooksLikeRequest(string text) => RequestSignal.IsMatch(text ?? string.Empty);
+
     public CustomerCommunication Extract(MailboxEmailIntakeRequest request)
     {
         var subject = request.Subject?.Trim() ?? string.Empty;
-        var body = (request.BodyText ?? string.Empty).Trim();
+        // Only what the sender wrote in this message (HTML or text), not quoted history.
+        var body = MailboxOwnContent.Body(request);
         var attachments = request.Attachments ?? [];
         var attachmentNames = attachments.Select(x => x.Name?.Trim()).Where(x => !string.IsNullOrWhiteSpace(x)).Cast<string>().ToList();
         var search = $"{subject}\n{body}\n{string.Join('\n', attachmentNames)}";
         var isPlan = search.Contains("load plan", StringComparison.OrdinalIgnoreCase)
             || attachmentNames.Any(x => x.Contains("load plan", StringComparison.OrdinalIgnoreCase));
-        var hasEta = search.Contains("eta", StringComparison.OrdinalIgnoreCase);
+        var hasEta = Regex.IsMatch(search, @"\bETAs?\b", RegexOptions.IgnoreCase);
         var exceptionSignals = new[] { "breakdown", "traffic", "closure", "diversion", "delay", "late", "driver hours", "m40", "m6" }
             .Where(signal => search.Contains(signal, StringComparison.OrdinalIgnoreCase)).ToList();
-        var purpose = isPlan ? "LoadPlan" : hasEta ? "EtaUpdate" : exceptionSignals.Count > 0 ? "Exception" : "Other";
+        // A request ("push back all collections for as late as possible") is checked
+        // before the generic delay words, which would otherwise read it as an exception.
+        var purpose = isPlan ? "LoadPlan"
+            : hasEta ? "EtaUpdate"
+            : LooksLikeRequest($"{subject}\n{body}") ? "Request"
+            : exceptionSignals.Count > 0 ? "Exception"
+            : "Other";
         var planVersion = ContainsAny(search, "amended", "amendment", "updated", "revised") ? "Amended" : "Original";
         var customerHints = KnownCustomers.Where(customer => search.Contains(customer, StringComparison.OrdinalIgnoreCase)).ToList();
         var claims = new List<CustomerEtaClaim>();

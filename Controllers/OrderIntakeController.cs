@@ -71,6 +71,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 linked = await LinkOperationalUpdateToPendingOrders(request, ct);
             }
 
+            // A customer reply with no order content of its own (an ETA chase,
+            // "push back all collections", "send the delivery times") is recorded as a
+            // customer communication and attached to the orders in the same email
+            // thread, instead of becoming an empty review card.
+            linked += await RecordCustomerRequest(request, ct);
+
             // A verified automatic customer source must never disappear from the
             // planner's view merely because a workbook/PDF profile has drifted.
             // Keep manual-only and unrelated mail evidence-only, but create one
@@ -541,9 +547,19 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return (item.Id, true, false, warning);
     }
 
-    private static bool HasOrderEvidence(MailboxEmailIntakeRequest request)
+    // Quantities, an upper-case PO with a number ("PO 3175627", "PORD123"), or a booking /
+    // load plan. "PO" must be upper case and followed by a reference containing a digit,
+    // otherwise ordinary words such as "possible" or "post" read as a PO.
+    private static readonly Regex OrderEvidenceRegex = new(
+        @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:total\s+)?(?:pallets?|trolleys?)\s*[:=-]\s*\d{1,4}\b|\b(?-i:PO|PORD)(?:\s*(?:number|no\.?|ref)\b)?\s*[:#.-]?\s*(?=[A-Z0-9/-]*\d)[A-Z0-9/-]{3,}\b|\b(?:booking|load plan)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    internal static bool HasOrderEvidence(MailboxEmailIntakeRequest request)
     {
-        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
+        // Judge only what the sender wrote in this message. Replies quote the
+        // original order (PO, pallets, "booking"), so the whole thread would make
+        // every ETA chase or "push collections back" reply look like an order.
+        var source = string.Join("\n", MailboxOwnContent.EvidenceSubject(request.Subject), MailboxOwnContent.Body(request),
             string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
         var supportedAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true && IsSupportedOrderAttachment(item.Name));
         var trustedCustomerSender = (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
@@ -552,7 +568,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                                     (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
                                     (request.SenderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase);
         return supportedAttachment ||
-               (trustedCustomerSender && Regex.IsMatch(source, @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b|\b(?:booking|load plan)\b", RegexOptions.IgnoreCase));
+               (trustedCustomerSender && OrderEvidenceRegex.IsMatch(source));
     }
 
     private static bool IsManualOnlySource(MailboxEmailIntakeRequest request)
@@ -1441,6 +1457,152 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             OccurredAtUtc = now
         });
         await db.SaveChangesAsync(ct);
+    }
+
+    private static readonly JsonSerializerOptions CommunicationJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
+    /// Records a customer email that carries no order of its own as a customer
+    /// communication, and links it to the orders from the same Outlook conversation.
+    /// Pending orders show it as a review warning; approved orders get an audit event.
+    /// Returns the number of orders linked.
+    /// </summary>
+    private async Task<int> RecordCustomerRequest(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        if (!IsApprovedAutomaticSource(request) ||
+            IsInternalSender(request.SenderAddress) ||
+            IsInternalPlannerSnapshot(request) ||
+            LooksLikeNonOrderMessage(request) ||
+            HasOrderEvidence(request))
+            return 0;
+
+        var ownText = MailboxOwnContent.Body(request);
+        if (string.IsNullOrWhiteSpace(ownText)) return 0;
+
+        var extraction = new CustomerCommunicationExtractionService().Extract(request);
+        var threadOrders = await FindConversationOrders(request, ct);
+        if (threadOrders.Count == 0 && extraction.Purpose is not ("Request" or "EtaUpdate" or "Exception"))
+            return 0;
+
+        var snippet = Regex.Replace(ownText, @"\s+", " ").Trim();
+        var signOff = Regex.Match(snippet, @"\b(?:kind|best|warm)?\s*regards\b|\bmany thanks\b|\bthank you\b|\bthanks\b", RegexOptions.IgnoreCase);
+        if (signOff.Success && signOff.Index > 20) snippet = snippet[..signOff.Index].Trim(' ', ',', '.', '!');
+        if (snippet.Length > 300) snippet = snippet[..300] + "…";
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var receivedLocal = TimeZoneInfo.ConvertTime(received, LondonTime()).ToString("dd/MM HH:mm");
+        var who = string.IsNullOrWhiteSpace(request.SenderName) ? request.SenderAddress : request.SenderName;
+        var note = $"Customer request {receivedLocal} from {who}: {snippet}";
+
+        var key = $"communication:{request.MessageId}";
+        if (key.Length > 200) key = key[..200];
+        if (!await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct))
+        {
+            var payload = JsonSerializer.Serialize(new
+            {
+                source = new
+                {
+                    request.MessageId, request.InternetMessageId, request.Mailbox, request.SenderAddress, request.SenderName,
+                    request.Subject, request.ReceivedAtUtc, request.WebLink, request.ConversationId,
+                    attachments = (request.Attachments ?? []).Select(item => new { item.Name, item.ContentType, item.IsInline, item.Size })
+                },
+                ownText = ownText.Length <= 4000 ? ownText : ownText[..4000],
+                extraction,
+                linkedOrders = threadOrders.Select(order => new { stagingId = order.Item.Id, order.Reference, status = order.Item.Status.ToString() })
+            }, CommunicationJson);
+            var communication = new StagedImport
+            {
+                EntityType = "communication",
+                IdempotencyKey = key,
+                PayloadJson = payload,
+                Source = $"Info mailbox customer request / {(request.SenderAddress ?? "unknown sender").Trim()}",
+                ReceivedAtUtc = received
+            };
+            db.StagedImports.Add(communication);
+            db.StagedImportEvents.Add(StagingAudit.Create(communication, "Received", null, note, "Mailbox intake"));
+        }
+
+        var actor = $"Customer request {CompactKey(request.MessageId)}";
+        if (actor.Length > 200) actor = actor[..200];
+        var linked = 0;
+        foreach (var (item, _) in threadOrders)
+        {
+            if (await db.StagedImportEvents.AnyAsync(evt => evt.StagedImportId == item.Id && evt.Actor == actor, ct))
+                continue;
+
+            if (item.Status == StagingStatus.PendingReview)
+            {
+                var node = JsonNode.Parse(item.PayloadJson)?.AsObject() ?? new JsonObject();
+                var requests = node["customerRequests"] as JsonArray ?? new JsonArray();
+                requests.Add(new JsonObject
+                {
+                    ["receivedAtUtc"] = received.ToString("O"),
+                    ["sender"] = request.SenderAddress,
+                    ["subject"] = request.Subject,
+                    ["text"] = snippet,
+                    ["messageId"] = request.MessageId
+                });
+                node["customerRequests"] = requests;
+                var warnings = node["intakeWarnings"] as JsonArray ?? new JsonArray();
+                warnings.Add(note);
+                node["intakeWarnings"] = warnings;
+                item.PayloadJson = node.ToJsonString();
+            }
+
+            db.StagedImportEvents.Add(new StagedImportEvent
+            {
+                StagedImportId = item.Id,
+                EventType = "CustomerRequestLinked",
+                PreviousStatus = item.Status,
+                NewStatus = item.Status,
+                PayloadJson = JsonSerializer.Serialize(new { request.MessageId, request.Subject, request.ReceivedAtUtc, request.SenderAddress, text = snippet }),
+                Note = note.Length <= 1000 ? note : note[..1000],
+                Actor = actor
+            });
+            linked++;
+        }
+
+        await db.SaveChangesAsync(ct);
+        return linked;
+    }
+
+    /// <summary>Orders (pending, approved or live) whose source email is in the same
+    /// Outlook conversation as this message, excluding parser-review placeholders.</summary>
+    private async Task<List<(StagedImport Item, string? Reference)>> FindConversationOrders(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var conversationId = request.ConversationId?.Trim();
+        if (string.IsNullOrWhiteSpace(conversationId)) return [];
+
+        var since = (request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).AddDays(-21);
+        var candidates = await db.StagedImports
+            .Where(item => item.EntityType == "order" &&
+                           item.ReceivedAtUtc >= since &&
+                           (item.Status == StagingStatus.PendingReview || item.Status == StagingStatus.Approved || item.Status == StagingStatus.Promoted) &&
+                           item.PayloadJson.Contains(conversationId))
+            .OrderByDescending(item => item.ReceivedAtUtc)
+            .Take(200)
+            .ToListAsync(ct);
+
+        var result = new List<(StagedImport, string?)>();
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate.PayloadJson);
+                var root = document.RootElement;
+                if (!string.Equals(ReadText(root, "sourceConversationId"), conversationId, StringComparison.Ordinal)) continue;
+                if (string.Equals(ReadText(root, "sourceMessageId"), request.MessageId, StringComparison.Ordinal)) continue;
+                if (string.Equals(ReadText(root, "intakeStatus"), "MappingException", StringComparison.OrdinalIgnoreCase)) continue;
+                result.Add((candidate, ReadText(root, "poNumber") ?? ReadText(root, "customerPo")));
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
+
+    private static TimeZoneInfo LondonTime()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Europe/London"); }
+        catch (TimeZoneNotFoundException) { return TimeZoneInfo.Utc; }
     }
 
     private async Task<int> LinkOperationalUpdateToPendingOrders(MailboxEmailIntakeRequest request, CancellationToken ct)
