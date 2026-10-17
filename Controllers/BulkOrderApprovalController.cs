@@ -38,6 +38,8 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
 
         foreach (var item in items)
         {
+            // A failure earlier in the batch clears the change tracker; re-attach.
+            if (db.Entry(item).State == EntityState.Detached) db.Attach(item);
             var eligibility = CheckEligibility(item, request.Date, request.AcknowledgeReviewFlags);
             if (eligibility is not null)
             {
@@ -62,9 +64,12 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
                 approved++;
                 approvedIds.Add(item.Id);
             }
-            catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException or JsonException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
+                // Any one order failing must not turn the whole batch into an HTTP error
+                // with no reason shown. Report it and carry on with the rest.
                 failed.Add(new { id = item.Id, reason = ex.GetBaseException().Message });
+                db.ChangeTracker.Clear();
             }
         }
 
