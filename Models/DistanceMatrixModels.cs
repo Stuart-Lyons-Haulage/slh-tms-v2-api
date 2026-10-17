@@ -41,3 +41,65 @@ public sealed record HgvVehicleProfile(
         LengthMeters: 10.2m,
         WeightTonnes: 18m);
 }
+
+/// <summary>
+/// A single cell in a distance matrix: distance and time from origin to destination.
+/// </summary>
+public sealed record RouteMatrixCell(
+    decimal DistanceMetres,
+    int DurationSeconds,
+    bool IsReachable = true,
+    string? FailureReason = null)
+{
+    /// <summary>
+    /// Returns the distance in miles (1 mile = 1609.344 metres).
+    /// </summary>
+    public decimal DistanceMiles => DistanceMetres / 1609.344m;
+
+    /// <summary>
+    /// Returns the duration in minutes.
+    /// </summary>
+    public int DurationMinutes => DurationSeconds / 60;
+}
+
+/// <summary>
+/// A complete distance/time matrix from multiple origins to multiple destinations.
+/// </summary>
+public sealed class RouteMatrix
+{
+    private readonly Dictionary<(int originIdx, int destIdx), RouteMatrixCell?> _cells = [];
+
+    /// <summary>
+    /// Initialize a matrix with dimensions (origins count × destinations count).
+    /// </summary>
+    public RouteMatrix(int originCount, int destinationCount)
+    {
+        OriginCount = originCount;
+        DestinationCount = destinationCount;
+    }
+
+    /// <summary>Number of origins in this matrix.</summary>
+    public int OriginCount { get; }
+
+    /// <summary>Number of destinations in this matrix.</summary>
+    public int DestinationCount { get; }
+
+    /// <summary>
+    /// Get or set a cell value (origin index, destination index).
+    /// </summary>
+    public RouteMatrixCell? this[int originIndex, int destinationIndex]
+    {
+        get => _cells.TryGetValue((originIndex, destinationIndex), out var value) ? value : null;
+        set => _cells[(originIndex, destinationIndex)] = value;
+    }
+
+    /// <summary>
+    /// Enumerate all cells in the matrix (origin index, dest index, cell).
+    /// </summary>
+    public IEnumerable<(int originIdx, int destIdx, RouteMatrixCell? cell)> EnumerateCells()
+    {
+        for (int o = 0; o < OriginCount; o++)
+            for (int d = 0; d < DestinationCount; d++)
+                yield return (o, d, this[o, d]);
+    }
+}
