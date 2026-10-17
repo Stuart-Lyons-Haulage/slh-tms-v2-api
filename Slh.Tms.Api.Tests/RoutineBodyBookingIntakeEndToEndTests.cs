@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
