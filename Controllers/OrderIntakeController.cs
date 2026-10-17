@@ -239,16 +239,20 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             });
         }
 
-        if (staged > 0 || superseded > 0 || updatedExisting > 0)
+        // A resent full booking is the whole booking: a depot that was in the earlier
+        // file but is missing (or zero) now has probably been taken off. Flag it.
+        var removedFromBooking = await FlagRowsMissingFromNewerBooking(parsed.Orders, request, ct);
+
+        if (staged > 0 || superseded > 0 || updatedExisting > 0 || removedFromBooking > 0)
             await db.SaveChangesAsync(ct);
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order");
 
         logger.LogInformation(
-            "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.",
-            request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
+            "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, removed from booking {Removed}, parser warnings {Warnings}.",
+            request.MessageId, staged, existing, superseded, removedFromBooking, parsed.Warnings.Count);
 
-        return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+        return Accepted(new { ignored = false, staged, existing, superseded, removedFromBooking, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
     }
 
     private async Task<bool> IsExactLiveOrderDuplicate(JsonElement payload, CancellationToken ct)
@@ -1144,7 +1148,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var matchKeys = allOrders
             .SelectMany(order => ReadMatchKeys(order.Payload))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (naturalKeys.Count == 0 && matchKeys.Count == 0) return 0;
+        // Rows of a resent full booking (e.g. Greenhouse "GHS Aldi Bookings" sent
+        // again by a colleague) replace the earlier pending row for the same depot.
+        var bookingRows = allOrders
+            .Select(order => BookingSnapshotIdentity.Row(order.Payload))
+            .Where(row => row is not null)
+            .Cast<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (naturalKeys.Count == 0 && matchKeys.Count == 0 && bookingRows.Count == 0) return 0;
 
         var candidates = await db.StagedImports
             .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
@@ -1168,14 +1179,17 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                                      ReadText(root, "amendmentMatchKey") is { Length: > 0 } candidateAmendmentKey &&
                                      matchKeys.Contains(CanonicalMatchKey(candidateAmendmentKey));
                 var nwfBusinessMatch = missingOrders.Any(order => NwfBusinessIdentityMatches(root, order.Payload));
-                if (!naturalMatch && !stableMatch && !amendmentMatch && !nwfBusinessMatch)
+                var bookingRowMatch = bookingRows.Count > 0 &&
+                                      BookingSnapshotIdentity.Row(root) is { } candidateRow &&
+                                      bookingRows.Contains(candidateRow);
+                if (!naturalMatch && !stableMatch && !amendmentMatch && !nwfBusinessMatch && !bookingRowMatch)
                     continue;
 
                 var previous = candidate.Status;
                 candidate.Status = StagingStatus.Archived;
                 candidate.ReviewedAtUtc = now;
-                candidate.ReviewedBy = stableMatch || amendmentMatch || nwfBusinessMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
-                candidate.ReviewNote = stableMatch || amendmentMatch || nwfBusinessMatch
+                candidate.ReviewedBy = stableMatch || amendmentMatch || nwfBusinessMatch || bookingRowMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
+                candidate.ReviewNote = stableMatch || amendmentMatch || nwfBusinessMatch || bookingRowMatch
                     ? $"Superseded by a newer/amended Info mailbox message ({currentMessageId}). Original evidence retained."
                     : $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
                 db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
@@ -1460,6 +1474,129 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     }
 
     private static readonly JsonSerializerOptions CommunicationJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
+    /// For a resent full booking (same customer, delivery date and sender company),
+    /// flags earlier rows whose depot is no longer in the newer file. Pending rows get a
+    /// review warning; approved rows get an audit event and one customer-communication
+    /// record listing them, so a planner can cancel or keep them. Nothing is cancelled
+    /// automatically. Returns the number of rows flagged.
+    /// </summary>
+    private async Task<int> FlagRowsMissingFromNewerBooking(
+        IReadOnlyCollection<ParsedEmailOrder> orders,
+        MailboxEmailIntakeRequest request,
+        CancellationToken ct)
+    {
+        var incoming = orders
+            .Select(order => (Booking: BookingSnapshotIdentity.Booking(order.Payload), Row: BookingSnapshotIdentity.Row(order.Payload), Collection: BookingSnapshotIdentity.CollectionKey(order.Payload)))
+            .Where(item => item.Booking is not null && item.Row is not null)
+            .ToList();
+        if (incoming.Count == 0) return 0;
+
+        var bookings = incoming.Select(item => item.Booking!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var rows = incoming.Select(item => item.Row!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var collections = incoming.Where(item => item.Collection is not null).Select(item => item.Collection!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sender = request.SenderAddress ?? string.Empty;
+        var domain = sender.Contains('@') ? sender[(sender.LastIndexOf('@') + 1)..].Trim() : string.Empty;
+        if (domain.Length == 0) return 0;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var since = received.AddDays(-7);
+        var candidates = await db.StagedImports
+            .Where(item => item.EntityType == "order" &&
+                           item.ReceivedAtUtc >= since &&
+                           (item.Status == StagingStatus.PendingReview || item.Status == StagingStatus.Approved || item.Status == StagingStatus.Promoted) &&
+                           item.PayloadJson.Contains(domain))
+            .ToListAsync(ct);
+
+        var receivedLocal = TimeZoneInfo.ConvertTime(received, LondonTime()).ToString("dd/MM HH:mm");
+        var who = string.IsNullOrWhiteSpace(request.SenderName) ? request.SenderAddress : request.SenderName;
+        var actor = $"Booking resend {CompactKey(request.MessageId)}";
+        if (actor.Length > 200) actor = actor[..200];
+        var liveFlags = new List<object>();
+        var flagged = 0;
+
+        foreach (var candidate in candidates)
+        {
+            // Rows already replaced earlier in this request are tracked as Archived.
+            if (candidate.Status is not (StagingStatus.PendingReview or StagingStatus.Approved or StagingStatus.Promoted)) continue;
+            JsonNode? node;
+            try { node = JsonNode.Parse(candidate.PayloadJson); }
+            catch (JsonException) { continue; }
+            if (node is not JsonObject payload) continue;
+            var root = JsonSerializer.SerializeToElement(payload);
+
+            if (string.Equals(ReadText(root, "sourceMessageId"), request.MessageId, StringComparison.Ordinal)) continue;
+            if (BookingSnapshotIdentity.Booking(root) is not { } booking || !bookings.Contains(booking)) continue;
+            if (BookingSnapshotIdentity.Row(root) is not { } row || rows.Contains(row)) continue;
+            if (BookingSnapshotIdentity.CollectionKey(root) is not { } collection || !collections.Contains(collection)) continue;
+            var candidateReceived = DateTimeOffset.TryParse(ReadText(root, "sourceReceivedAtUtc") ?? ReadText(root, "sourceEmailReceivedAt"), out var parsedReceived)
+                ? parsedReceived
+                : candidate.ReceivedAtUtc;
+            if (candidateReceived >= received) continue;
+            if (await db.StagedImportEvents.AnyAsync(evt => evt.StagedImportId == candidate.Id && evt.Actor == actor, ct)) continue;
+
+            var destination = ReadText(root, "stallNumber") ?? ReadText(root, "destination") ?? "This depot";
+            var note = $"Not in the newer booking from {who} ({receivedLocal}): {destination} may have been taken off. Confirm with the customer before planning.";
+            if (candidate.Status == StagingStatus.PendingReview)
+            {
+                var warnings = payload["intakeWarnings"] as JsonArray ?? new JsonArray();
+                warnings.Add(note);
+                payload["intakeWarnings"] = warnings;
+                payload["missingFromNewerBooking"] = new JsonObject
+                {
+                    ["messageId"] = request.MessageId,
+                    ["receivedAtUtc"] = received.ToString("O"),
+                    ["sender"] = request.SenderAddress
+                };
+                candidate.PayloadJson = payload.ToJsonString();
+            }
+            else
+            {
+                liveFlags.Add(new { stagingId = candidate.Id, reference = ReadText(root, "poNumber"), destination, pallets = root.TryGetProperty("pallets", out var palletValue) && palletValue.ValueKind == JsonValueKind.Number ? palletValue.GetInt32() : (int?)null });
+            }
+
+            db.StagedImportEvents.Add(new StagedImportEvent
+            {
+                StagedImportId = candidate.Id,
+                EventType = "MissingFromNewerBooking",
+                PreviousStatus = candidate.Status,
+                NewStatus = candidate.Status,
+                PayloadJson = JsonSerializer.Serialize(new { request.MessageId, request.Subject, request.ReceivedAtUtc, request.SenderAddress }),
+                Note = note,
+                Actor = actor
+            });
+            flagged++;
+        }
+
+        if (liveFlags.Count > 0)
+        {
+            var key = $"communication:{request.MessageId}:booking-change";
+            if (key.Length > 200) key = key[..200];
+            if (!await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct))
+            {
+                var summary = $"Booking resent by {who} ({receivedLocal}) no longer includes {liveFlags.Count} approved order(s). Check whether they are cancelled.";
+                var communication = new StagedImport
+                {
+                    EntityType = "communication",
+                    IdempotencyKey = key,
+                    Source = $"Info mailbox booking change / {sender.Trim()}",
+                    ReceivedAtUtc = received,
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        source = new { request.MessageId, request.InternetMessageId, request.Mailbox, request.SenderAddress, request.SenderName, request.Subject, request.ReceivedAtUtc, request.WebLink, request.ConversationId },
+                        ownText = summary,
+                        extraction = new { purpose = "BookingChange" },
+                        linkedOrders = liveFlags
+                    }, CommunicationJson)
+                };
+                db.StagedImports.Add(communication);
+                db.StagedImportEvents.Add(StagingAudit.Create(communication, "Received", null, summary, "Mailbox intake"));
+            }
+        }
+
+        return flagged;
+    }
 
     /// <summary>
     /// Records a customer email that carries no order of its own as a customer
