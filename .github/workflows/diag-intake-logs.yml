@@ -1,0 +1,50 @@
+name: Diagnostics - intake logs (read only)
+
+on:
+  push:
+    branches: [diag/intake-logs-20261017]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read today's mailbox intake log lines (read only)
+        run: |
+          set -u
+          az config set extension.use_dynamic_install=yes_without_prompt >/dev/null 2>&1
+          az config set extension.dynamic_install_allow_preview=true >/dev/null 2>&1
+          apps=$(az resource list --resource-type "microsoft.insights/components" --query "[].{name:name,rg:resourceGroup}" -o tsv 2>&1)
+          echo "::notice title=App Insights components::$(echo "$apps" | tr '\n' ';')"
+          echo "$apps" | while read -r name rg; do
+            [ -z "${name:-}" ] && continue
+            appid=$(az monitor app-insights component show --app "$name" -g "$rg" --query appId -o tsv 2>&1)
+            q='union traces, exceptions
+              | where timestamp > ago(30h)
+              | extend m = tostring(coalesce(message, outerMessage))
+              | where m has_any ("Info mailbox intake", "Graph message", "Graph attachment", "attachment retrieval", "exceeded the 45-second", "Order intake parser failed", "mailbox safety scan", "Graph mailbox poll")
+              | project t = format_datetime(timestamp, "HH:mm:ss"), sev = severityLevel, m = substring(m, 0, 300)
+              | order by t asc
+              | take 400'
+            out=$(az monitor app-insights query --app "$appid" --analytics-query "$q" -o tsv --query "tables[0].rows" 2>&1 | tr '\t' ' ')
+            echo "$out" > "logs-$name.txt"
+            count=$(echo "$out" | grep -c . || true)
+            echo "::notice title=$name rows::$count"
+            # Annotations are capped; emit the lines in chunks of ~40.
+            echo "$out" | split -l 40 - chunk-
+            for f in chunk-*; do
+              body=$(sed 's/%/%25/g' "$f" | awk '{printf "%s%%0A", $0}')
+              echo "::warning title=$name $(basename $f)::$body"
+            done
+            rm -f chunk-*
+          done
