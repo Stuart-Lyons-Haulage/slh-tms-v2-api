@@ -91,8 +91,11 @@ public sealed class SummerBerryDepotDateIntakeEndToEndTests : IClassFixture<Cust
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        // No order is created from quoted history. (A parser-review placeholder for the
+        // reply itself is handled separately by the non-order classification.)
         Assert.False(await db.StagedImports.AnyAsync(item =>
-            item.EntityType == "order" && item.Status == StagingStatus.PendingReview && item.PayloadJson.Contains(po)));
+            item.EntityType == "order" && item.Status == StagingStatus.PendingReview &&
+            item.PayloadJson.Contains("\"customerPo\":\"" + po + "\"")));
     }
 
     private static string Block(string date, string po, int pallets) =>
