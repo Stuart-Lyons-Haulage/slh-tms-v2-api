@@ -60,3 +60,30 @@ public sealed record CustomerLoadPlanOutboxItem(
     DateOnly PlanningDate,
     string CustomerCode,
     string CustomerName);
+
+public sealed record CustomerDeliveryTimeRow(
+    string OrderReference,
+    string DeliverySite,
+    int? Pallets,
+    string? VehicleRegistration,
+    string? PlannedDelivery,
+    string? LiveEta,
+    string? EtaRisk,
+    string? EtaAsAt,
+    string Status);
+
+public sealed record CustomerDeliveryTimesPreview(
+    string CustomerCode,
+    string CustomerName,
+    DateOnly PlanningDate,
+    string Subject,
+    IReadOnlyList<string> To,
+    IReadOnlyList<CustomerDeliveryTimeRow> Rows,
+    string? LastSendStatus,
+    DateTimeOffset? LastSentAtUtc);
+
+public sealed record CustomerDeliveryTimesResponse(
+    DateOnly PlanningDate,
+    DateTimeOffset GeneratedAtUtc,
+    IReadOnlyList<CustomerDeliveryTimesPreview> Customers,
+    IReadOnlyList<string> Warnings);

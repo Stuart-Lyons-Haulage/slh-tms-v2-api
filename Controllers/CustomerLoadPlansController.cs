@@ -101,6 +101,101 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         });
     }
 
+    /// <summary>
+    /// Per-customer delivery times for a date: each planned delivery with its planned
+    /// time and the latest live ETA from tracking. Replaces the hand-built "Daily Times"
+    /// and "Aldi Times" emails.
+    /// </summary>
+    [HttpGet("delivery-times"), Authorize(Policy = "TmsWrite")]
+    public async Task<ActionResult<CustomerDeliveryTimesResponse>> DeliveryTimes([FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        var preview = await BuildPreview(planningDate, ct);
+        var etas = await LatestDeliveryEtas(planningDate, ct);
+        var lastSends = await LastSends(planningDate, DeliveryTimesKind, ct);
+        var customers = preview.Plans.Select(plan =>
+        {
+            lastSends.TryGetValue(plan.CustomerCode, out var last);
+            return new CustomerDeliveryTimesPreview(
+                plan.CustomerCode,
+                plan.CustomerName,
+                planningDate,
+                DeliveryTimesSubject(plan.CustomerName, planningDate),
+                plan.To,
+                DeliveryTimeRows(plan, etas),
+                LastStatus(last),
+                last?.Status == StagingStatus.Promoted ? last.ReviewedAtUtc : null);
+        }).ToList();
+        return Ok(new CustomerDeliveryTimesResponse(planningDate, DateTimeOffset.UtcNow, customers, preview.Warnings));
+    }
+
+    /// <summary>Queues a customer's delivery times (HTML table in the body, load plan PDF
+    /// attached) on the same outbox the Info-mailbox flow already sends.</summary>
+    [HttpPost("delivery-times/queue"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> QueueDeliveryTimes(QueueCustomerLoadPlanRequest request, CancellationToken ct)
+    {
+        var preview = await BuildPreview(request.PlanningDate, ct);
+        var plan = preview.Plans.FirstOrDefault(item => string.Equals(item.CustomerCode, request.CustomerCode, StringComparison.OrdinalIgnoreCase));
+        if (plan is null) return NotFound(new { message = $"No live Dispatch plan exists for {request.CustomerCode} on {request.PlanningDate:dd/MM/yyyy}." });
+
+        var to = CleanRecipients(request.To ?? plan.To);
+        var cc = CleanRecipients(request.Cc ?? plan.Cc);
+        if (to.Count == 0)
+            return BadRequest(new { message = "Add at least one customer email address before sending delivery times." });
+
+        var rows = DeliveryTimeRows(plan, await LatestDeliveryEtas(request.PlanningDate, ct));
+        var queued = new QueuedLoadPlan(
+            plan.PlanningDate,
+            plan.CustomerCode,
+            plan.CustomerName,
+            to,
+            cc,
+            string.IsNullOrWhiteSpace(request.Subject) ? DeliveryTimesSubject(plan.CustomerName, plan.PlanningDate) : request.Subject.Trim(),
+            string.IsNullOrWhiteSpace(request.Body) ? DeliveryTimesBody(plan.PlanningDate, rows) : request.Body.Trim(),
+            DeliveryTimesAttachment(plan.CustomerName, plan.PlanningDate),
+            plan.Rows,
+            plan.TotalPallets,
+            DeliveryTimesKind);
+
+        var now = DateTimeOffset.UtcNow;
+        var actor = User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "Dispatch";
+        var item = new StagedImport
+        {
+            EntityType = EntityType,
+            IdempotencyKey = $"delivery-times:{request.PlanningDate:yyyyMMdd}:{SafeKey(plan.CustomerCode)}:{Guid.NewGuid():N}",
+            PayloadJson = JsonSerializer.Serialize(queued, Json),
+            Status = StagingStatus.Approved,
+            Source = $"Dispatch delivery times / {plan.CustomerCode} / {request.PlanningDate:yyyy-MM-dd}",
+            ReceivedAtUtc = now,
+            ReviewedAtUtc = now,
+            ReviewedBy = actor,
+            ReviewNote = $"Delivery times queued from Driver Dispatch for delivery from {Mailbox}."
+        };
+        db.StagedImports.Add(item);
+        db.StagedImportEvents.Add(new StagedImportEvent
+        {
+            StagedImportId = item.Id,
+            EventType = "Queued",
+            NewStatus = StagingStatus.Approved,
+            PayloadJson = JsonSerializer.Serialize(new { plan.CustomerCode, plan.CustomerName, request.PlanningDate, to, cc, kind = DeliveryTimesKind }, Json),
+            Note = item.ReviewNote,
+            Actor = actor,
+            OccurredAtUtc = now
+        });
+        await db.SaveChangesAsync(ct);
+
+        return Accepted(new
+        {
+            id = item.Id,
+            status = "Queued",
+            mailbox = Mailbox,
+            customerCode = plan.CustomerCode,
+            customerName = plan.CustomerName,
+            recipients = to,
+            message = $"{plan.CustomerName} delivery times queued to send from {Mailbox}."
+        });
+    }
+
     [HttpGet("outbox"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Outbox([FromQuery] int take = 20, CancellationToken ct = default)
     {
@@ -281,7 +376,7 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
             try
             {
                 var queued = JsonSerializer.Deserialize<QueuedLoadPlan>(item.PayloadJson, Json);
-                if (queued is null || queued.PlanningDate != planningDate) continue;
+                if (queued is null || queued.PlanningDate != planningDate || queued.Kind is not null) continue;
                 var key = queued.CustomerCode;
                 if (!previousByKey.ContainsKey(key)) previousByKey[key] = item;
             }
@@ -399,7 +494,110 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         string Body,
         string AttachmentName,
         IReadOnlyList<CustomerLoadPlanRow> Rows,
-        int TotalPallets);
+        int TotalPallets,
+        string? Kind = null);
+
+    private const string DeliveryTimesKind = "DeliveryTimes";
+
+    /// <summary>Latest live ETA for each (run, order) delivery stop on the date, from tracking.</summary>
+    private async Task<Dictionary<(Guid LoadId, Guid OrderId), EtaSnapshot>> LatestDeliveryEtas(DateOnly planningDate, CancellationToken ct)
+    {
+        var result = new Dictionary<(Guid, Guid), EtaSnapshot>();
+        var loads = await PlanningResilience.ReadLoadsAsync(db, planningDate, ct);
+        var deliveryStops = loads
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .SelectMany(load => load.Stops.Where(stop => stop.OrderId is not null).Select(stop => (load.Id, OrderId: stop.OrderId!.Value, stop.Id, stop.Sequence)))
+            .GroupBy(stop => (stop.Item1, stop.OrderId))
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(stop => stop.Sequence).First().Item3);
+        if (deliveryStops.Count == 0) return result;
+
+        var stopIds = deliveryStops.Values.Distinct().ToList();
+        var dayStart = new DateTimeOffset(planningDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).AddDays(-1);
+        try
+        {
+            var snapshots = await db.EtaSnapshots.AsNoTracking()
+                .Where(snapshot => stopIds.Contains(snapshot.StopId) && snapshot.EtaUtc != null && snapshot.CapturedAtUtc >= dayStart)
+                .ToListAsync(ct);
+            var latestByStop = snapshots
+                .GroupBy(snapshot => snapshot.StopId)
+                .ToDictionary(group => group.Key, group => group.OrderByDescending(snapshot => snapshot.CapturedAtUtc).First());
+            foreach (var (key, stopId) in deliveryStops)
+                if (latestByStop.TryGetValue(stopId, out var snapshot)) result[key] = snapshot;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Live ETAs could not be read for delivery times on {PlanningDate}; planned times only.", planningDate);
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<CustomerDeliveryTimeRow> DeliveryTimeRows(CustomerLoadPlanPreview plan, IReadOnlyDictionary<(Guid LoadId, Guid OrderId), EtaSnapshot> etas) =>
+        plan.Rows
+            .OrderBy(row => row.DeliveryDeadline ?? "99:99")
+            .ThenBy(row => row.DeliverySite)
+            .Select(row =>
+            {
+                etas.TryGetValue((row.LoadId, row.OrderId), out var eta);
+                return new CustomerDeliveryTimeRow(
+                    row.OrderReference,
+                    row.DeliverySite,
+                    row.Pallets,
+                    row.VehicleRegistration,
+                    row.DeliveryDeadline,
+                    LocalTime(eta?.EtaUtc),
+                    eta?.Risk,
+                    LocalTime(eta?.CapturedAtUtc),
+                    row.Status);
+            })
+            .ToList();
+
+    private static string DeliveryTimesSubject(string customerName, DateOnly date) => $"{customerName} Delivery Times-{date:ddMMyyyy}";
+
+    private static string DeliveryTimesAttachment(string customerName, DateOnly date)
+    {
+        var safe = new string(customerName.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '-' : character).ToArray()).Trim();
+        return $"{safe} Delivery Times-{date:ddMMyyyy}.pdf";
+    }
+
+    // Single-line HTML: the Info-mailbox flow turns newlines into <br>.
+    private static string DeliveryTimesBody(DateOnly date, IReadOnlyList<CustomerDeliveryTimeRow> rows)
+    {
+        static string Cell(string? value) => $"<td style=\"padding:4px 8px;border:1px solid #ccc\">{System.Net.WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(value) ? "—" : value)}</td>";
+        var body = new System.Text.StringBuilder();
+        body.Append($"Good afternoon,<br><br>Please see your delivery times for {date:dddd dd/MM/yyyy}. Live ETAs come from our vehicle tracking and are correct at the time shown.<br><br>");
+        body.Append("<table style=\"border-collapse:collapse;font-family:Arial,sans-serif;font-size:10pt\"><tr style=\"background:#f0f0f0\">");
+        foreach (var heading in new[] { "Delivery", "Order ref", "Pallets", "Vehicle", "Planned", "Live ETA", "ETA as at" })
+            body.Append($"<th style=\"padding:4px 8px;border:1px solid #ccc;text-align:left\">{heading}</th>");
+        body.Append("</tr>");
+        foreach (var row in rows)
+            body.Append("<tr>")
+                .Append(Cell(row.DeliverySite)).Append(Cell(row.OrderReference)).Append(Cell(row.Pallets?.ToString()))
+                .Append(Cell(row.VehicleRegistration)).Append(Cell(row.PlannedDelivery)).Append(Cell(row.LiveEta)).Append(Cell(row.EtaAsAt))
+                .Append("</tr>");
+        body.Append($"</table><br>The load plan is attached. If anything needs amending, please reply to this email.<br><br>Kind Regards,<br>Stuart Lyons Haulage<br>T: 01243 555536<br>E: {Mailbox}");
+        return body.ToString();
+    }
+
+    private async Task<Dictionary<string, StagedImport>> LastSends(DateOnly planningDate, string? kind, CancellationToken ct)
+    {
+        var previous = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == EntityType)
+            .OrderByDescending(item => item.ReceivedAtUtc)
+            .Take(500)
+            .ToListAsync(ct);
+        var result = new Dictionary<string, StagedImport>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in previous)
+        {
+            try
+            {
+                var queued = JsonSerializer.Deserialize<QueuedLoadPlan>(item.PayloadJson, Json);
+                if (queued is null || queued.PlanningDate != planningDate || !string.Equals(queued.Kind, kind, StringComparison.OrdinalIgnoreCase)) continue;
+                result.TryAdd(queued.CustomerCode, item);
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
 
     public sealed record LoadPlanFailure(string? Error);
 }
