@@ -285,8 +285,10 @@ public sealed class SpecialistMailboxOrderParser
                                 collectionDate.Value,
                                 deliveryDate,
                                 movement.Pallets,
-                                movement.Site,
+                                // Trays are collected from the Aldi/Euro Pool depot (Bedford)
+                                // and delivered to the NWF site in "Delivery Site".
                                 collectionDepot,
+                                movement.Site,
                                 null,
                                 null,
                                 attachment.Name,

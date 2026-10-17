@@ -117,18 +117,18 @@ public sealed class VerifiedWorkbookIntakeParserTests
         Assert.Equal(3, result.Orders.Count);
         Assert.Equal(66, result.Orders.Sum(order => order.Payload.GetProperty("pallets").GetInt32()));
         Assert.Contains(result.Orders, order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Selsey" &&
+            order.Payload.GetProperty("stallNumber").GetString() == "Selsey" &&
             order.Payload.GetProperty("pallets").GetInt32() == 33);
         Assert.Contains(result.Orders, order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Merston" &&
+            order.Payload.GetProperty("stallNumber").GetString() == "Merston" &&
             order.Payload.GetProperty("pallets").GetInt32() == 13);
         Assert.Contains(result.Orders, order =>
-            order.Payload.GetProperty("sellerName").GetString() == "Runcton" &&
+            order.Payload.GetProperty("stallNumber").GetString() == "Runcton" &&
             order.Payload.GetProperty("pallets").GetInt32() == 20);
         Assert.All(result.Orders, order =>
         {
             Assert.Equal("ALDI", order.Payload.GetProperty("customerCode").GetString());
-            Assert.Equal("Bedford", order.Payload.GetProperty("stallNumber").GetString());
+            Assert.Equal("Bedford", order.Payload.GetProperty("sellerName").GetString());
             Assert.Equal("2026-10-07", order.Payload.GetProperty("collectionDate").GetString());
             Assert.Equal("2026-10-08", order.Payload.GetProperty("deliveryDate").GetString());
             Assert.Equal("Collections", order.Payload.GetProperty("sourceSheet").GetString());
@@ -164,8 +164,8 @@ public sealed class VerifiedWorkbookIntakeParserTests
 
         Assert.NotNull(original);
         Assert.NotNull(amended);
-        var originalSelsey = Assert.Single(original!.Orders.Where(order => order.Payload.GetProperty("sellerName").GetString() == "Selsey"));
-        var amendedSelsey = Assert.Single(amended!.Orders.Where(order => order.Payload.GetProperty("sellerName").GetString() == "Selsey"));
+        var originalSelsey = Assert.Single(original!.Orders.Where(order => order.Payload.GetProperty("stallNumber").GetString() == "Selsey"));
+        var amendedSelsey = Assert.Single(amended!.Orders.Where(order => order.Payload.GetProperty("stallNumber").GetString() == "Selsey"));
         Assert.Equal(originalSelsey.NaturalKey, amendedSelsey.NaturalKey);
         Assert.Equal(33, originalSelsey.Payload.GetProperty("pallets").GetInt32());
         Assert.Equal(34, amendedSelsey.Payload.GetProperty("pallets").GetInt32());
