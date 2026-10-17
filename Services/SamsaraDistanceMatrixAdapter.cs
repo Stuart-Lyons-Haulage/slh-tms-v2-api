@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.ApplicationInsights;
 using Microsoft.Extensions.Caching.Memory;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 

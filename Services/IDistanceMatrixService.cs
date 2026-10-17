@@ -1,3 +1,5 @@
+using Slh.Tms.Api.Models;
+
 namespace Slh.Tms.Api.Services;
 
 /// <summary>

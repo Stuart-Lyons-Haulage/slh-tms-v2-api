@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.ApplicationInsights;
 using Microsoft.Extensions.Options;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
