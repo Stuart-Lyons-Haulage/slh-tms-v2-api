@@ -158,6 +158,7 @@ builder.Services.AddDbContext<TmsDbContext>((services, options) =>
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<SharePointOrderArchiveService>();
 builder.Services.AddScoped<MasterDataService>();
+builder.Services.AddScoped<CsvMasterDataImportService>();
 builder.Services.AddScoped<SiteAddressPropagationService>();
 builder.Services.AddScoped<MasterAssignmentComplianceService>();
 builder.Services.AddSingleton<CustomerCommunicationExtractionService>();
