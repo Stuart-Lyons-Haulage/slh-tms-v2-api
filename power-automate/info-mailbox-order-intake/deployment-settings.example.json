@@ -1,0 +1,14 @@
+{
+  "environmentVariables": {
+    "SLH_InfoMailboxUPN": "info@lyonshaulage.com"
+  },
+  "connectionReferences": {
+    "slh_sharedoffice365_info": "SELECT_EXISTING_OUTLOOK_CONNECTION",
+    "slh_sharedslhtms_prod": "SELECT_EXISTING_SLH_TMS_OAUTH_CONNECTION"
+  },
+  "flow": {
+    "name": "SLH-TMS | Info Mailbox | Order Intake | PROD",
+    "initialState": "Started",
+    "triggerConcurrency": 4
+  }
+}

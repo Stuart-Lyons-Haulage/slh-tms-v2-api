@@ -1,0 +1,414 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
+
+namespace Slh.Tms.Api.Controllers;
+
+[ApiController, Route("api/v1/runs"), Authorize]
+public sealed class RunAllocationResilienceController(TmsDbContext db, MasterAssignmentComplianceService compliance, DispatchService dispatch) : ControllerBase
+{
+    [HttpGet]
+    public async Task<IActionResult> Runs([FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        // Use the same resilient reader as the rest of the operational system. A run can
+        // temporarily exist in both dbo.Loads and the audited planning register; directly
+        // overlaying the register copy here allowed an older copy with stale stops to hide
+        // pallet allocations that were already saved to the live run.
+        var rows = (await PlanningResilience.ReadLoadsAsync(db, date, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .Take(1000)
+            .ToList();
+        foreach (var load in rows) load.Stops = RenumberOperationalStops(load.Stops);
+        await RunOperationalStore.EnrichAsync(db, rows, ct);
+        return Ok(rows);
+    }
+
+    [HttpPut("{id:guid}/allocation"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Allocate(Guid id, RunAllocationRequest request, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: false, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        if (request.VehicleId is Guid vehicleId && !await db.Vehicles.AsNoTracking().AnyAsync(x => x.Id == vehicleId && x.Active, ct))
+            return BadRequest(new { message = "Vehicle is not active." });
+        if (request.DriverId is Guid driverId && !await db.Drivers.AsNoTracking().AnyAsync(x => x.Id == driverId && x.Active, ct))
+            return BadRequest(new { message = "Driver is not active." });
+        if (request.TrailerId is Guid trailerId && !await db.Trailers.AsNoTracking().AnyAsync(x => x.Id == trailerId && x.Active, ct))
+            return BadRequest(new { message = "Trailer is not active." });
+        var masterCompliance = await compliance.CheckAsync(request.DriverId, request.VehicleId, ct);
+        if (!masterCompliance.Allowed)
+            return Conflict(new { code = "master_compliance_blocked", errors = masterCompliance.Errors, warnings = masterCompliance.Warnings });
+
+        if (request.VehicleId is Guid selectedVehicleId && IsVehicleUnavailable(await db.Vehicles.AsNoTracking().SingleAsync(x => x.Id == selectedVehicleId, ct)))
+            return Conflict(new { code = "vehicle_unavailable", message = "The selected vehicle is VOR, out of service or otherwise unavailable." });
+        if (request.TrailerId is Guid selectedTrailerId && IsTrailerUnavailable(await db.Trailers.AsNoTracking().SingleAsync(x => x.Id == selectedTrailerId, ct)))
+            return Conflict(new { code = "trailer_unavailable", message = "The selected trailer is VOR, out of service or otherwise unavailable according to Fleetio." });
+
+        var existingState = (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id);
+        DateTimeOffset? plannedStart = request.PlannedStartUtc ??
+            (existingState is not null && existingState.DriverId == request.DriverId ? existingState.PlannedStartUtc : null);
+        if (request.DriverId is Guid requestedDriverId)
+        {
+            var available = (await dispatch.GetAvailableTimesAsync(
+                new DispatchAvailableTimesRequest(load.PlanningDate, [requestedDriverId], request.UseReducedDailyRest ? [requestedDriverId] : []), ct, forceTachoRefresh: true))
+                .Single();
+            if (available.AvailableFrom is null)
+                return Conflict(new { code = "tacho_start_unavailable", message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
+            if (!string.IsNullOrWhiteSpace(available.BreachDetail))
+                return Conflict(new { code = "tacho_dispatch_blocked", message = available.BreachDetail });
+            plannedStart = DispatchTachoRules.RebasePlannedStart(plannedStart, available.AvailableFrom.Value);
+        }
+        if (request.VehicleId is Guid requestedVehicleId && await HasResourceOverlap(requestedVehicleId, null, load, plannedStart, ct))
+            return Conflict(new { code = "vehicle_in_use", message = "The selected vehicle is already committed to an overlapping run. Choose another vehicle or a start time after the previous run ends." });
+        if (request.TrailerId is Guid requestedTrailerId && await HasResourceOverlap(null, requestedTrailerId, load, plannedStart, ct))
+            return Conflict(new { code = "trailer_in_use", message = "The selected trailer is already committed to an overlapping run. Choose another trailer or a start time after the previous run ends." });
+
+        load.VehicleId = request.VehicleId;
+        load.DriverId = request.DriverId;
+        load.TrailerId = request.TrailerId;
+        load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
+        await SaveCoreLoadAsync(load, register, ct);
+        if (request.DriverId is Guid assignedDriverId && plannedStart is DateTimeOffset calculatedStart)
+            await DriverDispatchStateStore.SetPlannedStartAsync(db, load.Id, calculatedStart, User.Identity?.Name, ct,
+                request.UseReducedDailyRest ? "Calculated from TachoMaster · reduced 9h daily rest" : "Calculated from TachoMaster · regular 11h daily rest",
+                assignedDriverId,
+                request.UseReducedDailyRest);
+        else if (request.DriverId is null)
+            await DriverDispatchStateStore.SetPlannedStartAsync(db, load.Id, null, User.Identity?.Name, ct, "Driver unassigned");
+        await RunOperationalStore.EnrichAsync(db, [load], ct);
+        return Ok(load);
+    }
+
+    private async Task<bool> HasResourceOverlap(Guid? vehicleId, Guid? trailerId, Load target, DateTimeOffset? targetStart, CancellationToken ct)
+    {
+        if (targetStart is null) return false;
+        var candidates = await db.Loads.AsNoTracking().Include(x => x.Stops)
+            .Where(x => x.Id != target.Id && x.PlanningDate == target.PlanningDate && x.Status != LoadStatus.Cancelled &&
+                ((vehicleId != null && x.VehicleId == vehicleId) || (trailerId != null && x.TrailerId == trailerId)))
+            .ToListAsync(ct);
+        var states = await DriverDispatchStateStore.ReadAsync(db, candidates.Select(x => x.Id), ct);
+        return candidates.Any(candidate =>
+        {
+            var start = states.GetValueOrDefault(candidate.Id)?.PlannedStartUtc ?? candidate.Stops.OrderBy(x => x.Sequence).Select(x => x.PlannedArrivalUtc).FirstOrDefault(x => x is not null);
+            var end = candidate.Stops.OrderByDescending(x => x.Sequence).Select(x => x.PlannedArrivalUtc).FirstOrDefault(x => x is not null);
+            // An untimed/stale load is not evidence of an overlap. Treating it
+            // as a guaranteed conflict blocked vehicles that were visibly free
+            // in Dispatch. Only reject when both ends of the competing window
+            // are known and actually intersect the requested start.
+            if (start is null || end is null) return false;
+            return targetStart < end && start < targetStart;
+        });
+    }
+
+    private static bool IsVehicleUnavailable(Vehicle vehicle) =>
+        !vehicle.Active || (vehicle.FleetioStatus?.Contains("VOR", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("out of service", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("off road", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("inactive", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("maintenance", StringComparison.OrdinalIgnoreCase) == true);
+
+    private static bool IsTrailerUnavailable(Trailer trailer) =>
+        !trailer.Active || trailer.FleetioVor == true ||
+        IsUnavailableStatus(trailer.FleetioStatus) || IsUnavailableStatus(trailer.FleetioServiceStatus);
+
+    private static bool IsUnavailableStatus(string? status) =>
+        status?.Contains("VOR", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("out of service", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("off road", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("inactive", StringComparison.OrdinalIgnoreCase) == true ||
+        status?.Contains("maintenance", StringComparison.OrdinalIgnoreCase) == true;
+
+    [HttpPut("{id:guid}/operational"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateOperational(Guid id, RunOperationalRequest request, CancellationToken ct)
+    {
+        if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0)
+            return BadRequest(new { message = "Capacity values cannot be negative." });
+
+        var (load, register) = await FindLoadAsync(id, includeStops: false, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        var values = new RunOperationalValues(
+            request.PalletSpacesUsed,
+            request.TotalPalletSpaces,
+            Clip(request.CapacityType, 40) ?? "Standard pallets",
+            Clip(request.DepotSplits, 1000),
+            request.TemperatureC,
+            Clip(request.PlannerNotes, 1000));
+
+        await RunOperationalStore.SaveAsync(db, load, values, User.Identity?.Name, ct);
+        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+        return Ok(load);
+    }
+
+    [HttpPut("{id:guid}/relay"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateRelay(Guid id, RunRelayRequest request, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        if (!request.Enabled)
+        {
+            load.RelayPlan = null;
+            await SaveCoreLoadAsync(load, register, ct);
+            return Ok(load);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.HandoverSite))
+            return BadRequest(new { message = "Enter the trailer handover location." });
+        if (request.HandoverAfterStopSequence is int split && (split < 1 || split >= load.Stops.Count))
+            return BadRequest(new { message = "The handover must be between two planned stops." });
+        if (request.HandoverSiteId is Guid siteId && !await db.Sites.AsNoTracking().AnyAsync(x => x.Id == siteId && x.Active, ct))
+            return BadRequest(new { message = "The selected handover site is not active in Site Master." });
+        if (request.DeliveryDriverId is Guid driverId && !await db.Drivers.AsNoTracking().AnyAsync(x => x.Id == driverId && x.Active, ct))
+            return BadRequest(new { message = "The delivery driver is not active." });
+        if (request.DeliveryVehicleId is Guid vehicleId && !await db.Vehicles.AsNoTracking().AnyAsync(x => x.Id == vehicleId && x.Active, ct))
+            return BadRequest(new { message = "The delivery vehicle is not active." });
+        if (request.DeliveryTrailerId is Guid trailerId && !await db.Trailers.AsNoTracking().AnyAsync(x => x.Id == trailerId && x.Active, ct))
+            return BadRequest(new { message = "The delivery trailer is not active." });
+
+        load.RelayPlan = new LoadRelayPlan
+        {
+            Enabled = true,
+            HandoverSite = Clip(request.HandoverSite, 200),
+            HandoverSiteId = request.HandoverSiteId,
+            HandoverAfterStopSequence = request.HandoverAfterStopSequence,
+            PlannedHandoverUtc = request.PlannedHandoverUtc,
+            DeliveryDriverId = request.DeliveryDriverId,
+            DeliveryVehicleId = request.DeliveryVehicleId,
+            DeliveryTrailerId = request.DeliveryTrailerId,
+            UpdatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedBy = User.Identity?.Name
+        };
+        await SaveCoreLoadAsync(load, register, ct);
+        return Ok(load);
+    }
+
+    [HttpPut("{id:guid}/status"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateStatus(Guid id, RunStatusRequest request, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+        if (!Enum.TryParse<LoadStatus>(request.Status, true, out var next)) return BadRequest(new { message = "The requested run status is not valid." });
+        if (next == LoadStatus.Dispatched)
+            return BadRequest(new { message = "Dispatch must use the controlled driver-message dispatch flow so structural readiness and live TachoMaster checks cannot be bypassed." });
+        if (!CanTransition(load.Status, next)) return BadRequest(new { message = $"A run cannot move from {load.Status} to {next}." });
+        if (next == LoadStatus.InProgress && (load.DriverId is null || load.VehicleId is null))
+            return BadRequest(new { message = "Allocate both a driver and vehicle before starting a dispatched run." });
+
+        load.Status = next;
+        await SaveCoreLoadAsync(load, register, ct);
+        await RunOperationalStore.EnrichAsync(db, [load], ct);
+        return Ok(load);
+    }
+
+    [HttpPut("{id:guid}/stops"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateStops(Guid id, List<RunStopRequest> request, CancellationToken ct)
+    {
+        if (request.Count == 0 || request.Any(x => string.IsNullOrWhiteSpace(x.Name)))
+            return BadRequest(new { message = "At least one named stop is required." });
+
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        if (!register) db.LoadStops.RemoveRange(load.Stops);
+        var orderedRequest = request
+            .Select((stop, index) => new { Stop = stop, Index = index })
+            .OrderBy(item => OperationalStopOrdering.Phase(item.Stop.Name))
+            .ThenBy(item => item.Index)
+            .Select(item => item.Stop)
+            .ToList();
+        load.Stops = orderedRequest.Select((stop, index) => new LoadStop
+        {
+            Id = Guid.NewGuid(),
+            LoadId = load.Id,
+            OrderId = stop.OrderId,
+            Sequence = index + 1,
+            Name = stop.Name.Trim(),
+            Address = Clip(stop.Address, 500),
+            Latitude = stop.Latitude,
+            Longitude = stop.Longitude,
+            PlannedArrivalUtc = stop.PlannedArrivalUtc,
+            PlannerNote = Clip(stop.PlannerNote, 1000)
+        }).ToList();
+
+        await SaveCoreLoadAsync(load, register, ct);
+        await RunOperationalStore.EnrichAsync(db, [load], ct);
+        return Ok(load);
+    }
+
+    [HttpGet("{id:guid}/route")]
+    public async Task<IActionResult> Route(Guid id, CancellationToken ct)
+    {
+        var (load, _) = await FindLoadAsync(id, includeStops: true, tracking: false, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+        var points = OperationalStopOrdering.Order(load.Stops)
+            .Where(x => x.Longitude is not null && x.Latitude is not null)
+            .Select(x => (x.Longitude!.Value, x.Latitude!.Value))
+            .ToList();
+        if (points.Count < 2) return BadRequest(new { message = "At least two mapped stops are required before calculating a route." });
+        // Return waypoints instead of Azure Maps routing - Samsara provides actual route execution
+        return Ok(new
+        {
+            waypoints = points.Select((p, i) => new { index = i, longitude = p.Item1, latitude = p.Item2 }).ToList(),
+            note = "Run allocation uses Samsara live vehicle tracking. This endpoint returns planned waypoints; actual route execution comes from Samsara."
+        });
+    }
+
+    [HttpGet("{id:guid}/dispatch")]
+    public async Task<IActionResult> Dispatch(Guid id, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: false, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        var orders = await LoadOrdersAsync(load, register, ct);
+        var driver = load.DriverId is null ? null : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.DriverId, ct);
+        var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.VehicleId, ct);
+        var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.TrailerId, ct);
+        var orderedStops = OperationalStopOrdering.Order(load.Stops);
+        var deliveryByOrder = orderedStops
+            .Where(stop => stop.OrderId is not null && stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(stop => stop.OrderId!.Value)
+            .ToDictionary(group => group.Key, group => group.OrderBy(stop => stop.Sequence).Last().Name);
+
+        return Ok(new
+        {
+            load.Id,
+            load.Reference,
+            load.PlanningDate,
+            load.Status,
+            driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
+            vehicle = vehicle is null ? null : new
+            {
+                vehicle.Registration,
+                vehicle.FleetNumber,
+                vehicle.FuelProvider,
+                vehicle.FuelPin,
+                vehicle.ShellCard,
+                vehicle.BpRedCard,
+                vehicle.BpPlainCard,
+                vehicle.FuelCardLastFour
+            },
+            trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
+            stops = orderedStops.Select((stop, index) => new
+            {
+                stop.Id,
+                sequence = index + 1,
+                stop.Name,
+                stop.Address,
+                stop.Latitude,
+                stop.Longitude,
+                stop.PlannedArrivalUtc,
+                order = stop.OrderId is Guid orderId && orders.TryGetValue(orderId, out var order) ? new
+                {
+                    order.Reference,
+                    order.CustomerCode,
+                    order.Pallets,
+                    order.CollectionDate,
+                    order.DeliveryDate,
+                    order.SellerName,
+                    order.MarketName,
+                    order.StallNumber,
+                    order.DriverInstructions,
+                    order.MapLink,
+                    deliveryName = deliveryByOrder.GetValueOrDefault(orderId)
+                } : null
+            })
+        });
+    }
+
+    private async Task<Dictionary<Guid, TransportOrder>> LoadOrdersAsync(Load load, bool register, CancellationToken ct)
+    {
+        var ids = load.Stops.Where(x => x.OrderId is not null).Select(x => x.OrderId!.Value).Distinct().ToList();
+        if (ids.Count == 0) return [];
+        if (!register)
+        {
+            try
+            {
+                return await db.TransportOrders.AsNoTracking().Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+            }
+            catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+        return (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct))
+            .Where(x => ids.Contains(x.Id)).ToDictionary(x => x.Id);
+    }
+
+    private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool tracking, CancellationToken ct)
+    {
+        var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
+        if (registered is not null)
+        {
+            await RunOperationalStore.EnrichAsync(db, [registered], ct);
+            return (registered, true);
+        }
+
+        try
+        {
+            IQueryable<Load> query = tracking ? db.Loads : db.Loads.AsNoTracking();
+            if (includeStops) query = query.Include(x => x.Stops);
+            var load = await query.SingleOrDefaultAsync(x => x.Id == id, ct);
+            if (load is not null)
+            {
+                await RunOperationalStore.EnrichAsync(db, [load], ct);
+                return (load, false);
+            }
+        }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        return (null, false);
+    }
+
+    private async Task SaveCoreLoadAsync(Load load, bool register, CancellationToken ct)
+    {
+        if (register)
+        {
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+            return;
+        }
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+        }
+    }
+
+    private static List<LoadStop> RenumberOperationalStops(IEnumerable<LoadStop>? stops) => OperationalStopOrdering.Order(stops)
+        .Select((stop, index) =>
+        {
+            stop.Sequence = index + 1;
+            return stop;
+        })
+        .ToList();
+
+    private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
+    private static bool CanTransition(LoadStatus current, LoadStatus next) => current == next || (current, next) switch
+    {
+        (LoadStatus.Draft, LoadStatus.Planned) => true,
+        (LoadStatus.Planned, LoadStatus.Draft) => true,
+        (LoadStatus.Dispatched, LoadStatus.InProgress) => true,
+        (LoadStatus.Dispatched, LoadStatus.Cancelled) => true,
+        (LoadStatus.InProgress, LoadStatus.Completed) => true,
+        (LoadStatus.InProgress, LoadStatus.Cancelled) => true,
+        _ => false
+    };
+}
+
+public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId, DateTimeOffset? PlannedStartUtc = null, bool UseReducedDailyRest = false);
+public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
+public sealed record RunRelayRequest(bool Enabled, string? HandoverSite, Guid? HandoverSiteId, int? HandoverAfterStopSequence, DateTimeOffset? PlannedHandoverUtc, Guid? DeliveryDriverId = null, Guid? DeliveryVehicleId = null, Guid? DeliveryTrailerId = null);
+public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc, string? PlannerNote);
+public sealed record RunStatusRequest(string Status);

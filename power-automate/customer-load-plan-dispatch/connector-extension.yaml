@@ -1,0 +1,76 @@
+# Merge these paths/definitions into openapi-power-automate.yaml when importing the
+# existing SLH TMS custom connector. Kept separately so the outbound flow can be
+# deployed without risking the production inbound connector definition.
+paths:
+  /customer-load-plans/outbox:
+    get:
+      operationId: GetCustomerLoadPlanOutbox
+      summary: Get reviewed customer load plans waiting to be sent from the Info mailbox
+      x-ms-visibility: important
+      parameters:
+        - { name: take, in: query, type: integer, required: false, default: 10, maximum: 50 }
+      responses:
+        '200':
+          description: Queued customer load plans
+          schema:
+            type: object
+            properties:
+              count: { type: integer }
+              items:
+                type: array
+                items: { $ref: '#/definitions/CustomerLoadPlanOutboxItem' }
+  /customer-load-plans/{id}/sent:
+    post:
+      operationId: MarkCustomerLoadPlanSent
+      summary: Mark a customer load plan sent after Outlook accepts it
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/CustomerLoadPlanSentRequest' }
+      responses:
+        '200': { description: Load plan marked sent }
+  /customer-load-plans/{id}/failed:
+    post:
+      operationId: MarkCustomerLoadPlanFailed
+      summary: Retain an outbound load-plan send failure for planner recovery
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/CustomerLoadPlanFailedRequest' }
+      responses:
+        '200': { description: Load plan marked failed }
+
+definitions:
+  CustomerLoadPlanOutboxAttachment:
+    type: object
+    required: [name, contentType, contentBytes]
+    properties:
+      name: { type: string }
+      contentType: { type: string }
+      contentBytes: { type: string, description: Base64 PDF content for Outlook attachment }
+  CustomerLoadPlanOutboxItem:
+    type: object
+    required: [id, mailbox, to, subject, body, attachments, planningDate, customerCode, customerName]
+    properties:
+      id: { type: string, format: uuid }
+      mailbox: { type: string, example: info@lyonshaulage.com }
+      to: { type: array, items: { type: string } }
+      cc: { type: array, items: { type: string } }
+      subject: { type: string }
+      body: { type: string }
+      attachments: { type: array, items: { $ref: '#/definitions/CustomerLoadPlanOutboxAttachment' } }
+      planningDate: { type: string, format: date }
+      customerCode: { type: string }
+      customerName: { type: string }
+  CustomerLoadPlanSentRequest:
+    type: object
+    properties:
+      providerMessageId: { type: string }
+  CustomerLoadPlanFailedRequest:
+    type: object
+    properties:
+      error: { type: string }

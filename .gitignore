@@ -1,0 +1,46 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+*.sln.iml
+
+# macOS
+.DS_Store
+
+# Publish output
+publish/
+
+# Azure
+*.azurePubxml
+*.publishsettings
+*.Publish.xml
+
+# Logs
+*.log
+
+# Local app settings
+appsettings.Development.json
+secrets.json
+
+# Test results
+TestResults/
+
+# Database files
+*.db
+*.sqlite
+*.mdf
+*.ldf
+
+# Sensitive certificates
+*.pfx
+*.key
+*.pem

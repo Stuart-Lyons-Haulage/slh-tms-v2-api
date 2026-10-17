@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database (Cloud alternative: use Railway/Fly.io managed DB)
+  postgres:
+    image: postgres:16-alpine
+    container_name: slh-tms-db
+    environment:
+      POSTGRES_USER: slh_user
+      POSTGRES_PASSWORD: ChangeMe123!SecurePassword
+      POSTGRES_DB: slh_tms_v2
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./Database:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slh_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - slh-network
+
+  # C# API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: slh-tms-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__TmsDb: "Server=postgres;Port=5432;Database=slh_tms_v2;User Id=slh_user;Password=ChangeMe123!SecurePassword;Ssl Mode=Disable;"
+      Entra__TenantId: "your-tenant-id-here"
+      Entra__Audience: "api://slh-tms-v2"
+      Entra__AllowedDomains__0: "lyonshaulage.com"
+      Cors__AllowedOrigins__0: "http://localhost:3000"
+      ASPNETCORE_URLS: "http://+:5000"
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - slh-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # TypeScript Web Frontend
+  web:
+    build:
+      context: ../slh-tms-v2-web
+      dockerfile: Dockerfile
+    container_name: slh-tms-web
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: "http://localhost:5000"
+    depends_on:
+      - api
+    networks:
+      - slh-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  slh-network:
+    driver: bridge

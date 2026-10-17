@@ -1,0 +1,125 @@
+{
+  "properties": {
+    "displayName": "SLH-TMS | Customer Load Plans | Info Mailbox | PROD",
+    "state": "Started",
+    "connectionReferences": {
+      "shared_office365": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "slh_sharedoffice365_info" },
+        "api": { "name": "shared_office365" }
+      },
+      "shared_slhtms": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "slh_sharedslhtms_prod" },
+        "api": { "name": "shared_slhtms" }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" }
+      },
+      "triggers": {
+        "Every_Minute": {
+          "type": "Recurrence",
+          "recurrence": { "frequency": "Minute", "interval": 1 }
+        }
+      },
+      "actions": {
+        "Get_Customer_Load_Plan_Outbox": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
+              "connectionName": "shared_slhtms",
+              "operationId": "GetCustomerLoadPlanOutbox"
+            },
+            "parameters": { "take": 10 }
+          },
+          "runtimeConfiguration": {
+            "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" }
+          }
+        },
+        "For_Each_Queued_Load_Plan": {
+          "type": "Foreach",
+          "runAfter": { "Get_Customer_Load_Plan_Outbox": ["Succeeded"] },
+          "foreach": "@coalesce(body('Get_Customer_Load_Plan_Outbox')?['items'], json('[]'))",
+          "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+          "actions": {
+            "Send_From_Info_Mailbox": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                  "connectionName": "shared_office365",
+                  "operationId": "SharedMailboxSendEmailV2"
+                },
+                "parameters": {
+                  "emailMessage/MailboxAddress": "@items('For_Each_Queued_Load_Plan')?['mailbox']",
+                  "emailMessage/To": "@join(items('For_Each_Queued_Load_Plan')?['to'], ';')",
+                  "emailMessage/CC": "@join(coalesce(items('For_Each_Queued_Load_Plan')?['cc'], json('[]')), ';')",
+                  "emailMessage/Subject": "@items('For_Each_Queued_Load_Plan')?['subject']",
+                  "emailMessage/Body": "@replace(items('For_Each_Queued_Load_Plan')?['body'], decodeUriComponent('%0A'), '<br>')",
+                  "emailMessage/Attachments": [
+                    {
+                      "Name": "@first(items('For_Each_Queued_Load_Plan')?['attachments'])?['name']",
+                      "ContentBytes": "@first(items('For_Each_Queued_Load_Plan')?['attachments'])?['contentBytes']"
+                    }
+                  ],
+                  "emailMessage/Importance": "Normal"
+                }
+              },
+              "runtimeConfiguration": {
+                "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" },
+                "secureData": { "properties": ["inputs", "outputs"] }
+              }
+            },
+            "Mark_Load_Plan_Sent": {
+              "type": "OpenApiConnection",
+              "runAfter": { "Send_From_Info_Mailbox": ["Succeeded"] },
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
+                  "connectionName": "shared_slhtms",
+                  "operationId": "MarkCustomerLoadPlanSent"
+                },
+                "parameters": {
+                  "id": "@items('For_Each_Queued_Load_Plan')?['id']",
+                  "body": {
+                    "providerMessageId": "@coalesce(outputs('Send_From_Info_Mailbox')?['body/id'], workflow()?['run']?['name'])"
+                  }
+                }
+              },
+              "runtimeConfiguration": {
+                "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" }
+              }
+            },
+            "Mark_Load_Plan_Failed": {
+              "type": "OpenApiConnection",
+              "runAfter": { "Send_From_Info_Mailbox": ["Failed", "TimedOut"] },
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
+                  "connectionName": "shared_slhtms",
+                  "operationId": "MarkCustomerLoadPlanFailed"
+                },
+                "parameters": {
+                  "id": "@items('For_Each_Queued_Load_Plan')?['id']",
+                  "body": {
+                    "error": "@concat('Info mailbox send failed in Power Automate run ', workflow()?['run']?['name'])"
+                  }
+                }
+              },
+              "runtimeConfiguration": {
+                "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" }
+              }
+            }
+          }
+        }
+      },
+      "outputs": {}
+    }
+  },
+  "schemaVersion": "1.0.0.0"
+}

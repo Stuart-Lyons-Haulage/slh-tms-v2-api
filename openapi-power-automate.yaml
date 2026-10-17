@@ -1,0 +1,399 @@
+swagger: '2.0'
+info:
+  title: SLH TMS API
+  version: '1.2'
+host: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+basePath: /api/v1
+schemes: [https]
+produces: [application/json]
+consumes: [application/json]
+securityDefinitions:
+  oauth2:
+    type: oauth2
+    flow: accessCode
+    authorizationUrl: https://login.microsoftonline.com/REPLACE_TENANT_ID/oauth2/v2.0/authorize
+    tokenUrl: https://login.microsoftonline.com/REPLACE_TENANT_ID/oauth2/v2.0/token
+    scopes:
+      api://REPLACE_API_CLIENT_ID/Tms.Access: Access the TMS API
+security: [{ oauth2: [api://REPLACE_API_CLIENT_ID/Tms.Access] }]
+paths:
+  /customers:
+    get:
+      operationId: GetCustomers
+      summary: Search active customers
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Customer results, schema: { type: array, items: { $ref: '#/definitions/Customer' } } } }
+  /vehicles:
+    get:
+      operationId: GetVehicles
+      summary: Search active vehicles
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Vehicle results, schema: { type: array, items: { $ref: '#/definitions/Vehicle' } } } }
+  /drivers:
+    get:
+      operationId: GetDrivers
+      summary: Search active drivers
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Driver results, schema: { type: array, items: { $ref: '#/definitions/Driver' } } } }
+  /trailers:
+    get:
+      operationId: GetTrailers
+      summary: Search active trailers and capacities
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Trailer results, schema: { type: array, items: { $ref: '#/definitions/Trailer' } } } }
+  /sites:
+    get:
+      operationId: GetSites
+      summary: Search active collection and delivery sites
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Site results, schema: { type: array, items: { $ref: '#/definitions/Site' } } } }
+  /market-contacts:
+    get:
+      operationId: GetMarketContacts
+      summary: Search active market contacts
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Market-contact results, schema: { type: array, items: { $ref: '#/definitions/MarketContact' } } } }
+  /staging:
+    get:
+      operationId: ListStagedImports
+      summary: List staged records for review
+      parameters:
+        - { name: status, in: query, type: string, required: false, enum: [PendingReview, Approved, Rejected, Promoted, Failed] }
+        - { name: entityType, in: query, type: string, required: false }
+        - { name: take, in: query, type: integer, required: false, default: 100, maximum: 2000 }
+      responses: { '200': { description: Staged records } }
+    post:
+      operationId: SubmitStagedImport
+      summary: Submit an import for review
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/StageImportRequest' }
+      responses:
+        '202': { description: Accepted for review, schema: { $ref: '#/definitions/StageImportResponse' } }
+        '200': { description: Existing idempotent submission, schema: { $ref: '#/definitions/StageImportResponse' } }
+  /staging/{id}:
+    get:
+      operationId: GetStagedImport
+      summary: Get review status
+      parameters: [{ name: id, in: path, required: true, type: string, format: uuid }]
+      responses: { '200': { description: Staged record } }
+  /staging/{id}/approve:
+    post:
+      operationId: ApproveStagedImport
+      summary: Approve and promote a staged import
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Promoted record } }
+  /staging/{id}/reject:
+    post:
+      operationId: RejectStagedImport
+      summary: Reject a staged import
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Rejected record } }
+  /staging/{id}/payload:
+    put:
+      operationId: AmendPendingOrder
+      summary: Correct a pending mailbox order before approval
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/StagedPayloadAmendment' }
+      responses: { '200': { description: Updated pending staged order } }
+  /staging/{id}/history:
+    get:
+      operationId: GetStagedImportHistory
+      summary: Get append-only SQL payload and review history for a staged import
+      parameters: [{ name: id, in: path, required: true, type: string, format: uuid }]
+      responses:
+        '200':
+          description: Ordered staging history
+          schema: { type: array, items: { $ref: '#/definitions/StagedImportHistoryEvent' } }
+  /staging/pending/archive:
+    post:
+      operationId: ArchivePendingStagedImports
+      summary: Archive pending staging rows without deleting their SQL history
+      parameters:
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ArchivePendingRequest' } }
+      responses: { '200': { description: Pending rows archived and retained } }
+  /order-intake/email/preview:
+    post:
+      operationId: PreviewInfoMailboxEmail
+      summary: Parse an Info mailbox email without creating staged orders
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' }
+      responses: { '200': { description: Parsed order preview } }
+  /order-intake/email:
+    post:
+      operationId: IntakeInfoMailboxEmail
+      summary: Parse one complete Info mailbox email and stage identified orders for review
+      x-ms-visibility: important
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' }
+      responses:
+        '202': { description: Email parsed and one or more orders staged, schema: { $ref: '#/definitions/EmailIntakeResponse' } }
+        '200': { description: Email ignored or previously processed, schema: { $ref: '#/definitions/EmailIntakeResponse' } }
+  /customer-communications/pending:
+    get:
+      operationId: GetPendingCustomerAcknowledgements
+      summary: Get customer acknowledgements due after Order Review acceptance
+      parameters:
+        - { name: take, in: query, type: integer, required: false, default: 50, maximum: 200 }
+      responses:
+        '200': { description: Pending consolidated acknowledgements }
+  /customer-communications/{communicationKey}/sent:
+    post:
+      operationId: MarkCustomerAcknowledgementSent
+      summary: Mark an acknowledgement sent only after Outlook reply succeeds
+      parameters:
+        - { name: communicationKey, in: path, required: true, type: string }
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/CommunicationSentRequest' }
+      responses:
+        '200': { description: Communication marked sent idempotently }
+        '404': { description: Communication source not found }
+  /customer-communications:
+    get:
+      operationId: ListCustomerCommunications
+      summary: List retained ETA, load-plan and exception communication evidence
+      parameters:
+        - { name: status, in: query, type: string, required: false, enum: [PendingReview, Promoted, Rejected, Archived] }
+        - { name: purpose, in: query, type: string, required: false, enum: [EtaUpdate, LoadPlan, Exception, Other] }
+        - { name: take, in: query, type: integer, required: false, default: 100, maximum: 500 }
+      responses: { '200': { description: Communication evidence records } }
+    post:
+      operationId: IngestCustomerCommunication
+      summary: Retain and extract a mailbox communication without creating a live order
+      parameters:
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' } }
+      responses:
+        '202': { description: Communication staged for TMS review }
+        '200': { description: Existing idempotent communication returned }
+  /customer-communications/{id}/approve:
+    post:
+      operationId: ApproveCustomerCommunication
+      summary: Approve communication evidence for the operational record
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Communication review recorded } }
+  /customer-communications/{id}/reject:
+    post:
+      operationId: RejectCustomerCommunication
+      summary: Reject communication evidence
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Communication review recorded } }
+  /customer-load-plans/outbox:
+    get:
+      operationId: GetCustomerLoadPlanOutbox
+      summary: Get reviewed customer load plans waiting to be sent from the Info mailbox
+      x-ms-visibility: important
+      parameters:
+        - { name: take, in: query, type: integer, required: false, default: 10, maximum: 50 }
+      responses:
+        '200':
+          description: Queued customer load plans
+          schema:
+            type: object
+            properties:
+              count: { type: integer }
+              items: { type: array, items: { $ref: '#/definitions/CustomerLoadPlanOutboxItem' } }
+  /customer-load-plans/{id}/sent:
+    post:
+      operationId: MarkCustomerLoadPlanSent
+      summary: Mark a customer load plan sent after Outlook accepts it
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/CustomerLoadPlanSentRequest' } }
+      responses: { '200': { description: Load plan marked sent } }
+  /customer-load-plans/{id}/failed:
+    post:
+      operationId: MarkCustomerLoadPlanFailed
+      summary: Retain an outbound load-plan send failure for planner recovery
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/CustomerLoadPlanFailedRequest' } }
+      responses: { '200': { description: Load plan marked failed } }
+  /operations/customer-eta-evidence:
+    get:
+      operationId: GetCustomerEtaEvidence
+      summary: Get the evidence-backed customer ETA dataset
+      parameters: [{ name: date, in: query, type: string, format: date, required: false }]
+      responses: { '200': { description: ETA evidence dataset } }
+  /operations/customer-eta-evidence/export.csv:
+    get:
+      operationId: ExportCustomerEtaEvidenceCsv
+      summary: Export evidence-backed customer ETA CSV
+      produces: [text/csv]
+      parameters: [{ name: date, in: query, type: string, format: date, required: false }]
+      responses: { '200': { description: Customer ETA evidence CSV } }
+  /planning-day/{date}/reset-preview:
+    get:
+      operationId: PreviewPlanningDayReset
+      summary: Count records that would be reset for one planning date
+      parameters:
+        - { name: date, in: path, required: true, type: string, format: date }
+      responses: { '200': { description: Reset preview } }
+  /planning-day/{date}:
+    delete:
+      operationId: ResetPlanningDay
+      summary: Clear only one planning date while retaining delivered/completed history
+      parameters:
+        - { name: date, in: path, required: true, type: string, format: date }
+        - { name: confirm, in: query, required: true, type: string, description: 'Must equal RESET-YYYY-MM-DD' }
+      responses: { '200': { description: Planning date reset summary } }
+definitions:
+  CustomerLoadPlanOutboxAttachment:
+    type: object
+    required: [name, contentType, contentBytes]
+    properties:
+      name: { type: string }
+      contentType: { type: string }
+      contentBytes: { type: string, description: Base64 PDF content for Outlook attachment }
+  CustomerLoadPlanOutboxItem:
+    type: object
+    required: [id, mailbox, to, subject, body, attachments, planningDate, customerCode, customerName]
+    properties:
+      id: { type: string, format: uuid }
+      mailbox: { type: string, example: info@lyonshaulage.com }
+      to: { type: array, items: { type: string } }
+      cc: { type: array, items: { type: string } }
+      subject: { type: string }
+      body: { type: string }
+      attachments: { type: array, items: { $ref: '#/definitions/CustomerLoadPlanOutboxAttachment' } }
+      planningDate: { type: string, format: date }
+      customerCode: { type: string }
+      customerName: { type: string }
+  CustomerLoadPlanSentRequest:
+    type: object
+    properties: { providerMessageId: { type: string } }
+  CustomerLoadPlanFailedRequest:
+    type: object
+    properties: { error: { type: string } }
+  StageImportRequest:
+    type: object
+    required: [entityType, idempotencyKey, payload]
+    properties:
+      entityType: { type: string, enum: [customer, vehicle, driver, trailer, site, marketcontact, order] }
+      idempotencyKey: { type: string, example: email-message-id-or-source-key }
+      source: { type: string, example: PowerAutomate/InfoMailbox }
+      payload: { type: object, additionalProperties: true }
+  StageImportResponse:
+    type: object
+    properties:
+      stagingId: { type: string, format: uuid }
+      status: { type: string, example: PendingReview }
+      receivedAtUtc: { type: string, format: date-time }
+      reviewUrl: { type: string }
+  StagedPayloadAmendment:
+    type: object
+    required: [payload]
+    properties:
+      note: { type: string }
+      payload: { type: object, additionalProperties: true }
+  ArchivePendingRequest:
+    type: object
+    required: [reason]
+    properties:
+      reason: { type: string }
+  StagedImportHistoryEvent:
+    type: object
+    properties:
+      id: { type: string, format: uuid }
+      stagedImportId: { type: string, format: uuid }
+      eventType: { type: string, enum: [Received, Amended, Approved, Rejected, Promoted, Failed, Superseded, Archived] }
+      previousStatus: { type: string, enum: [PendingReview, Approved, Rejected, Promoted, Failed, Archived] }
+      newStatus: { type: string, enum: [PendingReview, Approved, Rejected, Promoted, Failed, Archived] }
+      payload: { type: object, additionalProperties: true }
+      note: { type: string }
+      actor: { type: string }
+      occurredAtUtc: { type: string, format: date-time }
+  MailboxAttachmentRequest:
+    type: object
+    properties:
+      name: { type: string }
+      contentType: { type: string }
+      contentBase64: { type: string, description: Base64 content returned by Get attachment content }
+      contentBytes: { type: string, description: Base64 content returned by Outlook shared-mailbox attachment triggers }
+      isInline: { type: boolean, default: false }
+      contentId: { type: string }
+      size: { type: integer, format: int64 }
+  MailboxEmailIntakeRequest:
+    type: object
+    required: [messageId]
+    properties:
+      messageId: { type: string }
+      internetMessageId: { type: string }
+      conversationId: { type: string }
+      mailbox: { type: string, example: info@lyonshaulage.com }
+      senderAddress: { type: string }
+      senderName: { type: string }
+      subject: { type: string }
+      receivedAtUtc: { type: string, format: date-time }
+      bodyText: { type: string }
+      bodyHtml: { type: string }
+      bodyFormat: { type: string }
+      importance: { type: string }
+      webLink: { type: string }
+      correlationId: { type: string }
+      toRecipients: { type: array, items: { type: object, additionalProperties: true } }
+      ccRecipients: { type: array, items: { type: object, additionalProperties: true } }
+      attachments:
+        type: array
+        items: { $ref: '#/definitions/MailboxAttachmentRequest' }
+  EmailIntakeResponse:
+    type: object
+    properties:
+      ignored: { type: boolean }
+      reason: { type: string }
+      staged: { type: integer }
+      existing: { type: integer }
+      superseded: { type: integer }
+      outlookCategory: { type: string, description: "Apply this Outlook category to the source email when present. Expected values are TMS Imported or TMS Review." }
+      warnings: { type: array, items: { type: string } }
+      records:
+        type: array
+        items:
+          type: object
+          additionalProperties: true
+  CommunicationSentRequest:
+    type: object
+    properties:
+      providerMessageId: { type: string, description: Outlook reply/result message ID returned after a successful send }
+  ReviewRequest:
+    type: object
+    properties: { note: { type: string } }
+  Customer:
+    type: object
+    properties: { id: { type: string, format: uuid }, code: { type: string }, name: { type: string }, active: { type: boolean } }
+  Vehicle:
+    type: object
+    properties: { id: { type: string, format: uuid }, registration: { type: string }, fleetNumber: { type: string }, abbreviation: { type: string }, transmission: { type: string }, dvsCompliant: { type: boolean }, fuelProvider: { type: string }, fuelPinSecretName: { type: string }, fuelCardLastFour: { type: string }, active: { type: boolean } }
+  Driver:
+    type: object
+    properties: { id: { type: string, format: uuid }, employeeNumber: { type: string }, displayName: { type: string }, tachoName: { type: string }, driverType: { type: string }, driverGroup: { type: string }, skills: { type: string }, active: { type: boolean } }
+  Trailer:
+    type: object
+    properties: { id: { type: string, format: uuid }, trailerNumber: { type: string }, type: { type: string }, standardCapacity: { type: integer }, euroCapacity: { type: integer }, active: { type: boolean } }
+  Site:
+    type: object
+    properties: { id: { type: string, format: uuid }, externalCode: { type: string }, name: { type: string }, driverTextName: { type: string }, collectionAddress: { type: string }, collectionInstructions: { type: string }, mapLink: { type: string }, active: { type: boolean } }
+  MarketContact:
+    type: object
+    properties: { id: { type: string, format: uuid }, market: { type: string }, name: { type: string }, standOrLocation: { type: string }, active: { type: boolean } }

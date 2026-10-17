@@ -1,0 +1,18 @@
+{
+  "checkedAtUtc": "2026-09-14T19:24:41Z",
+  "apiIdentityType": "UserAssigned",
+  "apiIdentities": [],
+  "tachoIdentities": [
+    {
+      "resourceId": "/subscriptions/29d5b52a-5b9f-4b5a-9495-892f1c2a30f3/resourcegroups/slh-tms-prod-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/slh-tms-jobs-prod-id",
+      "dbUserIdMatchesClientId": false
+    }
+  ],
+  "etaIdentities": [
+    {
+      "resourceId": "/subscriptions/29d5b52a-5b9f-4b5a-9495-892f1c2a30f3/resourcegroups/slh-tms-prod-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/slh-tms-jobs-prod-id",
+      "dbUserIdMatchesClientId": false
+    }
+  ],
+  "dbUsesExplicitUserId": false
+}

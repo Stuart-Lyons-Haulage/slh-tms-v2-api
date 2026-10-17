@@ -1,0 +1,264 @@
+{
+  "properties": {
+    "displayName": "SLH-TMS | Info Mailbox | Order Intake | PROD",
+    "state": "Started",
+    "connectionReferences": {
+      "shared_office365": {
+        "runtimeSource": "embedded",
+        "connection": {
+          "connectionReferenceLogicalName": "slh_sharedoffice365_info"
+        },
+        "api": {
+          "name": "shared_office365"
+        }
+      },
+      "shared_slhtms": {
+        "runtimeSource": "embedded",
+        "connection": {
+          "connectionReferenceLogicalName": "slh_sharedslhtms_prod"
+        },
+        "api": {
+          "name": "shared_slhtms"
+        }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.5.0",
+      "parameters": {
+        "$connections": {
+          "defaultValue": {},
+          "type": "Object"
+        },
+        "SLH_InfoMailboxUPN": {
+          "defaultValue": "info@lyonshaulage.com",
+          "type": "String"
+        }
+      },
+      "triggers": {
+        "When_New_Email_Arrives_Info_Shared_Mailbox": {
+          "type": "OpenApiConnectionNotification",
+          "inputs": {
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+              "connectionName": "shared_office365",
+              "operationId": "SharedMailboxOnNewEmailV2"
+            },
+            "parameters": {
+              "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
+              "folderId": "Inbox",
+              "importance": "Any",
+              "includeAttachments": true
+            }
+          },
+          "runtimeConfiguration": {
+            "concurrency": {
+              "runs": 4
+            }
+          }
+        }
+      },
+      "actions": {
+        "Initialise_Normalized_Attachments": {
+          "type": "InitializeVariable",
+          "inputs": {
+            "variables": [
+              {
+                "name": "NormalizedAttachments",
+                "type": "array",
+                "value": []
+              }
+            ]
+          }
+        },
+        "Apply_to_each": {
+          "type": "Foreach",
+          "runAfter": {
+            "Initialise_Normalized_Attachments": [
+              "Succeeded"
+            ]
+          },
+          "foreach": "@coalesce(triggerOutputs()?['body/attachments'],json('[]'))",
+          "runtimeConfiguration": {
+            "concurrency": {
+              "repetitions": 1
+            }
+          },
+          "actions": {
+            "If_supported_order_attachment": {
+              "type": "If",
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@coalesce(items('Apply_to_each')?['isInline'],false)",
+                      false
+                    ]
+                  },
+                  {
+                    "or": [
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".xls"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".xlsx"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".xlsm"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".csv"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".pdf"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Get_Attachment_(V2)": {
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "host": {
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                      "connectionName": "shared_office365",
+                      "operationId": "GetAttachment_V2"
+                    },
+                    "parameters": {
+                      "messageId": "@triggerOutputs()?['body/id']",
+                      "attachmentId": "@items('Apply_to_each')?['id']",
+                      "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
+                    }
+                  },
+                  "runtimeConfiguration": {
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 2,
+                      "interval": "PT5S",
+                      "minimumInterval": "PT5S",
+                      "maximumInterval": "PT30S"
+                    },
+                    "secureData": {
+                      "properties": [
+                        "outputs"
+                      ]
+                    }
+                  }
+                },
+                "Append_to_array_variable": {
+                  "type": "AppendToArrayVariable",
+                  "runAfter": {
+                    "Get_Attachment_(V2)": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "name": "NormalizedAttachments",
+                    "value": {
+                      "id": "@outputs('Get_Attachment_(V2)')?['body/id']",
+                      "name": "@outputs('Get_Attachment_(V2)')?['body/name']",
+                      "contentType": "@outputs('Get_Attachment_(V2)')?['body/contentType']",
+                      "size": "@coalesce(outputs('Get_Attachment_(V2)')?['body/size'],0)",
+                      "isInline": "@coalesce(outputs('Get_Attachment_(V2)')?['body/isInline'],false)",
+                      "contentId": "@coalesce(outputs('Get_Attachment_(V2)')?['body/contentId'],'')",
+                      "contentBytes": "@outputs('Get_Attachment_(V2)')?['body/contentBytes']"
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              }
+            }
+          }
+        },
+        "Intake_info_mailbox_email": {
+          "type": "OpenApiConnection",
+          "runAfter": {
+            "Apply_to_each": [
+              "Succeeded",
+              "Failed",
+              "TimedOut",
+              "Skipped"
+            ]
+          },
+          "inputs": {
+            "parameters": {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "body/messageId": "@triggerOutputs()?['body/id']",
+              "body/internetMessageId": "@triggerBody()?['internetMessageId']",
+              "body/conversationId": "@triggerBody()?['conversationId']",
+              "body/mailbox": "@parameters('SLH_InfoMailboxUPN')",
+              "body/senderAddress": "@triggerBody()?['from']",
+              "body/senderName": "@coalesce(triggerBody()?['fromName'],triggerBody()?['from'])",
+              "body/toRecipients": "@coalesce(triggerBody()?['toRecipients'],json('[]'))",
+              "body/ccRecipients": "@coalesce(triggerBody()?['ccRecipients'],json('[]'))",
+              "body/subject": "@triggerBody()?['subject']",
+              "body/receivedAtUtc": "@triggerBody()?['receivedDateTime']",
+              "body/bodyText": "@coalesce(triggerBody()?['bodyPreview'],'')",
+              "body/bodyHtml": "@coalesce(triggerBody()?['body'],'')",
+              "body/bodyFormat": "@if(equals(coalesce(triggerBody()?['isHtml'],true),true),'html','text')",
+              "body/importance": "@triggerBody()?['importance']",
+              "body/webLink": "@triggerBody()?['webLink']",
+              "body/correlationId": "@guid()",
+              "body/attachments": "@variables('NormalizedAttachments')"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
+              "connectionName": "shared_slhtms",
+              "operationId": "IntakeInfoMailboxEmail"
+            }
+          },
+          "runtimeConfiguration": {
+            "retryPolicy": {
+              "type": "exponential",
+              "count": 4,
+              "interval": "PT10S",
+              "minimumInterval": "PT10S",
+              "maximumInterval": "PT2M"
+            },
+            "secureData": {
+              "properties": [
+                "inputs",
+                "outputs"
+              ]
+            }
+          }
+        },
+        "Record_Import_Result": {
+          "type": "Compose",
+          "runAfter": {
+            "Intake_info_mailbox_email": [
+              "Succeeded",
+              "Failed",
+              "TimedOut"
+            ]
+          },
+          "inputs": {
+            "messageId": "@triggerOutputs()?['body/id']",
+            "result": "@body('Intake_info_mailbox_email')"
+          }
+        }
+      },
+      "outputs": {}
+    }
+  },
+  "schemaVersion": "1.0.0.0"
+}
