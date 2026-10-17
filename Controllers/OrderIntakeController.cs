@@ -902,7 +902,26 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // "Monday 19th October depot date" with PO, Total Pallets and Collection time.
         var summerBerryDepotDate = EmailOrderIntakeService.LooksLikeSummerBerryDepotDateEmail(request);
 
-        return barfootsWaitroseWave || summerBerryCoop || summerBerryDepotDate;
+        // Routine Waitrose depot bookings sent in the email body. Each is tied to the
+        // sender that uses that layout, so other mail mentioning Waitrose stays out.
+        var fowlerWelchWaitrose = EmailOrderIntakeService.IsFowlerWelchSender(request) &&
+                                  subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) &&
+                                  body.Contains("PO NUMBER", StringComparison.OrdinalIgnoreCase) &&
+                                  body.Contains("PALLET COUNT", StringComparison.OrdinalIgnoreCase);
+
+        var hallHunterDirectDepot = sender.EndsWith("@primafruit.co.uk", StringComparison.OrdinalIgnoreCase) &&
+                                    subject.Contains("DIRECT DEPOT DELIVERY", StringComparison.OrdinalIgnoreCase);
+
+        var emeryWaitrose = EmailOrderIntakeService.IsEmerySender(request) &&
+                            subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase);
+
+        var doubleHWaitrose = sender.EndsWith("@doubleh.co.uk", StringComparison.OrdinalIgnoreCase) &&
+                              subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase);
+
+        var sainsburyGm = EmailOrderIntakeService.IsSainsburyGmCollections(request);
+
+        return barfootsWaitroseWave || summerBerryCoop || summerBerryDepotDate ||
+               fowlerWelchWaitrose || hallHunterDirectDepot || emeryWaitrose || doubleHWaitrose || sainsburyGm;
     }
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)

@@ -106,13 +106,50 @@ public sealed class InfoMailboxGraphPollingServiceTests
         Assert.Equal("info@lyonshaulage.com", request.Mailbox);
         Assert.Equal(message.SenderAddress, request.SenderAddress);
         Assert.Equal(message.Subject, request.Subject);
-        Assert.Equal(message.BodyPreview, request.BodyText);
+        Assert.Equal("Please see attached.", request.BodyText);
         Assert.Equal(message.BodyHtml, request.BodyHtml);
         Assert.Equal("html", request.BodyFormat);
         Assert.Single(request.Attachments!);
         Assert.Equal("BASE64-CONTENT", request.Attachments![0].EffectiveContentBase64);
         Assert.StartsWith("graph:", request.CorrelationId);
         Assert.NotNull(request.ToRecipients);
+    }
+
+    [Theory]
+    // Evidence written by EnsureSourceEmailEvidence: PascalCase fields, camelCase contentBase64.
+    [InlineData("""{"attachments":[{"Name":"Sunday 18.10.2026.xlsx","IsInline":false,"RetrievalError":null,"contentBase64":null}]}""", true)]
+    [InlineData("""{"attachments":[{"Name":"Sunday 18.10.2026.xlsx","IsInline":false,"RetrievalError":"Graph attachment retrieval failed: timeout","contentBase64":null}]}""", true)]
+    [InlineData("""{"attachments":[{"Name":"outlook-attachment-unavailable","IsInline":false,"RetrievalError":"timeout","contentBase64":null}]}""", true)]
+    [InlineData("""{"attachments":[{"Name":"Sunday 18.10.2026.xlsx","IsInline":false,"contentBase64":"UEsDBA=="}]}""", false)]
+    [InlineData("""{"attachments":[{"Name":"outlook-attachment-unavailable","contentBase64":null},{"Name":"GHS Aldi Bookings 181026.xlsm","IsInline":false,"contentBase64":"UEsDBA=="}]}""", false)]
+    [InlineData("""{"attachments":[{"Name":"image476d70.PNG","IsInline":true,"contentBase64":null}]}""", false)]
+    [InlineData("""{"attachments":[{"Name":"big.pdf","IsInline":false,"RetrievalError":"Attachment is 30,000,000 bytes and exceeds the configured Graph intake limit.","contentBase64":null}]}""", false)]
+    public void Retained_message_is_fetched_again_until_its_order_file_is_held(string evidence, bool retry)
+    {
+        Assert.Equal(retry, InfoMailboxGraphPollingService.EvidenceNeedsAttachmentRetry(evidence, messageHasAttachments: true));
+        Assert.False(InfoMailboxGraphPollingService.EvidenceNeedsAttachmentRetry(evidence, messageHasAttachments: false));
+    }
+
+    [Fact]
+    public void Evidence_is_only_skipped_after_intake_finished_for_it()
+    {
+        Assert.False(InfoMailboxGraphPollingService.EvidenceIntakeCompleted("""{"messageId":"m1","attachments":[]}"""));
+        Assert.True(InfoMailboxGraphPollingService.EvidenceIntakeCompleted("""{"messageId":"m1","attachments":[],"intakeCompletedAtUtc":"2026-10-17T12:43:30Z"}"""));
+    }
+
+    [Fact]
+    public void Intake_receives_the_whole_body_not_the_255_character_preview()
+    {
+        var rows = string.Join("", Enumerable.Range(1, 30).Select(index => $"<tr><td>DEPOT {index}</td><td>X610{index:00}</td><td>{index}</td></tr>"));
+        var html = $"<p>These are the Waitrose pallet counts for delivery tomorrow.</p><table>{rows}</table>";
+        var message = new GraphMailboxMessage("id-1", "<id-1@example.test>", "conv-1", "Waitrose 18/10/26",
+            DateTimeOffset.Parse("2026-10-17T13:24:44Z"), html, "These are the Waitrose pallet counts", "Tom.Whiting@fowlerwelch.co.uk",
+            "Tom Whiting", "normal", null, false, null, null);
+
+        var request = InfoMailboxGraphPollingService.ToIntakeRequest(message, [], "info@lyonshaulage.com");
+
+        Assert.Contains("DEPOT 30 | X61030 | 30", request.BodyText);
+        Assert.Equal(html, request.BodyHtml);
     }
 
     [Fact]
