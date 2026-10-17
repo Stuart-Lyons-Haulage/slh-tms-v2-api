@@ -2028,6 +2028,9 @@ public sealed class EmailOrderIntakeService
                 [$"Sainsbury GM collection at {time}; the email gives no pallet count, confirm it before approval."]);
             var payload = JsonNode.Parse(order.Payload.GetRawText())!.AsObject();
             payload["requestedTime"] = time;
+            // Overrides read only this row: the header cell "Collection Time" sits
+            // above the date and would otherwise read "18/10" as an 18:00 collection.
+            payload["sourceBlockText"] = Regex.Replace(match.Value, @"\s*[|\t\n]\s*", " | ");
             orders.Add(order with { Payload = JsonSerializer.SerializeToElement(payload) });
         }
         return orders;
