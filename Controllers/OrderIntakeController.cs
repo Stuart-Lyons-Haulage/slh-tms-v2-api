@@ -969,7 +969,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         // A Barfoots market workbook is explicitly outside the automatic lane even
         // though Barfoots Waitrose/Aldi inputs remain approved.
-        if (!isVerifiedBarfootsWholesaleWorkbook && (source.Contains("MARKET", StringComparison.Ordinal) ||
+        // Whole word only: Sainsbury's footer "Sainsbury's Supermarkets Ltd" (and any
+        // "marketing" signature) must not turn a routine booking into a market order.
+        if (!isVerifiedBarfootsWholesaleWorkbook && (Regex.IsMatch(source, @"\bMARKETS?\b") ||
             source.Contains("COVENT GARDEN", StringComparison.Ordinal) ||
             source.Contains("SPITALFIELDS", StringComparison.Ordinal) ||
             source.Contains("WHOLESALE MARKET", StringComparison.Ordinal)))

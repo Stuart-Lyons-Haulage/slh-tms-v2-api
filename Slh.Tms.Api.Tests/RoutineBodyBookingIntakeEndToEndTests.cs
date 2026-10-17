@@ -116,6 +116,20 @@ public sealed class RoutineBodyBookingIntakeEndToEndTests : IClassFixture<Custom
     }
 
     [Fact]
+    public void Supermarkets_in_a_footer_is_not_a_market_order()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "m-supermarkets", null, "info@lyonshaulage.com", "Backhaul.Requests@sainsburys.co.uk", "Backhaul",
+            "Transport plan for STUART LYONS for 18/10/2026 - Version 1", DateTimeOffset.Parse("2026-10-17T13:09:20Z"),
+            "Dear STUART LYONS, Please find transport plan attached.",
+            "<p>Dear STUART LYONS,</p><p>Sainsbury's Supermarkets Ltd (3261722 England)</p>", null, null);
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+
+        var market = request with { Subject = "Wholesale Market Pallet Bookings for delivery on 19/10/26", SenderAddress = "Gosia.Mydlak@barfoots.co.uk" };
+        Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(market));
+    }
+
+    [Fact]
     public async Task Fowler_Welch_request_for_delivery_times_is_not_an_order()
     {
         var staged = await Intake("Rita.Butcher@fowlerwelch.co.uk", "Rita Butcher", "Waitrose Delivery Times", "2026-10-17T12:00:14Z",
