@@ -171,6 +171,7 @@ builder.Services.AddSingleton<PlanningChangeNotifier>();
 builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
+builder.Services.AddHostedService<CustomerCommsScheduler>();
 builder.Services.AddHostedService<NightlyArchiveBackgroundService>();
 builder.Services.AddSingleton<InfoMailboxGraphPollingService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<InfoMailboxGraphPollingService>());
