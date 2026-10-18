@@ -118,6 +118,7 @@ public sealed class DriverDispatchStatusController(
             }
         }
         IReadOnlyList<TachoDriverDutyStatus> duties = dutyBuffer;
+        var workPatterns = await DriverWorkPatterns.LatestAsync(db, ct);
 
         var result = drivers.Select(driver =>
         {
@@ -184,6 +185,14 @@ public sealed class DriverDispatchStatusController(
             if (cycleLength == 5 && projectedDayNumber is >= 6 && availability.Status != "Unavailable")
                 availability = new("Unavailable", $"Day {projectedDayNumber} after a reduced weekly rest last week: a full 45-hour weekly rest is needed before driving again.");
 
+            // Sage HR work pattern says which day of the block this should be; Tacho says what
+            // has actually been worked and stays the authority on what is legal.
+            var pattern = workPatterns.GetValueOrDefault(driver.Id);
+            var plan = pattern is null ? null : DriverWorkPatterns.Evaluate(pattern, planningDate);
+            var fit = WorkPatternFit.Resolve(plan, pattern?.Name, projectedDayNumber, cycleLength, weekly.LastWeeklyRestType);
+            if (fit.RestDay && availability.Status == "Available")
+                availability = new("Unverified", $"Rest day on {pattern!.Name} (Sage HR). Only use if the driver has agreed to work it.");
+
             var liveWorking = load is not null && HasLiveWorkingEvidence(
                 load,
                 driver,
@@ -220,14 +229,18 @@ public sealed class DriverDispatchStatusController(
                 availability.Message,
                 driveAvailablePlanningDayMinutes,
                 workAvailableWeekMinutes,
-                projectedDayNumber,
+                fit.DisplayDay ?? projectedDayNumber,
                 earliest.StartUtc,
                 earliest.Source,
                 earliest.IsAssumption)
             {
-                CycleLength = cycleLength,
+                CycleLength = fit.BlockLength ?? cycleLength,
                 LastWeeklyRestType = weekly.LastWeeklyRestType,
-                CycleNote = CycleNote(projectedDayNumber, cycleLength)
+                CycleNote = fit.Note ?? CycleNote(projectedDayNumber, cycleLength),
+                WorkPatternName = pattern?.Name,
+                WorkPatternSource = pattern is not null ? pattern.Source : projectedDayNumber is not null ? "Tacho" : null,
+                PatternRestDay = fit.RestDay,
+                TachoDayNumber = projectedDayNumber
             };
         }).ToList();
 
@@ -447,4 +460,9 @@ public sealed record DriverDispatchStatusRow(
     public int? CycleLength { get; init; }
     public string? LastWeeklyRestType { get; init; }
     public string? CycleNote { get; init; }
+    public string? WorkPatternName { get; init; }
+    /// <summary>"Sage HR", "Sage HR (entered)" or "Tacho" when there is no Sage pattern.</summary>
+    public string? WorkPatternSource { get; init; }
+    public bool PatternRestDay { get; init; }
+    public int? TachoDayNumber { get; init; }
 }
