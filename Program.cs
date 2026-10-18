@@ -158,6 +158,7 @@ builder.Services.AddDbContext<TmsDbContext>((services, options) =>
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddSingleton<BulkApprovalJobs>();
+builder.Services.AddSingleton<ReplayJobs>();
 builder.Services.AddScoped<SharePointOrderArchiveService>();
 builder.Services.AddScoped<MasterDataService>();
 builder.Services.AddScoped<SiteAddressPropagationService>();

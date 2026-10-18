@@ -30,7 +30,7 @@ public static class IntakeAutoApproval
     public const string SettingsKey = "setting:intake-auto-approval";
     public const string Actor = "Auto-approval (trusted format)";
     private const string AnomalyPrefix = "Unusual: ";
-    private const int HistoryDays = 56;
+    private const int HistoryDays = 42;
     private const int MinimumHistory = 5;
     private static readonly ConcurrentDictionary<string, (DateTimeOffset At, FormatHistory History)> HistoryCache = new(StringComparer.Ordinal);
 
@@ -221,7 +221,7 @@ public static class IntakeAutoApproval
 
     private static async Task<FormatHistory> HistoryAsync(TmsDbContext db, string key, CancellationToken ct)
     {
-        if (HistoryCache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(10))
+        if (HistoryCache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(30))
             return cached.History;
 
         var since = DateTimeOffset.UtcNow.AddDays(-HistoryDays);
