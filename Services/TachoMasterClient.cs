@@ -162,6 +162,24 @@ IF @@ROWCOUNT = 0
         }
     }
 
+    /// <summary>
+    /// When each TachoMaster member last had a duty in the shared snapshot window (the last
+    /// 28 days), plus each member's card, so Driver Master can tell who is still driving.
+    /// </summary>
+    public TachoRecentActivity? GetRecentActivity()
+    {
+        if (!options.IsConfigured || !TryGetSnapshot(out var snapshot)) return null;
+        var lastDuty = snapshot.Duties
+            .Where(duty => duty.MemCode > 0)
+            .GroupBy(duty => duty.MemCode)
+            .ToDictionary(group => group.Key, group => group.Max(duty => duty.DutyStart));
+        var cards = snapshot.Members
+            .Where(member => member.MemCode > 0 && !string.IsNullOrWhiteSpace(member.CardNoShort))
+            .Select(member => (member.MemCode, Card: member.CardNoShort!))
+            .ToList();
+        return new TachoRecentActivity(snapshot.FromDate, snapshot.ToDate, snapshot.RefreshedAtUtc, lastDuty, cards);
+    }
+
     public DateTimeOffset? SnapshotRefreshedAtUtc => TryGetSnapshot(out var snapshot) ? snapshot.RefreshedAtUtc : null;
 
     private string SnapshotCacheKey => $"{SnapshotCacheKeyPrefix}{NormaliseBaseUrl(options.BaseUrl)}";
@@ -903,6 +921,13 @@ public sealed record TachoDriverDutyStatus(
     int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
  
+public sealed record TachoRecentActivity(
+    DateOnly FromDate,
+    DateOnly ToDate,
+    DateTimeOffset RefreshedAtUtc,
+    IReadOnlyDictionary<int, DateTimeOffset> LastDutyByMember,
+    IReadOnlyList<(int MemberCode, string Card)> MemberCards);
+
 public sealed record TachoDriverProfile(
     int MemberCode,
     string DriverName,

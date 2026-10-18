@@ -11,6 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class MasterDataDuplicateReviewController(
     TmsDbContext db,
+    TachoMasterClient tachoMaster,
     ILogger<MasterDataDuplicateReviewController> logger) : ControllerBase
 {
     [HttpGet]
@@ -51,7 +52,16 @@ public sealed class MasterDataDuplicateReviewController(
 
     [HttpPost("{entityType}/merge"), Authorize(Policy = "TmsApprove")]
     public async Task<ActionResult<MasterDataDuplicateMergeResult>> Merge(string entityType, MasterDataDuplicateMergeRequest request, CancellationToken ct)
-        => Ok(await MasterDataDuplicateReviewService.MergeAsync(db, entityType, request, Actor(), ct));
+    {
+        // Driver merges check which TachoMaster member is still driving.
+        TachoRecentActivity? activity = null;
+        if (entityType.StartsWith("driver", StringComparison.OrdinalIgnoreCase))
+        {
+            try { await tachoMaster.LoadSharedSnapshotAsync(ct); activity = tachoMaster.GetRecentActivity(); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "Tacho activity unavailable for a driver merge."); }
+        }
+        return Ok(await MasterDataDuplicateReviewService.MergeAsync(db, entityType, request, Actor(), ct, activity));
+    }
 
     [HttpPost("reject"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Reject(JsonElement request, CancellationToken ct)
