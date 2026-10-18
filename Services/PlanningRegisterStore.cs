@@ -13,10 +13,16 @@ public static class PlanningRegisterStore
 
     public static async Task<List<TransportOrder>> ReadOrdersAsync(TmsDbContext db, DateOnly? from, DateOnly? to, CancellationToken ct)
     {
-        var rows = await db.StagedImports.AsNoTracking()
+        var query = db.StagedImports.AsNoTracking()
             .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") &&
-                (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted))
-            .OrderByDescending(x => x.ReceivedAtUtc).Take(5000).ToListAsync(ct);
+                (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted));
+        // A single day (the normal case) is narrowed in SQL to records mentioning that date.
+        if (from is DateOnly day && to == day)
+        {
+            var dayText = day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            query = query.Where(x => x.PayloadJson.Contains(dayText));
+        }
+        var rows = await query.OrderByDescending(x => x.ReceivedAtUtc).Take(5000).ToListAsync(ct);
         var orders = new Dictionary<string, TransportOrder>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
         {
@@ -36,8 +42,16 @@ public static class PlanningRegisterStore
         // deserialisation. The previous ascending Take(2000) selected the oldest register
         // rows before filtering, which could leave today's wallboard with only a live SQL
         // survivor even though the current imported plan contained many runs.
-        var rows = await db.StagedImports.AsNoTracking()
-            .Where(x => x.EntityType == LoadType && x.Status == StagingStatus.Promoted)
+        var query = db.StagedImports.AsNoTracking()
+            .Where(x => x.EntityType == LoadType && x.Status == StagingStatus.Promoted);
+        // Every run record carries its planning date, so a day's runs are narrowed in SQL.
+        // Without this, each call read the latest 10,000 runs of all time to keep one day.
+        if (date is DateOnly day)
+        {
+            var dayText = day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            query = query.Where(x => x.PayloadJson.Contains(dayText));
+        }
+        var rows = await query
             .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc)
             .ThenByDescending(x => x.ReceivedAtUtc)
             .Take(RecentLoadRegisterWindow)
