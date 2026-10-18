@@ -635,6 +635,17 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         CancellationToken ct,
         bool reuseMasterDataForReplay = false)
     {
+        // Compare with history only once the sites have been matched to the master list,
+        // so "Selsey" and "NWF-Selsey" are the same collection site.
+        var parsed = await ParseEmailCore(request, ct, reuseMasterDataForReplay);
+        return parsed.Orders.Count == 0 ? parsed : await IntakeAutoApproval.AnnotateAsync(db, parsed, ct);
+    }
+
+    private async Task<EmailIntakeParseResult> ParseEmailCore(
+        MailboxEmailIntakeRequest request,
+        CancellationToken ct,
+        bool reuseMasterDataForReplay = false)
+    {
         // Keep operational status messages out of the order-creation lane while still
         // allowing Intake() to link them to the existing staged order as evidence.
         // The generic parser is used here only for its explicit operational-message
@@ -721,7 +732,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (parsed.Orders.Count == 0)
             return parsed;
         parsed = HandlingUnitClassifier.Apply(parsed);
-        parsed = await IntakeAutoApproval.AnnotateAsync(db, parsed, ct);
 
         PlannerSourceMasterDataResolver? replayResolver = null;
         if (reuseMasterDataForReplay)

@@ -150,17 +150,20 @@ public static class IntakeAutoApproval
     {
         var result = new List<string>();
         if (history.Orders < MinimumHistory) return result;
-        var destination = Clean(Text(payload, "stallNumber") ?? Text(payload, "destination"));
-        var collection = Clean(Text(payload, "sellerName") ?? Text(payload, "collectionSite"));
         var pallets = Int(payload, "pallets");
         var displayDestination = Text(payload, "stallNumber") ?? Text(payload, "destination");
+        var destinationIdentities = DestinationIdentities(payload).ToList();
+        var collectionIdentities = CollectionIdentities(payload).ToList();
+        var canonical = destinationIdentities
+            .Select(identity => history.DestinationAliases.TryGetValue(identity, out var known) ? known : history.Destinations.ContainsKey(identity) ? identity : null)
+            .FirstOrDefault(value => value is not null);
 
-        if (!string.IsNullOrEmpty(destination) && !history.Destinations.ContainsKey(destination))
+        if (destinationIdentities.Count > 0 && canonical is null)
             result.Add($"new delivery point {displayDestination} for this booking");
-        if (!string.IsNullOrEmpty(collection) && history.Collections.Count > 0 && !history.Collections.Contains(collection))
+        if (collectionIdentities.Count > 0 && history.Collections.Count > 0 && !collectionIdentities.Any(history.Collections.Contains))
             result.Add($"new collection site {Text(payload, "sellerName") ?? Text(payload, "collectionSite")}");
-        if (pallets is > 0 && !string.IsNullOrEmpty(destination) &&
-            history.Destinations.TryGetValue(destination, out var counts) && counts.Count >= 3)
+        if (pallets is > 0 && canonical is not null &&
+            history.Destinations.TryGetValue(canonical, out var counts) && counts.Count >= 3)
         {
             var min = counts.Min();
             var max = counts.Max();
@@ -202,7 +205,19 @@ public static class IntakeAutoApproval
         public int Orders { get; set; }
         public Dictionary<string, List<int>> Destinations { get; } = new(StringComparer.Ordinal);
         public HashSet<string> Collections { get; } = new(StringComparer.Ordinal);
+        // Every name or master-site id a destination has been seen under, mapped to the
+        // destination's canonical key, so a raw name and its master name match.
+        public Dictionary<string, string> DestinationAliases { get; } = new(StringComparer.Ordinal);
     }
+
+    // A site is identified by its master-data id when matched, otherwise by its names.
+    private static IEnumerable<string> DestinationIdentities(JsonElement payload) =>
+        new[] { Text(payload, "deliverySiteId"), Text(payload, "deliverySiteCode"), Text(payload, "stallNumber"), Text(payload, "deliverySite"), Text(payload, "destination") }
+            .Select(Clean).Where(value => value.Length > 0).Distinct();
+
+    private static IEnumerable<string> CollectionIdentities(JsonElement payload) =>
+        new[] { Text(payload, "collectionSiteId"), Text(payload, "collectionSiteCode"), Text(payload, "sellerName"), Text(payload, "collectionSite") }
+            .Select(Clean).Where(value => value.Length > 0).Distinct();
 
     private static async Task<FormatHistory> HistoryAsync(TmsDbContext db, string key, CancellationToken ct)
     {
@@ -231,11 +246,12 @@ public static class IntakeAutoApproval
                 var payload = document.RootElement;
                 if (!string.Equals(FormatKey(payload), key, StringComparison.OrdinalIgnoreCase)) continue;
                 history.Orders++;
-                var destination = Clean(Text(payload, "stallNumber") ?? Text(payload, "destination"));
-                var collection = Clean(Text(payload, "sellerName") ?? Text(payload, "collectionSite"));
-                if (!string.IsNullOrEmpty(collection)) history.Collections.Add(collection);
-                if (string.IsNullOrEmpty(destination)) continue;
-                if (!history.Destinations.TryGetValue(destination, out var counts)) history.Destinations[destination] = counts = [];
+                foreach (var identity in CollectionIdentities(payload)) history.Collections.Add(identity);
+                var identities = DestinationIdentities(payload).ToList();
+                if (identities.Count == 0) continue;
+                var canonical = identities.Select(identity => history.DestinationAliases.TryGetValue(identity, out var known) ? known : null).FirstOrDefault(value => value is not null) ?? identities[0];
+                foreach (var identity in identities) history.DestinationAliases[identity] = canonical;
+                if (!history.Destinations.TryGetValue(canonical, out var counts)) history.Destinations[canonical] = counts = [];
                 if (Int(payload, "pallets") is int pallets && pallets > 0) counts.Add(pallets);
             }
             catch (JsonException) { }
