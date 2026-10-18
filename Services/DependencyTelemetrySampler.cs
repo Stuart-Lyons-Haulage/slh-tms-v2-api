@@ -9,6 +9,7 @@ public sealed class DependencyTelemetrySampler(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try { await StartupGrace.WaitAsync(stoppingToken); } catch (OperationCanceledException) { return; }
         while (!stoppingToken.IsCancellationRequested)
         {
             try

@@ -12,6 +12,7 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try { await StartupGrace.WaitAsync(stoppingToken); } catch (OperationCanceledException) { return; }
         var pollInterval = TimeSpan.FromMinutes(Math.Max(1, options.PollIntervalMinutes));
         var recoveryInterval = HistoryRecoveryInterval(options);
         var nextRecoveryAtUtc = DateTimeOffset.MinValue;

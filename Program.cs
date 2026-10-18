@@ -424,6 +424,7 @@ static bool ReadBool(IConfiguration configuration, bool fallback, params string[
     bool.TryParse(ReadSetting(configuration, fallback.ToString(), keys), out var value) ? value : fallback;
 
 var app = builder.Build();
+if (app.Environment.IsEnvironment("Testing")) StartupGrace.Configure(TimeSpan.Zero);
 
 var expectedDatabaseName = builder.Configuration["Database:ExpectedDatabaseName"]?.Trim();
 if (!string.IsNullOrWhiteSpace(expectedDatabaseName))
@@ -448,28 +449,21 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaMigration");
     await SchemaMigrationRunner.ApplyAsync(db, logger, applyDeferredSchemaMigrations, CancellationToken.None);
-    try
+    await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);
+    await CustomerNotificationStore.EnsureSchemaAsync(db, CancellationToken.None);
+    // Data tidy-ups (placeholder vehicles, trailer aliases, geofence links, register links)
+    // run once the API is answering, so a restart doesn't keep pages waiting on them. A
+    // migration-only run still does them before exiting.
+    if (migrationOnly) await RunStartupMaintenanceAsync(app.Services, logger, CancellationToken.None);
+    else app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
     {
-        await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);
-        await CustomerNotificationStore.EnsureSchemaAsync(db, CancellationToken.None);
-        var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
-        if (quarantinedFleetioPlaceholders > 0)
-            logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
-        var trailerMerge = await MasterDetailStore.MergeSlhTrailerAliasesAsync(db, CancellationToken.None);
-        if (trailerMerge.Renamed > 0 || trailerMerge.Merged > 0)
-            logger.LogWarning(
-                "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
-                trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
-        var repairedGeofenceLinks = await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, CancellationToken.None);
-        if (repairedGeofenceLinks > 0)
-            logger.LogWarning("Repaired {GeofenceLinkCount} legacy active Site/geofence assignments; ambiguous geofences remain active but unlinked for review.", repairedGeofenceLinks);
-        var register = scope.ServiceProvider.GetRequiredService<StagingService>();
-        await register.LinkRegistered(25, CancellationToken.None);
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Post-migration startup maintenance failed; required schema migrations completed successfully, so application startup will continue.");
-    }
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), app.Lifetime.ApplicationStopping);
+            await RunStartupMaintenanceAsync(app.Services, logger, app.Lifetime.ApplicationStopping);
+        }
+        catch (OperationCanceledException) { }
+    }));
 }
 
 if (migrationOnly)
@@ -533,5 +527,31 @@ app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
 }));
 
 app.Run();
+
+static async Task RunStartupMaintenanceAsync(IServiceProvider services, ILogger logger, CancellationToken ct)
+{
+    try
+    {
+        await using var scope = services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, ct);
+        if (quarantinedFleetioPlaceholders > 0)
+            logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
+        var trailerMerge = await MasterDetailStore.MergeSlhTrailerAliasesAsync(db, ct);
+        if (trailerMerge.Renamed > 0 || trailerMerge.Merged > 0)
+            logger.LogWarning(
+                "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
+                trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
+        var repairedGeofenceLinks = await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, ct);
+        if (repairedGeofenceLinks > 0)
+            logger.LogWarning("Repaired {GeofenceLinkCount} legacy active Site/geofence assignments; ambiguous geofences remain active but unlinked for review.", repairedGeofenceLinks);
+        var register = scope.ServiceProvider.GetRequiredService<StagingService>();
+        await register.LinkRegistered(25, ct);
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        logger.LogError(ex, "Post-migration startup maintenance failed; required schema migrations completed successfully, so the API keeps serving.");
+    }
+}
 
 public partial class Program { }

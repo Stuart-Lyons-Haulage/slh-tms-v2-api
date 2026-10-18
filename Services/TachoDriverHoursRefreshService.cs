@@ -532,6 +532,7 @@ public sealed class TachoDriverHoursRefreshWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (environment.IsEnvironment("Testing")) return;
+        try { await StartupGrace.WaitAsync(stoppingToken); } catch (OperationCanceledException) { return; }
 
         var nextRefresh = DateTimeOffset.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
