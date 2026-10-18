@@ -149,6 +149,16 @@ public static class PlanningWipe
             db.PlanProposalAllocations.RemoveRange(proposalAllocations); Count("planProposalAllocations", proposalAllocations.Count);
             await db.SaveChangesAsync(ct);
             db.OrderSourceLines.RemoveRange(lines); Count("orderSourceLines", lines.Count);
+            if (revisionIds.Count > 0)
+            {
+                // Run allocations record which order version they came from.
+                var fromRevisions = await db.RunOrderAllocations.Where(x => revisionIds.Contains(x.SourceRevisionId)).ToListAsync(ct);
+                db.RunOrderAllocations.RemoveRange(fromRevisions); Count("runOrderAllocations", fromRevisions.Count);
+                // Each version can point at the one it replaced; unhook those links first
+                // (including a later version that is being kept).
+                foreach (var later in await db.OrderRevisions.Where(x => x.SupersedesRevisionId != null && revisionIds.Contains(x.SupersedesRevisionId.Value)).ToListAsync(ct))
+                    later.SupersedesRevisionId = null;
+            }
             await db.SaveChangesAsync(ct);
             db.OrderRevisions.RemoveRange(revisions); Count("orderRevisions", revisions.Count);
             var events = await db.StagedImportEvents.Where(x => batch.Contains(x.StagedImportId)).ToListAsync(ct);
