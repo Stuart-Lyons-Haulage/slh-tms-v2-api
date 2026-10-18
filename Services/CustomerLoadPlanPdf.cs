@@ -208,7 +208,7 @@ public static class CustomerLoadPlanPdf
             cx += column.Width;
         }
         var ty = tableTop - 22;
-        foreach (var row in guide.Rows.Take(24))
+        foreach (var row in guide.Rows.Take(22))
         {
             ty -= 17;
             if (row.Number % 2 == 0) Fill(b, Margin, ty, tableWidth, 17, 0.965, 0.975, 0.98);
