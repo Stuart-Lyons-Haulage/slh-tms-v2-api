@@ -1986,6 +1986,17 @@ public sealed class EmailOrderIntakeService
             ? new List<string> { "Emery deliver these pallets to the SLH site; the run starts from our yard." }
             : new List<string> { "Emery did not say where the pallets will be; confirm the collection point." };
 
+        // The drop-off is warehouse-only: it is booked in at SLH (and audited there) but is
+        // not a job for the planners. The planners see the reload from SLH to the depot.
+        var dropOff = droppedAtSlh
+            ? new Dictionary<string, object?>
+            {
+                ["from"] = "Emery Soft Fruits",
+                ["date"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                ["expected"] = Regex.IsMatch(own, @"\b(?:pm|afternoon)\b", RegexOptions.IgnoreCase) ? "PM" : Regex.IsMatch(own, @"\b(?:am|morning)\b", RegexOptions.IgnoreCase) ? "AM" : null
+            }
+            : null;
+
         return EmeryDepotRowRegex.Matches(own)
             .Cast<Match>()
             .Select(match => (
@@ -2002,11 +2013,21 @@ public sealed class EmailOrderIntakeService
                 collectionDate,
                 deliveryDate,
                 row.Pallets,
-                droppedAtSlh ? "Emery Soft Fruits (dropped at SLH)" : "Emery Soft Fruits",
+                droppedAtSlh ? SlhWarehouseSiteName : "Emery Soft Fruits",
                 row.Depot,
                 "Emery Waitrose depot pallets",
                 warnings))
+            .Select(order => dropOff is null ? order : WithWarehouseDropOff(order, dropOff))
             .ToList();
+    }
+
+    public const string SlhWarehouseSiteName = "Stuart Lyons Distribution";
+
+    private static ParsedEmailOrder WithWarehouseDropOff(ParsedEmailOrder order, Dictionary<string, object?> dropOff)
+    {
+        var payload = JsonNode.Parse(order.Payload.GetRawText())!.AsObject();
+        payload["warehouseDropOff"] = JsonSerializer.SerializeToNode(dropOff);
+        return order with { Payload = JsonSerializer.SerializeToElement(payload) };
     }
 
     private static readonly Regex SainsburyGmRowRegex = new(

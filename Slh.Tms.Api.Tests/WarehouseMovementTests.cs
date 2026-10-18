@@ -70,6 +70,70 @@ public sealed class WarehouseMovementTests
         Assert.DoesNotContain(result.Inbound.Concat(result.Outbound), x => x.LoadReference == "LOAD-BULK");
     }
 
+    [Fact]
+    public async Task Inbound_truck_shows_live_eta_and_warehouse_count_is_audited()
+    {
+        await using var db = CreateDb();
+        var site = new Site { ExternalCode = "SLH-FRV", Name = "SLH-Lyons Consolidation Centre FRV" };
+        var load = new Load { Reference = "RUN 9 PM", PlanningDate = new DateOnly(2026, 8, 24), Stops =
+        [
+            new() { LoadId = Guid.Empty, Sequence = 1, Name = "Deliver · SLH-Lyons Consolidation Centre FRV", PlannedArrivalUtc = new DateTimeOffset(2026, 8, 24, 17, 0, 0, TimeSpan.Zero) }
+        ] };
+        foreach (var stop in load.Stops) stop.LoadId = load.Id;
+        db.AddRange(site, load);
+        var inbound = AddLine(db, "Farm A", site.Name, 12, "Standard", "LOAD-ETA");
+        AddAllocation(db, load.Id, inbound.OrderId, inbound.LineId, 12);
+        var eta = new DateTimeOffset(2026, 8, 24, 17, 40, 0, TimeSpan.Zero);
+        db.EtaSnapshots.Add(new EtaSnapshot { LoadId = load.Id, StopId = load.Stops[0].Id, EtaUtc = eta, CapturedAtUtc = eta.AddHours(-1), Source = "Samsara", Risk = "Late", TachoStatus = "OK" });
+        await db.SaveChangesAsync();
+
+        var service = new WarehouseMovementService(db);
+        var row = Assert.Single((await service.BuildDailyAsync(new DateOnly(2026, 8, 24), CancellationToken.None)).Inbound);
+        Assert.Equal(eta, row.LiveEtaUtc);
+        Assert.Equal("Late", row.EtaRisk);
+        Assert.NotNull(row.MovementKey);
+
+        await service.RecordCheckAsync(new WarehouseCheckRequest(row.MovementKey!, new DateOnly(2026, 8, 24), "Inbound", 13, "1 extra"), "warehouse@lyonshaulage.com", CancellationToken.None);
+        await service.RecordCheckAsync(new WarehouseCheckRequest(row.MovementKey!, new DateOnly(2026, 8, 24), "Inbound", 11, "recount"), "warehouse@lyonshaulage.com", CancellationToken.None);
+
+        var checkedRow = Assert.Single((await service.BuildDailyAsync(new DateOnly(2026, 8, 24), CancellationToken.None)).Inbound);
+        Assert.Equal(11, checkedRow.ActualQuantity);
+        Assert.Equal(-1, checkedRow.Difference);
+        Assert.Equal(2, checkedRow.CheckHistory!.Count);
+        Assert.Equal("Received", checkedRow.CheckHistory![0].Action);
+    }
+
+    [Fact]
+    public async Task Customer_drop_off_is_warehouse_inbound_and_its_reload_is_outbound_until_planned()
+    {
+        await using var db = CreateDb();
+        db.Sites.Add(new Site { ExternalCode = "SLH-FRV", Name = "SLH-Lyons Consolidation Centre FRV", Aliases = "Stuart Lyons Distribution" });
+        var date = new DateOnly(2026, 10, 17);
+        var staged = new StagedImport
+        {
+            EntityType = "order", IdempotencyKey = Guid.NewGuid().ToString(), Status = StagingStatus.Promoted,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                customerCode = "WAITROSE", pallets = 3, sellerName = "Stuart Lyons Distribution", stallNumber = "Brinklow",
+                warehouseDropOff = new { from = "Emery Soft Fruits", date = "2026-10-17", expected = "PM" }
+            })
+        };
+        db.StagedImports.Add(staged);
+        db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = staged.Id, Reference = "EMERY-BRINKLOW", CustomerCode = "WAITROSE", CollectionDate = date, DeliveryDate = date.AddDays(1), Pallets = 3, SellerName = "Stuart Lyons Distribution", StallNumber = "Brinklow" });
+        await db.SaveChangesAsync();
+
+        var result = await new WarehouseMovementService(db).BuildDailyAsync(date, CancellationToken.None);
+
+        var dropOff = Assert.Single(result.Inbound);
+        Assert.Equal("Customer drop-off", dropOff.RunReference);
+        Assert.Equal("Emery Soft Fruits", dropOff.From);
+        Assert.Equal("PM", dropOff.Period);
+        Assert.Equal(3, dropOff.PlannedPallets);
+        var reload = Assert.Single(result.Outbound);
+        Assert.Equal("Not on a run yet", reload.RunReference);
+        Assert.Equal("Brinklow", reload.To);
+    }
+
     private static (Guid OrderId, Guid LineId) AddLine(TmsDbContext db, string from, string to, int pallets, string type, string loadReference)
     {
         var staged = new StagedImport { EntityType = "order", IdempotencyKey = Guid.NewGuid().ToString(), Status = StagingStatus.Promoted, PayloadJson = "{}" };
