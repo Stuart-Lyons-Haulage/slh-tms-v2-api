@@ -340,6 +340,7 @@ public sealed class TachoDriverMasterSyncJobWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (environment.IsEnvironment("Testing")) return;
+        try { await StartupGrace.WaitAsync(stoppingToken); } catch (OperationCanceledException) { return; }
 
         var workerInstanceId = $"{Environment.MachineName}:{Guid.NewGuid():N}";
         var nextRecoveryCheck = DateTimeOffset.MinValue;

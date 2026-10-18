@@ -16,14 +16,28 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
         "/api/v1/staging",
         "/api/v1/order-intake",
         "/api/v1/orders",
-        "/api/v1/planner-import"
+        "/api/v1/planner-import",
+        "/api/dispatch",
+        "/api/v1/driver-availability",
+        "/api/v1/driver-work-patterns",
+        "/api/v1/driver-master",
+        "/api/v1/integrations/samsara",
+        "/api/v1/planner-starts",
+        "/api/v1/planning",
+        "/api/v1/driver-timesheets",
+        "/api/v1/daily-compliance"
     ];
+
+    // POSTs that only read (they carry a list of drivers in the body); they must not wipe the cache.
+    private static readonly string[] ReadOnlyPosts = ["/api/dispatch/available-times"];
 
     public async Task InvokeAsync(HttpContext context, PlanningChangeNotifier notifier)
     {
         var path = context.Request.Path.Value ?? string.Empty;
         var mutation = context.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE";
-        var relevantMutation = mutation && PlanningPrefixes.Any(prefix => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        var relevantMutation = mutation
+            && PlanningPrefixes.Any(prefix => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            && !ReadOnlyPosts.Any(item => path.Equals(item, StringComparison.OrdinalIgnoreCase));
 
         var ttl = context.Request.Method == "GET" ? CacheTtl(path, context.User.Identity?.IsAuthenticated == true) : null;
         if (ttl is TimeSpan cacheTtl)
@@ -45,7 +59,9 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
             {
                 await next(context);
                 var body = buffer.ToArray();
-                if (context.Response.StatusCode is >= 200 and < 300 && IsCacheableContent(context.Response.ContentType))
+                // A degraded (partial) answer is never kept: the next request should try again.
+                if (context.Response.StatusCode is >= 200 and < 300 && IsCacheableContent(context.Response.ContentType)
+                    && !context.Response.Headers.ContainsKey("X-SLH-Degraded"))
                     ReadCache[cacheKey] = new CachedResponse(DateTimeOffset.UtcNow.Add(cacheTtl), context.Response.StatusCode, context.Response.ContentType, body);
                 context.Response.Body = originalBody;
                 await originalBody.WriteAsync(body, context.RequestAborted);
@@ -79,6 +95,15 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
             // These endpoints drive live operational screens. A five-minute cache makes dispatch,
             // job progress and completion visibly stale, so keep only a very short coalescing window.
             return TimeSpan.FromSeconds(10);
+
+        // Dispatch board feeds. Each rebuilds drivers, runs, Tacho and leave state; the board,
+        // Today and Drivers ask for the same date many times a minute. Any planning or
+        // allocation write clears the cache (below), so a change still shows straight away.
+        if (path.Equals("/api/v1/driver-dispatch", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api/v1/driver-dispatch-status", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api/dispatch/driver-visibility", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api/v1/driver-availability", StringComparison.OrdinalIgnoreCase))
+            return TimeSpan.FromSeconds(20);
 
         if (path.StartsWith("/api/v1/operations-intelligence", StringComparison.OrdinalIgnoreCase)
             || path.Equals("/api/v1/operations/reconciliation", StringComparison.OrdinalIgnoreCase)

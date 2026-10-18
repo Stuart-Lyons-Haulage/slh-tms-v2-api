@@ -330,6 +330,7 @@ public sealed class SamsaraRouteProgressWorker(
             return;
         }
 
+        try { await StartupGrace.WaitAsync(stoppingToken); } catch (OperationCanceledException) { return; }
         var interval = TimeSpan.FromSeconds(Math.Clamp(options.RouteProgressPollSeconds, 15, 300));
 
         while (!stoppingToken.IsCancellationRequested)
