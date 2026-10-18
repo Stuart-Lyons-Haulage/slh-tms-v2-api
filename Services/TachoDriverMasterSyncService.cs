@@ -112,6 +112,7 @@ public sealed class TachoDriverMasterSyncService(
         }
 
         var drivers = await db.Drivers.OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+        var heldByActivityRule = await DriverTachoActivity.HeldArchivedAsync(db, ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var activeBefore = drivers.Count(driver => driver.Active);
         var ukToday = TachoDriverCardReadEligibility.UkToday(now);
@@ -295,7 +296,9 @@ public sealed class TachoDriverMasterSyncService(
             }
 
             ApplyWorker(canonical, worker, profileByMember.GetValueOrDefault(worker.MemberCode), now);
-            canonical.Active = true;
+            // Drivers archived for having no tacho activity come back only when that activity
+            // resumes (DriverTachoActivity), not just because TachoMaster still lists them.
+            if (canonical.Active || !heldByActivityRule.Contains(canonical.Id)) canonical.Active = true;
             claimedDriverIds.Add(canonical.Id);
             UpsertDetail(detailByKey, canonical, worker, actor, now);
             UpsertProfile(profileRows, worker, actor, now);

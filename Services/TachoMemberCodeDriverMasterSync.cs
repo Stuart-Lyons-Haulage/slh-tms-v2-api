@@ -47,6 +47,7 @@ public static class TachoMemberCodeDriverMasterSync
             return Failed($"TachoMaster returned only {rawWorkers.Count} live worker(s). Member Code canonicalisation stopped below the safety floor.", now, rawWorkers.Count);
 
         var drivers = await db.Drivers.OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+        var heldByActivityRule = await DriverTachoActivity.HeldArchivedAsync(db, ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var activeBefore = drivers.Count(driver => driver.Active);
         var ukToday = TachoDriverCardReadEligibility.UkToday(now);
@@ -263,7 +264,9 @@ public static class TachoMemberCodeDriverMasterSync
                 }
 
                 ApplyWorker(canonical, worker, profilesByMember.GetValueOrDefault(worker.MemberCode), now);
-                canonical.Active = true;
+                // Drivers archived for having no tacho activity come back only when that activity
+            // resumes (DriverTachoActivity), not just because TachoMaster still lists them.
+            if (canonical.Active || !heldByActivityRule.Contains(canonical.Id)) canonical.Active = true;
                 claimed.Add(canonical.Id);
                 UpsertDetail(db, detailByKey, canonical, worker, actor, now);
                 UpsertProfile(db, profileRows, worker, actor, now);

@@ -165,12 +165,25 @@ public sealed class IntegrationSyncCoordinator(
             }
 
             await db.SaveChangesAsync(ct);
+            // Archive drivers with no tacho activity for over 28 days (and bring back any who start again).
+            var activityNote = string.Empty;
+            try
+            {
+                var activityOutcome = await DriverTachoActivity.ApplyAsync(db, tachoMaster.GetRecentActivity(), actor, DateTimeOffset.UtcNow, ct);
+                activityNote = $" {activityOutcome.Message}";
+                if (activityOutcome.Archived > 0 || activityOutcome.Restored > 0) logger.LogInformation("{ActivityMessage}", activityOutcome.Message);
+            }
+            catch (Exception activityException) when (activityException is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(activityException, "Driver tacho activity check failed; Driver Master was left as it was.");
+            }
             var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
             var conflictNote = identityConflicts == 0
                 ? string.Empty
                 : $" {identityConflicts} conflicting member assignment(s) were skipped safely because another Driver Master row already owns that identity.";
             return new("TachoMaster", true, DateTimeOffset.UtcNow,
-                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched.{conflictNote} Identity order: member code, tacho card, employee number, name.", matched);
+                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched.{conflictNote} Identity order: member code, tacho card, employee number, name.{activityNote}", matched);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

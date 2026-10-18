@@ -79,14 +79,14 @@ public static class MasterDataDuplicateReviewService
         return new MasterDataDuplicateMergeResult(merged, candidates.Count, messages);
     }
 
-    public static async Task<MasterDataDuplicateMergeResult> MergeAsync(TmsDbContext db, string entityType, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct)
+    public static async Task<MasterDataDuplicateMergeResult> MergeAsync(TmsDbContext db, string entityType, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct, TachoRecentActivity? tachoActivity = null)
     {
         var type = (Clean(entityType) ?? string.Empty).ToLowerInvariant();
         return type switch
         {
             "site" or "sites" => await MergeSitesAsync(db, request, actor, ct),
             "customer" or "customers" => await MergeCustomersAsync(db, request, actor, ct),
-            "driver" or "drivers" => await MergeDriversAsync(db, request, actor, ct),
+            "driver" or "drivers" => await MergeDriversAsync(db, request, actor, ct, tachoActivity),
             "vehicle" or "vehicles" => await MergeVehiclesAsync(db, request, actor, ct),
             "trailer" or "trailers" => await MergeTrailersAsync(db, request, actor, ct),
             "market" or "markets" => await MergeMarketsAsync(db, request, actor, ct),
@@ -501,7 +501,7 @@ public static class MasterDataDuplicateReviewService
             [$"Merged {duplicates.Count} customer duplicate(s) into {canonical.Name}; reassigned {contacts.Count + routes.Count + sites.Count + movements.Count + orders.Count} linked record(s)."]);
     }
 
-    private static async Task<MasterDataDuplicateMergeResult> MergeDriversAsync(TmsDbContext db, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct)
+    private static async Task<MasterDataDuplicateMergeResult> MergeDriversAsync(TmsDbContext db, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct, TachoRecentActivity? tachoActivity = null)
     {
         var canonical = await db.Drivers.FirstOrDefaultAsync(row => row.Id == request.CanonicalId && row.Active, ct);
         if (canonical is null) return new MasterDataDuplicateMergeResult(0, 0, ["Canonical driver was not found."]);
@@ -515,12 +515,38 @@ public static class MasterDataDuplicateReviewService
             .Where(value => value.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (identities.Count > 1)
-            return new MasterDataDuplicateMergeResult(0, 1, [$"Merge held for review: the selected driver rows contain more than one TachoMaster member identity ({string.Join(", ", identities)}). Different Member Codes must never be merged automatically."]);
-
         var targetTachoMasterDriverId = new[] { canonical }.Concat(duplicates)
             .Select(row => row.TachoMasterDriverId?.Trim())
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        string? carriedCard = null;
+        if (identities.Count > 1)
+        {
+            // One person often has two TachoMaster member records (a re-issued card, or a
+            // record set up twice). A planner may merge them as long as only one is still
+            // driving; that one becomes the driver's identity. Two members both driving in the
+            // last 28 days are treated as two people and still refused.
+            if (tachoActivity is null)
+                return new MasterDataDuplicateMergeResult(0, 1, [$"Merge held: these rows have different TachoMaster members ({string.Join(", ", identities)}) and tacho activity couldn't be checked just now. Try again in a few minutes."]);
+            var since = DateTimeOffset.UtcNow.AddDays(-DriverTachoActivity.Days);
+            var driving = identities
+                .Select(id => (Id: id, Last: int.TryParse(id, out var member) && tachoActivity.LastDutyByMember.TryGetValue(member, out var at) ? at : (DateTimeOffset?)null))
+                .Where(item => item.Last >= since)
+                .OrderByDescending(item => item.Last)
+                .ToList();
+            if (driving.Count > 1)
+                return new MasterDataDuplicateMergeResult(0, 1, [$"Merge held: TachoMaster members {string.Join(" and ", driving.Select(item => $"{item.Id} (last drove {item.Last:dd/MM})"))} have both driven in the last {DriverTachoActivity.Days} days, so they look like two people. Check the cards in TachoMaster first."]);
+            var keep = driving.FirstOrDefault().Id ?? Normalise(canonical.TachoMasterDriverId);
+            var owner = new[] { canonical }.Concat(duplicates).FirstOrDefault(row => Normalise(row.TachoMasterDriverId) == keep);
+            if (owner is not null && owner.Id != canonical.Id)
+            {
+                // The driving member belongs to a row being merged in: carry its identity across.
+                targetTachoMasterDriverId = owner.TachoMasterDriverId?.Trim();
+                if (!string.IsNullOrWhiteSpace(owner.TachoCardNumber)) carriedCard = owner.TachoCardNumber;
+                canonical.TachoName = Preserve(owner.TachoName, canonical.TachoName);
+            }
+            else if (!string.IsNullOrWhiteSpace(canonical.TachoMasterDriverId)) targetTachoMasterDriverId = canonical.TachoMasterDriverId.Trim();
+            identities = string.IsNullOrWhiteSpace(targetTachoMasterDriverId) ? [] : [Normalise(targetTachoMasterDriverId)];
+        }
         var conflictingOwners = await db.Drivers.AsNoTracking()
             .Where(row => row.Active && row.Id != canonical.Id && !duplicateIds.Contains(row.Id) && row.TachoMasterDriverId != null)
             .Select(row => new { row.Id, row.DisplayName, row.TachoMasterDriverId })
@@ -531,6 +557,14 @@ public static class MasterDataDuplicateReviewService
 
         foreach (var duplicate in duplicates)
         {
+            db.MasterDataAudits.Add(new MasterDataAudit
+            {
+                EntityType = "Driver",
+                EntityId = duplicate.Id,
+                Action = DriverTachoActivity.MergedAction,
+                ChangedBy = actor,
+                ChangesJson = JsonSerializer.Serialize(new { mergedInto = canonical.Id, canonical.DisplayName, duplicate.TachoMasterDriverId, duplicate.TachoCardNumber, duplicate.EmployeeNumber })
+            });
             canonical.MobileNumber = Preserve(canonical.MobileNumber, duplicate.MobileNumber);
             canonical.DriverType = Preserve(canonical.DriverType, duplicate.DriverType);
             canonical.DriverGroup = Preserve(canonical.DriverGroup, duplicate.DriverGroup);
@@ -568,6 +602,8 @@ public static class MasterDataDuplicateReviewService
 
             if (!string.IsNullOrWhiteSpace(targetTachoMasterDriverId))
                 canonical.TachoMasterDriverId = targetTachoMasterDriverId;
+            if (!string.IsNullOrWhiteSpace(carriedCard))
+                canonical.TachoCardNumber = carriedCard;
 
             db.MasterDataAudits.Add(new MasterDataAudit
             {
@@ -813,7 +849,7 @@ public static class MasterDataDuplicateReviewService
             : sameEmployee ? 88   // employee alone: review only, not auto-merge
             : 80;
 
-        var reason = conflictingMember ? "Same driver name in a different format, but the Member/Tacho DB numbers differ — review separately; no automatic merge." :
+        var reason = conflictingMember ? "Same driver name, but two TachoMaster member records. Merge keeps whichever one is still driving; it's refused only if both have driven in the last 28 days." :
                      sameTacho   ? "Same TachoMaster member code — strong identity match." :
                      sameCard    ? "Same digital tachograph card number." :
                      sameLicence ? "Same driving licence number." :
