@@ -39,7 +39,9 @@ public static class CustomerLoadPlanPdf
         // One loading-guide page per run that mixes euro and standard pallets.
         var guides = LoadingGuide.ForPlan(plan.Rows);
         var totalPages = pages.Count + guides.Count;
-        var contents = pages.Select((rows, index) => BuildPage(plan, rows, index + 1, totalPages))
+        var guidePages = guides.Select((guide, index) => (guide.LoadReference, Note: $"Loading guide {guide.Code}, page {pages.Count + index + 1}"))
+            .ToDictionary(item => item.LoadReference, item => item.Note, StringComparer.OrdinalIgnoreCase);
+        var contents = pages.Select((rows, index) => BuildPage(plan, rows, index + 1, totalPages, guidePages))
             .Concat(guides.Select((guide, index) => BuildGuidePage(plan, guide, pages.Count + index + 1, totalPages)))
             .ToList();
 
@@ -79,7 +81,7 @@ public static class CustomerLoadPlanPdf
         return stream.ToArray();
     }
 
-    private static string BuildPage(CustomerLoadPlanPreview plan, IReadOnlyList<CustomerLoadPlanRow> rows, int page, int pageCount)
+    private static string BuildPage(CustomerLoadPlanPreview plan, IReadOnlyList<CustomerLoadPlanRow> rows, int page, int pageCount, IReadOnlyDictionary<string, string>? guidePages = null)
     {
         var b = new StringBuilder();
         // White page, dark Lyons header and green accent.
@@ -131,7 +133,7 @@ public static class CustomerLoadPlanPdf
                 row.DriverName ?? "Unallocated",
                 row.VehicleRegistration ?? "-",
                 row.TrailerNumber ?? "-",
-                string.Join(" | ", new[] { row.Status, row.Notes }.Where(value => !string.IsNullOrWhiteSpace(value)))
+                string.Join(" | ", new[] { guidePages?.GetValueOrDefault(row.LoadReference), row.Status, row.Notes }.Where(value => !string.IsNullOrWhiteSpace(value)))
             };
             for (var columnIndex = 0; columnIndex < Columns.Length; columnIndex++)
             {
