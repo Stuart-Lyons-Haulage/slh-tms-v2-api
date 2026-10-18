@@ -8,12 +8,12 @@ namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
 /// Clear the slate: permanently delete every order, booking and run dated on or before a day.
-/// GET shows what would go; POST does it, only for an admin and only when the confirmation
+/// GET shows what would go; POST does it, only for the system owner (or a TMS.Admin) and only when the confirmation
 /// matches the date. Today or earlier only, never a future day.
 /// </summary>
 [ApiController]
 [Route("api/v1/admin/planning-wipe")]
-[Authorize(Policy = "TmsAdmin")]
+[Authorize(Policy = "TmsOwner")]
 public sealed class PlanningWipeController(TmsDbContext db, IServiceScopeFactory scopes, ILogger<PlanningWipeController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
