@@ -138,52 +138,46 @@ public static class DriverTachoActivity
     {
         var held = await HoldsAsync(db, null, ct);
         // Holds added in this unit of work but not saved yet count too.
-        foreach (var entry in db.ChangeTracker.Entries<StagedImport>().Where(entry => entry.Entity.EntityType == HoldType && entry.Entity.Status == StagingStatus.Promoted))
-            if (TryId(entry.Entity.IdempotencyKey, out var id)) held.Add(id);
+        foreach (var entry in db.ChangeTracker.Entries<IntegrationMapping>().Where(entry => entry.Entity.TmsEntityType == HoldType && entry.Entity.Active))
+            held.Add(entry.Entity.TmsEntityId);
         return held;
     }
 
-    private const string HoldType = "driveractivityhold";
+    // Stored as a small mapping row: Provider "TMS", entity type "DriverHold", the reason in MappingKind.
+    private const string HoldType = "DriverHold";
+    private const string HoldProvider = "TMS";
 
     private static async Task<HashSet<Guid>> HoldsAsync(TmsDbContext db, string? reason, CancellationToken ct)
     {
-        var rows = await db.StagedImports.AsNoTracking()
-            .Where(row => row.EntityType == HoldType && row.Status == StagingStatus.Promoted)
-            .Select(row => new { row.IdempotencyKey, row.ReviewNote })
+        var rows = await db.IntegrationMappings.AsNoTracking()
+            .Where(row => row.Provider == HoldProvider && row.TmsEntityType == HoldType && row.Active)
+            .Select(row => new { row.TmsEntityId, row.MappingKind })
             .ToListAsync(ct);
-        return rows.Where(row => reason is null || row.ReviewNote == reason)
-            .Select(row => TryId(row.IdempotencyKey, out var id) ? id : Guid.Empty)
-            .Where(id => id != Guid.Empty).ToHashSet();
+        return rows.Where(row => reason is null || row.MappingKind == reason).Select(row => row.TmsEntityId).ToHashSet();
     }
 
     public static async Task SetHoldAsync(TmsDbContext db, Guid driverId, string reason, string? actor, CancellationToken ct)
     {
-        var key = $"{HoldType}:{driverId:N}";
-        var row = db.ChangeTracker.Entries<StagedImport>().Select(entry => entry.Entity).FirstOrDefault(item => item.IdempotencyKey == key)
-                  ?? await db.StagedImports.FirstOrDefaultAsync(item => item.IdempotencyKey == key, ct);
+        var key = driverId.ToString("N");
+        var row = db.ChangeTracker.Entries<IntegrationMapping>().Select(entry => entry.Entity)
+                      .FirstOrDefault(item => item.Provider == HoldProvider && item.TmsEntityType == HoldType && item.ExternalKey == key)
+                  ?? await db.IntegrationMappings.FirstOrDefaultAsync(item => item.Provider == HoldProvider && item.TmsEntityType == HoldType && item.ExternalKey == key, ct);
         if (row is null)
         {
-            row = new StagedImport { EntityType = HoldType, IdempotencyKey = key, PayloadJson = "{}", Source = "Driver Master" };
-            db.StagedImports.Add(row);
+            row = new IntegrationMapping { Provider = HoldProvider, ExternalKey = key, TmsEntityType = HoldType, TmsEntityId = driverId };
+            db.IntegrationMappings.Add(row);
         }
-        row.PayloadJson = JsonSerializer.Serialize(new { driverId, reason, atUtc = DateTimeOffset.UtcNow, by = actor });
-        row.Status = StagingStatus.Promoted;
-        row.ReviewNote = reason;
-        row.ReviewedBy = actor;
-        row.ReviewedAtUtc = DateTimeOffset.UtcNow;
+        row.Active = true;
+        row.MappingKind = reason;
+        row.ExternalLabel = reason == MergedAction ? "Merged into another driver" : $"No tacho activity for over {Days} days";
+        row.UpdatedBy = actor;
+        row.UpdatedAtUtc = DateTimeOffset.UtcNow;
     }
 
     private static async Task ClearHoldAsync(TmsDbContext db, Guid driverId, CancellationToken ct)
     {
-        var key = $"{HoldType}:{driverId:N}";
-        var row = await db.StagedImports.FirstOrDefaultAsync(item => item.IdempotencyKey == key, ct);
-        if (row is not null) row.Status = StagingStatus.Rejected;
-    }
-
-    private static bool TryId(string key, out Guid id)
-    {
-        id = Guid.Empty;
-        var colon = key.LastIndexOf(':');
-        return colon >= 0 && Guid.TryParse(key[(colon + 1)..], out id);
+        var key = driverId.ToString("N");
+        var row = await db.IntegrationMappings.FirstOrDefaultAsync(item => item.Provider == HoldProvider && item.TmsEntityType == HoldType && item.ExternalKey == key, ct);
+        if (row is not null) { row.Active = false; row.UpdatedAtUtc = DateTimeOffset.UtcNow; }
     }
 }
