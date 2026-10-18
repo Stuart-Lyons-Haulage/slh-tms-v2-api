@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Azure.Monitor.OpenTelemetry.Exporter;
+using OpenTelemetry;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -48,22 +49,40 @@ var openTelemetry = builder.Services.AddOpenTelemetry()
         serviceName: "slh-tms-api",
         serviceVersion: deploymentRevision));
 
+// Application Insights is billed by volume. Background jobs run every 30-60 seconds all
+// day, so full tracing (every SQL statement and outbound call) and Information-level logs
+// were the bulk of the Azure bill. Defaults now: 5% of requests traced, no per-SQL spans,
+// health/stream noise excluded, and only warnings and errors exported as logs.
+// Each can be raised temporarily with app settings (Telemetry__TraceSampleRatio,
+// Telemetry__SqlDependencies, Telemetry__ExportLogLevel) while investigating an issue.
+var telemetrySettings = builder.Configuration.GetSection("Telemetry");
+var traceSampleRatio = Math.Clamp(telemetrySettings.GetValue<double?>("TraceSampleRatio") ?? 0.05, 0d, 1d);
+var traceSqlDependencies = telemetrySettings.GetValue<bool?>("SqlDependencies") ?? false;
+var exportLogLevel = Enum.TryParse<LogLevel>(telemetrySettings["ExportLogLevel"], true, out var parsedLogLevel) ? parsedLogLevel : LogLevel.Warning;
+
+static bool IsTelemetryNoise(PathString path) =>
+    path.StartsWithSegments("/api/v1/health") ||
+    path.StartsWithSegments("/api/v1/planning-events") ||
+    path.StartsWithSegments("/hubs") ||
+    path.StartsWithSegments("/swagger");
+
 openTelemetry.WithTracing(tracing =>
 {
     tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddSqlClientInstrumentation();
+        .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(traceSampleRatio)))
+        .AddAspNetCoreInstrumentation(options => options.Filter = context => !IsTelemetryNoise(context.Request.Path))
+        .AddHttpClientInstrumentation();
+    if (traceSqlDependencies) tracing.AddSqlClientInstrumentation();
     if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
         tracing.AddAzureMonitorTraceExporter(options => options.ConnectionString = applicationInsightsConnectionString);
 });
 
 openTelemetry.WithMetrics(metrics =>
 {
+    // Pre-aggregated metrics are cheap; per-call HTTP client metrics are dropped.
     metrics
         .AddMeter(TmsMetrics.MeterName)
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation();
+        .AddAspNetCoreInstrumentation();
     if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
         metrics.AddAzureMonitorMetricExporter(options => options.ConnectionString = applicationInsightsConnectionString);
 });
@@ -71,10 +90,12 @@ openTelemetry.WithMetrics(metrics =>
 builder.Logging.AddOpenTelemetry(logging =>
 {
     logging.IncludeFormattedMessage = true;
-    logging.IncludeScopes = true;
+    logging.IncludeScopes = false;
     if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
         logging.AddAzureMonitorLogExporter(options => options.ConnectionString = applicationInsightsConnectionString);
 });
+// Only warnings and errors leave the server; Information stays in the local log stream.
+builder.Logging.AddFilter<OpenTelemetryLoggerProvider>(null, exportLogLevel);
 
 builder.Services.AddControllers().AddJsonOptions(options =>
 {
