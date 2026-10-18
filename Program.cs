@@ -492,6 +492,24 @@ app.MapHub<DispatchHub>("/dispatch-hub").WithMetadata(new DisableRequestTimeoutA
 app.MapHub<EtaHub>("/eta-hub").WithMetadata(new DisableRequestTimeoutAttribute());
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
+// Once after start-up: re-check "Unusual" warnings on orders waiting for review so that
+// improvements to site-name matching also clear cards that arrived earlier.
+app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
+{
+    try
+    {
+        await Task.Delay(TimeSpan.FromMinutes(2), app.Lifetime.ApplicationStopping);
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var rechecked = await IntakeAutoApproval.RecheckPendingAsync(db, app.Lifetime.ApplicationStopping);
+        app.Logger.LogInformation("Re-checked unusual warnings on {Count} waiting orders after start-up.", rechecked);
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        app.Logger.LogWarning(ex, "Start-up re-check of unusual warnings failed; it can be run from Order intake.");
+    }
+}));
+
 app.Run();
 
 public partial class Program { }
