@@ -189,7 +189,7 @@ public sealed class DriverDispatchStatusController(
             // has actually been worked and stays the authority on what is legal.
             var pattern = workPatterns.GetValueOrDefault(driver.Id);
             var plan = pattern is null ? null : DriverWorkPatterns.Evaluate(pattern, planningDate);
-            var fit = WorkPatternFit.Resolve(plan, pattern?.Name, projectedDayNumber, cycleLength, weekly.LastWeeklyRestType);
+            var fit = WorkPatternFit.Resolve(plan, pattern?.Name, matchedDuties.Count > 0 ? projectedDayNumber : null, cycleLength, weekly.LastWeeklyRestType);
             if (fit.RestDay && availability.Status == "Available")
                 availability = new("Unverified", $"Rest day on {pattern!.Name} (Sage HR). Only use if the driver has agreed to work it.");
 
@@ -238,7 +238,7 @@ public sealed class DriverDispatchStatusController(
                 LastWeeklyRestType = weekly.LastWeeklyRestType,
                 CycleNote = fit.Note ?? CycleNote(projectedDayNumber, cycleLength),
                 WorkPatternName = pattern?.Name,
-                WorkPatternSource = pattern is not null ? pattern.Source : projectedDayNumber is not null ? "Tacho" : null,
+                WorkPatternSource = pattern is not null ? pattern.Source : matchedDuties.Count > 0 ? "Tacho" : null,
                 PatternRestDay = fit.RestDay,
                 TachoDayNumber = projectedDayNumber
             };
