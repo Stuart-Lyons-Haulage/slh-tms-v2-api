@@ -14,8 +14,26 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/staging/orders")]
 [Authorize]
-public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService stagingService) : ControllerBase
+public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService stagingService, BulkApprovalJobs jobs) : ControllerBase
 {
+    /// <summary>Start approving a large selection on the server. Returns at once with a job
+    /// id; the planner's screen polls for progress, so a slow approval can never time out
+    /// the browser request and leave the outcome unknown.</summary>
+    [HttpPost("bulk-approve-jobs"), Authorize(Policy = "TmsApprove")]
+    public IActionResult StartJob([FromBody] BulkApproveOrdersRequest request)
+    {
+        if (request.Ids is null || request.Ids.Count == 0)
+            return BadRequest(new { message = "Select at least one staged order to approve." });
+        if (request.Ids.Count > 1000)
+            return BadRequest(new { message = "A maximum of 1000 orders can be approved at once." });
+        var job = jobs.Start(request with { Ids = request.Ids.Distinct().ToList() }, User);
+        return Accepted(job.Snapshot());
+    }
+
+    [HttpGet("bulk-approve-jobs/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public IActionResult JobStatus(Guid id) =>
+        jobs.Get(id) is { } job ? Ok(job.Snapshot()) : NotFound(new { message = "Approval job not found (the API may have restarted); refresh the queue to see what was approved." });
+
     [HttpPost("bulk-approve"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> BulkApprove([FromBody] BulkApproveOrdersRequest request, CancellationToken ct)
     {
@@ -91,7 +109,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         });
     }
 
-    private static string? CheckEligibility(StagedImport item, DateOnly requestedDate, bool acknowledgeReviewFlags)
+    internal static string? CheckEligibility(StagedImport item, DateOnly requestedDate, bool acknowledgeReviewFlags)
     {
         if (item.EntityType != "order") return "Not an order staging record.";
         if (item.Status != StagingStatus.PendingReview) return $"Status is {item.Status}, not PendingReview.";
@@ -135,7 +153,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         }
     }
 
-    private static void MarkPlannerApproved(StagedImport item, DateOnly requestedDate)
+    internal static void MarkPlannerApproved(StagedImport item, DateOnly requestedDate)
     {
         var root = JsonNode.Parse(item.PayloadJson)?.AsObject() ?? new JsonObject();
         var warnings = root["intakeWarnings"] as JsonArray ?? [];
