@@ -68,6 +68,10 @@ public sealed class PlanningWipeTests : IClassFixture<CustomWebFactory>
         var admin = factory.CreateClientWithUser("admin@lyonshaulage.com", "Tms.Write,Tms.Approve");
         admin.DefaultRequestHeaders.Add("X-Test-Roles", "TMS.Admin");
         Assert.Equal(HttpStatusCode.OK, (await admin.GetAsync("/api/v1/admin/planning-wipe?through=2019-06-18")).StatusCode);
+
+        // The system owner, signed in with Microsoft and no app role, is allowed too.
+        var owner = factory.CreateClientWithUser("daniel@lyonshaulage.com", "Tms.Write");
+        Assert.Equal(HttpStatusCode.OK, (await owner.GetAsync("/api/v1/admin/planning-wipe?through=2019-06-18")).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync("/api/v1/admin/planning-wipe", new { through = "2019-06-18", confirm = "yes" })).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.GetAsync("/api/v1/admin/planning-wipe?through=2099-01-01")).StatusCode);
     }

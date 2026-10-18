@@ -400,6 +400,10 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TmsReadMaster", policy => policy
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsMasterRolePolicy.CanReadMaster(context.User, allowedTmsDomains)));
+    var tmsOwners = (builder.Configuration["Tms:Owners"] ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    options.AddPolicy("TmsOwner", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsOwnerPolicy.IsOwner(context.User, allowedTmsDomains, tmsOwners)));
     options.AddPolicy("TmsAdmin", policy => policy
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsMasterRolePolicy.IsAdmin(context.User, allowedTmsDomains)));
