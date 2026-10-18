@@ -68,6 +68,79 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         return payload.Data;
     }
 
+    /// <summary>
+    /// Diagnostic: asks Sage HR which of the likely working-pattern paths exist and which
+    /// field names come back. Returns names and status codes only, never values.
+    /// </summary>
+    public async Task<IReadOnlyList<SageHrProbeResult>> ProbeWorkPatternSourcesAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureConfigured();
+        var results = new List<SageHrProbeResult>();
+        async Task<JsonElement?> Probe(string path)
+        {
+            try
+            {
+                using var request = Request(HttpMethod.Get, path);
+                using var response = await httpClient.SendAsync(request, cancellationToken);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                JsonElement? root = null;
+                var fields = new List<string>();
+                try
+                {
+                    using var document = JsonDocument.Parse(body);
+                    root = document.RootElement.Clone();
+                    CollectFieldNames(root.Value, "", fields, 0);
+                }
+                catch (JsonException) { }
+                results.Add(new SageHrProbeResult(SanitisePath(path), (int)response.StatusCode, fields.Distinct().Take(250).ToList()));
+                return response.IsSuccessStatusCode ? root : null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                results.Add(new SageHrProbeResult(SanitisePath(path), 0, [ex.GetType().Name]));
+                return null;
+            }
+        }
+
+        var employees = await Probe("employees?page=1");
+        long? id = null;
+        if (employees is { } list && list.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+            foreach (var item in data.EnumerateArray())
+                if (item.TryGetProperty("id", out var value) && value.TryGetInt64(out var parsed)) { id = parsed; break; }
+
+        if (id is { } employeeId)
+        {
+            await Probe($"employees/{employeeId}");
+            await Probe($"employees/{employeeId}/work-pattern");
+            await Probe($"employees/{employeeId}/work-patterns");
+            await Probe($"employees/{employeeId}/working-pattern");
+            await Probe($"employees/{employeeId}/schedule");
+        }
+        foreach (var path in new[] { "work-patterns", "working-patterns", "work_patterns", "settings/work-patterns", "timesheets", "leave-management/policies", "shifts" })
+            await Probe(path);
+        return results;
+    }
+
+    private static void CollectFieldNames(JsonElement element, string prefix, List<string> fields, int depth)
+    {
+        if (depth > 4) return;
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                var name = prefix.Length == 0 ? property.Name : $"{prefix}.{property.Name}";
+                fields.Add(name);
+                CollectFieldNames(property.Value, name, fields, depth + 1);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray().Take(1)) CollectFieldNames(item, prefix + "[]", fields, depth + 1);
+        }
+    }
+
+    private static string SanitisePath(string path) => System.Text.RegularExpressions.Regex.Replace(path, @"employees/\d+", "employees/{id}");
+
     private void EnsureConfigured()
     {
         if (!options.Enabled) throw new InvalidOperationException("Sage HR integration is disabled.");
@@ -120,3 +193,5 @@ public sealed record SageHrLeavePolicy(string? Name);
 public sealed record SageHrOutOfOfficePage(List<SageHrOutOfOffice> Data);
 
 internal static class SageHrJson { internal static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true }; }
+
+public sealed record SageHrProbeResult(string Path, int Status, IReadOnlyList<string> Fields);
