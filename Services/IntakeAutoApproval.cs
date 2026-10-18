@@ -103,21 +103,22 @@ public static class IntakeAutoApproval
     {
         if (parsed.Orders.Count == 0) return parsed;
         var modes = await LoadModesAsync(db, ct);
+        var sites = await SiteNameIndex.LoadAsync(db, ct);
         var orders = new List<ParsedEmailOrder>(parsed.Orders.Count);
         foreach (var order in parsed.Orders)
         {
             var key = FormatKey(order.Payload, order.SourceKey);
-            var history = key is null ? null : await HistoryAsync(db, key, ct);
-            orders.Add(Annotate(order, key, history, ModeFor(modes, key)));
+            var history = key is null ? null : await HistoryAsync(db, key, sites, ct);
+            orders.Add(Annotate(order, key, history, ModeFor(modes, key), sites));
         }
         return parsed with { Orders = orders };
     }
 
-    internal static ParsedEmailOrder Annotate(ParsedEmailOrder order, string? key, FormatHistory? history, string mode)
+    internal static ParsedEmailOrder Annotate(ParsedEmailOrder order, string? key, FormatHistory? history, string mode, SiteNameIndex? sites = null)
     {
         var root = JsonNode.Parse(order.Payload.GetRawText())?.AsObject();
         if (root is null) return order;
-        List<string> anomalies = key is null || history is null ? [] : Anomalies(order.Payload, history);
+        List<string> anomalies = key is null || history is null ? [] : Anomalies(order.Payload, history, sites);
         var warnings = root["intakeWarnings"] as JsonArray ?? [];
         foreach (var anomaly in anomalies) warnings.Add($"{AnomalyPrefix}{anomaly}");
         root["intakeWarnings"] = warnings;
@@ -146,21 +147,19 @@ public static class IntakeAutoApproval
         return order with { Payload = JsonSerializer.SerializeToElement(root), Warnings = updatedWarnings };
     }
 
-    internal static List<string> Anomalies(JsonElement payload, FormatHistory history)
+    internal static List<string> Anomalies(JsonElement payload, FormatHistory history, SiteNameIndex? sites = null)
     {
         var result = new List<string>();
         if (history.Orders < MinimumHistory) return result;
         var pallets = Int(payload, "pallets");
         var displayDestination = Text(payload, "stallNumber") ?? Text(payload, "destination");
-        var destinationIdentities = DestinationIdentities(payload).ToList();
-        var collectionIdentities = CollectionIdentities(payload).ToList();
-        var canonical = destinationIdentities
-            .Select(identity => history.DestinationAliases.TryGetValue(identity, out var known) ? known : history.Destinations.ContainsKey(identity) ? identity : null)
-            .FirstOrDefault(value => value is not null);
+        var destinationIdentities = Expand(DestinationIdentities(payload), sites).ToList();
+        var collectionIdentities = Expand(CollectionIdentities(payload), sites).ToList();
+        var canonical = CanonicalDestination(destinationIdentities, history);
 
         if (destinationIdentities.Count > 0 && canonical is null)
             result.Add($"new delivery point {displayDestination} for this booking");
-        if (collectionIdentities.Count > 0 && history.Collections.Count > 0 && !collectionIdentities.Any(history.Collections.Contains))
+        if (collectionIdentities.Count > 0 && history.Collections.Count > 0 && !collectionIdentities.Any(identity => SameName(identity, history.Collections)))
             result.Add($"new collection site {Text(payload, "sellerName") ?? Text(payload, "collectionSite")}");
         if (pallets is > 0 && canonical is not null &&
             history.Destinations.TryGetValue(canonical, out var counts) && counts.Count >= 3)
@@ -219,7 +218,87 @@ public static class IntakeAutoApproval
         new[] { Text(payload, "collectionSiteId"), Text(payload, "collectionSiteCode"), Text(payload, "sellerName"), Text(payload, "collectionSite") }
             .Select(Clean).Where(value => value.Length > 0).Distinct();
 
-    private static async Task<FormatHistory> HistoryAsync(TmsDbContext db, string key, CancellationToken ct)
+    /// <summary>
+    /// Names are written many ways ("Aldi GOLDTHORPE Distribution Centre", "Aldi-Goldthorpe",
+    /// "NWF-Selsey" / "Selsey"). A name matches when it resolves to the same Site master record
+    /// (name, code or alias), is identical once punctuation is removed, or one clearly contains
+    /// the other (at least 6 letters, so "ALDI" alone never matches).
+    /// </summary>
+    internal static IEnumerable<string> Expand(IEnumerable<string> identities, SiteNameIndex? sites)
+    {
+        foreach (var identity in identities)
+        {
+            yield return identity;
+            if (sites?.Resolve(identity) is Guid id) yield return $"SITE{id:N}".ToUpperInvariant();
+        }
+    }
+
+    internal static bool SameName(string identity, ICollection<string> known)
+    {
+        if (known.Contains(identity)) return true;
+        if (identity.StartsWith("SITE", StringComparison.Ordinal) && identity.Length == 36) return false;
+        return identity.Length >= 6 && known.Any(other => other.Length >= 6 && !(other.StartsWith("SITE", StringComparison.Ordinal) && other.Length == 36) &&
+                                                          (other.Contains(identity, StringComparison.Ordinal) || identity.Contains(other, StringComparison.Ordinal)));
+    }
+
+    private static string? CanonicalDestination(IReadOnlyList<string> identities, FormatHistory history)
+    {
+        foreach (var identity in identities)
+        {
+            if (history.DestinationAliases.TryGetValue(identity, out var known)) return known;
+            if (history.Destinations.ContainsKey(identity)) return identity;
+        }
+        var names = history.DestinationAliases.Keys.Concat(history.Destinations.Keys).ToList();
+        foreach (var identity in identities)
+        {
+            var match = names.FirstOrDefault(name => SameName(identity, [name]));
+            if (match is not null) return history.DestinationAliases.TryGetValue(match, out var known) ? known : match;
+        }
+        return null;
+    }
+
+    /// <summary>Clears and re-checks the "Unusual" warnings on orders still waiting for review,
+    /// so improved matching also fixes cards that arrived earlier.</summary>
+    public static async Task<int> RecheckPendingAsync(TmsDbContext db, CancellationToken ct)
+    {
+        ClearCache();
+        var modes = await LoadModesAsync(db, ct);
+        var sites = await SiteNameIndex.LoadAsync(db, ct, forceReload: true);
+        var pending = await db.StagedImports
+            .Where(x => x.EntityType == "order" && x.Status == StagingStatus.PendingReview && x.PayloadJson.Contains(AnomalyPrefix))
+            .Take(1000)
+            .ToListAsync(ct);
+        var changed = 0;
+        foreach (var row in pending)
+        {
+            try
+            {
+                var root = JsonNode.Parse(row.PayloadJson)?.AsObject();
+                if (root is null) continue;
+                if (root["intakeWarnings"] is JsonArray warnings)
+                {
+                    var kept = warnings.Where(item => item?.GetValue<string>() is { } text && !text.StartsWith(AnomalyPrefix, StringComparison.Ordinal))
+                        .Select(item => (JsonNode?)JsonValue.Create(item!.GetValue<string>())).ToArray();
+                    root["intakeWarnings"] = new JsonArray(kept);
+                }
+                root.Remove("anomalies");
+                var payload = JsonSerializer.SerializeToElement(root);
+                var warningsList = root["intakeWarnings"] is JsonArray list ? list.Select(item => item!.GetValue<string>()).ToList() : [];
+                var key = FormatKey(payload);
+                var history = key is null ? null : await HistoryAsync(db, key, sites, ct);
+                var annotated = Annotate(new ParsedEmailOrder(row.IdempotencyKey, "recheck", payload, warningsList), key, history, ModeFor(modes, key), sites);
+                var updated = annotated.Payload.GetRawText();
+                if (updated == row.PayloadJson) continue;
+                row.PayloadJson = updated;
+                changed++;
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException) { }
+        }
+        if (changed > 0) await db.SaveChangesAsync(ct);
+        return changed;
+    }
+
+    private static async Task<FormatHistory> HistoryAsync(TmsDbContext db, string key, SiteNameIndex? sites, CancellationToken ct)
     {
         if (HistoryCache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(30))
             return cached.History;
@@ -246,8 +325,8 @@ public static class IntakeAutoApproval
                 var payload = document.RootElement;
                 if (!string.Equals(FormatKey(payload), key, StringComparison.OrdinalIgnoreCase)) continue;
                 history.Orders++;
-                foreach (var identity in CollectionIdentities(payload)) history.Collections.Add(identity);
-                var identities = DestinationIdentities(payload).ToList();
+                foreach (var identity in Expand(CollectionIdentities(payload), sites)) history.Collections.Add(identity);
+                var identities = Expand(DestinationIdentities(payload), sites).ToList();
                 if (identities.Count == 0) continue;
                 var canonical = identities.Select(identity => history.DestinationAliases.TryGetValue(identity, out var known) ? known : null).FirstOrDefault(value => value is not null) ?? identities[0];
                 foreach (var identity in identities) history.DestinationAliases[identity] = canonical;
