@@ -80,9 +80,11 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         {
             try
             {
+                using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                budget.CancelAfter(TimeSpan.FromSeconds(25));
                 using var request = Request(HttpMethod.Get, path);
-                using var response = await httpClient.SendAsync(request, cancellationToken);
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var response = await httpClient.SendAsync(request, budget.Token);
+                var body = await response.Content.ReadAsStringAsync(budget.Token);
                 JsonElement? root = null;
                 var fields = new List<string>();
                 try
@@ -95,9 +97,9 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
                 results.Add(new SageHrProbeResult(SanitisePath(path), (int)response.StatusCode, fields.Distinct().Take(250).ToList()));
                 return response.IsSuccessStatusCode ? root : null;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
-                results.Add(new SageHrProbeResult(SanitisePath(path), 0, [ex.GetType().Name]));
+                results.Add(new SageHrProbeResult(SanitisePath(path), 0, [ex.GetType().Name, ex.Message.Length > 160 ? ex.Message[..160] : ex.Message]));
                 return null;
             }
         }

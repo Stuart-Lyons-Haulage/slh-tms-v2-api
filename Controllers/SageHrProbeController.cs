@@ -6,28 +6,47 @@ namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
 /// Temporary diagnostic: which Sage HR endpoints could supply drivers' working patterns.
-/// Field names and status codes only (no employee data). Cached so it cannot hammer Sage.
+/// Field names and status codes only (no employee data). The probe runs in the background;
+/// call again to read the result. Re-runs at most every 10 minutes.
 /// </summary>
 [ApiController]
 [Route("api/v1/health/sage-hr-probe")]
-public sealed class SageHrProbeController(SageHrClient sage) : ControllerBase
+public sealed class SageHrProbeController(IServiceScopeFactory scopes) : ControllerBase
 {
-    private static readonly SemaphoreSlim Gate = new(1, 1);
-    private static (DateTimeOffset At, object Result)? cached;
+    private static readonly object Sync = new();
+    private static Task? running;
+    private static DateTimeOffset? startedAtUtc;
+    private static object? last;
 
     [HttpGet, AllowAnonymous]
-    public async Task<IActionResult> Get(CancellationToken ct)
+    public IActionResult Get()
     {
-        if (!sage.IsConfigured) return Ok(new { configured = false, missing = sage.MissingSettings });
-        await Gate.WaitAsync(ct);
+        lock (Sync)
+        {
+            var stale = startedAtUtc is null || DateTimeOffset.UtcNow - startedAtUtc > TimeSpan.FromMinutes(10);
+            if ((running is null || running.IsCompleted) && stale)
+            {
+                startedAtUtc = DateTimeOffset.UtcNow;
+                running = Task.Run(RunAsync);
+            }
+            return Ok(new { running = running is { IsCompleted: false }, startedAtUtc, last });
+        }
+    }
+
+    private async Task RunAsync()
+    {
         try
         {
-            if (cached is { } hit && DateTimeOffset.UtcNow - hit.At < TimeSpan.FromMinutes(10)) return Ok(hit.Result);
-            var results = await sage.ProbeWorkPatternSourcesAsync(ct);
-            var payload = new { configured = true, checkedAtUtc = DateTimeOffset.UtcNow, results };
-            cached = (DateTimeOffset.UtcNow, payload);
-            return Ok(payload);
+            using var scope = scopes.CreateScope();
+            var sage = scope.ServiceProvider.GetRequiredService<SageHrClient>();
+            if (!sage.IsConfigured) { last = new { configured = false, missing = sage.MissingSettings }; return; }
+            using var budget = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+            var results = await sage.ProbeWorkPatternSourcesAsync(budget.Token);
+            last = new { configured = true, checkedAtUtc = DateTimeOffset.UtcNow, results };
         }
-        finally { Gate.Release(); }
+        catch (Exception ex)
+        {
+            last = new { failed = true, error = ex.GetType().Name, message = ex.Message.Length > 200 ? ex.Message[..200] : ex.Message };
+        }
     }
 }
