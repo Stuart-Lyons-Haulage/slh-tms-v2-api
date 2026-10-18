@@ -245,6 +245,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         if (staged > 0 || superseded > 0 || updatedExisting > 0 || removedFromBooking > 0)
             await db.SaveChangesAsync(ct);
+        var autoApproved = staged > 0 ? await IntakeAutoApproval.PromoteAsync(db, stagingService, createdByKey.Values, logger, ct) : 0;
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order");
 
@@ -252,7 +253,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, removed from booking {Removed}, parser warnings {Warnings}.",
             request.MessageId, staged, existing, superseded, removedFromBooking, parsed.Warnings.Count);
 
-        return Accepted(new { ignored = false, staged, existing, superseded, removedFromBooking, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+        return Accepted(new { ignored = false, staged, existing, superseded, removedFromBooking, autoApproved, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
     }
 
     private async Task<bool> IsExactLiveOrderDuplicate(JsonElement payload, CancellationToken ct)
@@ -482,6 +483,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         if (staged > 0 || superseded > 0)
             await db.SaveChangesAsync(ct);
+        if (staged > 0) await IntakeAutoApproval.PromoteAsync(db, stagingService, createdByKey.Values, logger, ct);
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order_replay");
 
@@ -719,6 +721,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (parsed.Orders.Count == 0)
             return parsed;
         parsed = HandlingUnitClassifier.Apply(parsed);
+        parsed = await IntakeAutoApproval.AnnotateAsync(db, parsed, ct);
 
         PlannerSourceMasterDataResolver? replayResolver = null;
         if (reuseMasterDataForReplay)
