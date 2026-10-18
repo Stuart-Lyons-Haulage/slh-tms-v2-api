@@ -53,11 +53,8 @@ public static class PlanningWipe
         void Take(Guid id, string type) { if (staged.Add(id)) byType[type] = byType.GetValueOrDefault(type) + 1; }
 
         // Orders in the intake/register store (waiting, approved, promoted, rejected, archived).
-        var orderRows = await db.StagedImports.AsNoTracking()
-            .Where(x => OrderTypes.Contains(x.EntityType))
-            .Select(x => new { x.Id, x.EntityType, x.PayloadJson })
-            .ToListAsync(ct);
-        foreach (var row in orderRows)
+        // Read a page at a time: these payloads are large and there are many of them.
+        await foreach (var row in PagesAsync(db, OrderTypes, ct))
         {
             var dates = StagingQueueProjection.PlanningDates(row.PayloadJson);
             if (dates.Count == 0 || dates.Max() > through) continue;
@@ -66,11 +63,7 @@ public static class PlanningWipe
         }
 
         // Run records in the planning register carry their own id and planning date.
-        var planningRows = await db.StagedImports.AsNoTracking()
-            .Where(x => PlanningTypes.Contains(x.EntityType))
-            .Select(x => new { x.Id, x.EntityType, x.IdempotencyKey, x.PayloadJson })
-            .ToListAsync(ct);
-        foreach (var row in planningRows.Where(x => x.EntityType == "planningload"))
+        await foreach (var row in PagesAsync(db, ["planningload"], ct))
         {
             var dates = Dates(row.PayloadJson);
             if (dates.Count == 0 || dates.Max() > through) continue;
@@ -82,25 +75,42 @@ public static class PlanningWipe
         // a later day is kept even if it mentions an earlier order); an undated one goes when
         // it points at a deleted run or order.
         var gone = loads.Concat(runs).Concat(orders).Concat(bookings).ToHashSet();
-        foreach (var row in planningRows.Where(x => x.EntityType != "planningload"))
+        await foreach (var row in PagesAsync(db, PlanningTypes.Where(type => type != "planningload").ToArray(), ct))
         {
             var dates = Dates(row.PayloadJson);
             if (dates.Count > 0) { if (dates.Max() <= through) Take(row.Id, row.EntityType); }
             else if (ReferencesAny(row.IdempotencyKey, row.PayloadJson, gone)) Take(row.Id, row.EntityType);
         }
 
-        // Intake rows behind a deleted order go too (when nothing for a later date shares them).
-        var sources = await db.TransportOrders.AsNoTracking()
-            .Where(x => orders.Contains(x.Id) && x.SourceStagedImportId != null)
-            .Select(x => new { x.SourceStagedImportId, Type = "order" })
+        // Intake rows behind a deleted order go too (when no kept order shares them).
+        var sourceLinks = await db.TransportOrders.AsNoTracking()
+            .Where(x => x.SourceStagedImportId != null)
+            .Select(x => new { x.Id, Source = x.SourceStagedImportId!.Value })
             .ToListAsync(ct);
-        var keptSources = (await db.TransportOrders.AsNoTracking()
-            .Where(x => !orders.Contains(x.Id) && x.SourceStagedImportId != null)
-            .Select(x => x.SourceStagedImportId!.Value).ToListAsync(ct)).ToHashSet();
-        foreach (var source in sources)
-            if (!keptSources.Contains(source.SourceStagedImportId!.Value)) Take(source.SourceStagedImportId.Value, "order");
+        var keptSources = sourceLinks.Where(x => !orders.Contains(x.Id)).Select(x => x.Source).ToHashSet();
+        foreach (var link in sourceLinks.Where(x => orders.Contains(x.Id) && !keptSources.Contains(x.Source)))
+            Take(link.Source, "order");
 
         return new Plan(through, loads, runs, orders, bookings, staged, byType);
+    }
+
+    private sealed record Row(Guid Id, string EntityType, string IdempotencyKey, string PayloadJson);
+
+    private static async IAsyncEnumerable<Row> PagesAsync(TmsDbContext db, string[] types, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var skip = 0;
+        while (true)
+        {
+            var page = await db.StagedImports.AsNoTracking()
+                .Where(x => types.Contains(x.EntityType))
+                .OrderBy(x => x.Id)
+                .Skip(skip).Take(500)
+                .Select(x => new Row(x.Id, x.EntityType, x.IdempotencyKey, x.PayloadJson))
+                .ToListAsync(ct);
+            foreach (var row in page) yield return row;
+            if (page.Count < 500) yield break;
+            skip += page.Count;
+        }
     }
 
     public static object Summary(Plan plan) => new
@@ -148,6 +158,7 @@ public static class PlanningWipe
             foreach (var order in await db.TransportOrders.Where(x => x.SourceStagedImportId != null && batch.Contains(x.SourceStagedImportId.Value)).ToListAsync(ct))
                 order.SourceStagedImportId = null;
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 2. Invoices are kept; they just stop pointing at deleted orders, bookings and runs.
@@ -167,6 +178,7 @@ public static class PlanningWipe
                 if (line.BookingReservationId is Guid b && plan.Bookings.Contains(b)) line.BookingReservationId = null;
             }
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 3. Things that point at orders.
@@ -183,6 +195,7 @@ public static class PlanningWipe
             var runAllocations = await db.RunOrderAllocations.Where(x => batch.Contains(x.OrderId)).ToListAsync(ct);
             db.RunOrderAllocations.RemoveRange(runAllocations); Count("runOrderAllocations", runAllocations.Count);
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 4. Canonical runs (stops, allocations, status and tracking cascade with them).
@@ -199,6 +212,7 @@ public static class PlanningWipe
             var rows = await db.Runs.Where(x => batch.Contains(x.RunId)).ToListAsync(ct);
             db.Runs.RemoveRange(rows); Count("canonicalRuns", rows.Count);
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 5. Runs (loads) and what records their day: stops, driver messages, ETAs.
@@ -213,6 +227,7 @@ public static class PlanningWipe
             var rows = await db.Loads.Where(x => batch.Contains(x.Id)).ToListAsync(ct);
             db.Loads.RemoveRange(rows); Count("runs", rows.Count);
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 6. Orders and bookings.
@@ -221,6 +236,7 @@ public static class PlanningWipe
             var rows = await db.TransportOrders.Where(x => batch.Contains(x.Id)).ToListAsync(ct);
             db.TransportOrders.RemoveRange(rows); Count("orders", rows.Count);
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
         foreach (var batch in bookings.Chunk(1000))
         {
@@ -230,6 +246,7 @@ public static class PlanningWipe
             var rows = await db.BookingReservations.Where(x => batch.Contains(x.Id)).ToListAsync(ct);
             db.BookingReservations.RemoveRange(rows); Count("bookings", rows.Count);
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 7. The intake and planning register records themselves.
@@ -238,6 +255,7 @@ public static class PlanningWipe
             var rows = await db.StagedImports.Where(x => batch.Contains(x.Id)).ToListAsync(ct);
             db.StagedImports.RemoveRange(rows); Count("intakeAndPlanningRecords", rows.Count);
             await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // A short record of what was done (the deleted rows themselves are gone).
