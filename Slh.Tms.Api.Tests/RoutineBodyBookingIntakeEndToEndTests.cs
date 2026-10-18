@@ -90,7 +90,9 @@ public sealed class RoutineBodyBookingIntakeEndToEndTests : IClassFixture<Custom
             Assert.Equal("WAITROSE", Text(row, "customerCode"));
             Assert.Equal("2026-10-17", Text(row, "collectionDate"));
             Assert.Equal("2026-10-18", Text(row, "deliveryDate"));
-            Assert.Equal("Emery Soft Fruits (dropped at SLH)", Text(row, "sellerName"));
+            Assert.Contains(Text(row, "sellerName"), new[] { "Stuart Lyons Distribution", "SLH-Lyons Consolidation Centre FRV" });
+            Assert.Equal("Emery Soft Fruits", row.GetProperty("warehouseDropOff").GetProperty("from").GetString());
+            Assert.Equal("PM", row.GetProperty("warehouseDropOff").GetProperty("expected").GetString());
         });
     }
 
