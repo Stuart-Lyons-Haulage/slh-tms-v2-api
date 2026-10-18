@@ -143,7 +143,7 @@ var allowedOrigins = (configuredOrigins is { Length: > 0 }
     .Append("https://tms.lyonshaulage.com")
     .Distinct(StringComparer.OrdinalIgnoreCase)
     .ToArray();
-builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
+builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().WithExposedHeaders("X-SLH-Degraded", "X-SLH-Trace")));
 builder.Services.AddSingleton(TmsMetrics.Shared);
 builder.Services.AddSingleton<SqlLatencyInterceptor>();
 builder.Services.AddSingleton<PlanningChangeNotifier>();

@@ -13,6 +13,9 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
 {
+    private static readonly object PendingDatesSync = new();
+    private static (string Key, DateTimeOffset At, List<IReadOnlyList<DateOnly>> Dates)? pendingDatesCache;
+
     [HttpGet("date-counts")]
     public async Task<IActionResult> DateCounts(
         [FromQuery] DateOnly from,
@@ -22,17 +25,34 @@ public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
         if (to < from || to.DayNumber - from.DayNumber > 31)
             return BadRequest(new { message = "The review date range must be 1 to 32 days." });
 
-        var pending = await db.StagedImports.AsNoTracking()
-            .Where(item => item.Status == StagingStatus.PendingReview && item.EntityType == "order")
-            .Select(item => item.PayloadJson)
-            .ToListAsync(ct);
+        // Every open screen polls this for the Orders badge. Reading and parsing every waiting
+        // order each time is wasteful, so the parsed dates are reused until the waiting set
+        // changes (count or newest arrival) or two minutes pass.
+        var pendingQuery = db.StagedImports.AsNoTracking()
+            .Where(item => item.Status == StagingStatus.PendingReview && item.EntityType == "order");
+        var pendingCount = await pendingQuery.CountAsync(ct);
+        var newest = await pendingQuery.OrderByDescending(item => item.ReceivedAtUtc).Select(item => (DateTimeOffset?)item.ReceivedAtUtc).FirstOrDefaultAsync(ct);
+        var key = $"{pendingCount}|{newest:O}";
+        List<IReadOnlyList<DateOnly>> pendingDates;
+        lock (PendingDatesSync)
+        {
+            pendingDates = pendingDatesCache is { } cached && cached.Key == key && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(2)
+                ? cached.Dates
+                : null!;
+        }
+        if (pendingDates is null)
+        {
+            var payloads = await pendingQuery.Select(item => item.PayloadJson).ToListAsync(ct);
+            pendingDates = payloads.Select(payload => (IReadOnlyList<DateOnly>)StagingQueueProjection.PlanningDates(payload).ToList()).ToList();
+            lock (PendingDatesSync) pendingDatesCache = (key, DateTimeOffset.UtcNow, pendingDates);
+        }
 
         var counts = Enumerable.Range(0, to.DayNumber - from.DayNumber + 1)
             .Select(offset => from.AddDays(offset))
             .ToDictionary(day => day.ToString("yyyy-MM-dd"), _ => 0);
-        foreach (var payload in pending)
+        foreach (var dates in pendingDates)
         {
-            foreach (var day in StagingQueueProjection.PlanningDates(payload))
+            foreach (var day in dates)
             {
                 var key = day.ToString("yyyy-MM-dd");
                 if (counts.ContainsKey(key)) counts[key]++;
