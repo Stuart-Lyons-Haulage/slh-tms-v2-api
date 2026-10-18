@@ -178,6 +178,11 @@ public sealed class DriverDispatchStatusController(
             var workAvailableWeekMinutes = latestDuty?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
             var earliest = EarliestPlanningStart(planningDate, today, latestDuty);
             var availability = Availability(weekly, driveAvailablePlanningDayMinutes, workAvailableWeekMinutes, planningDate, today, tachoMaster.IsConfigured, projectedDayNumber);
+            // SLH pattern: 6 on / 1 off then 5 on / 2 off. After a reduced (24h) weekly rest the
+            // next block is 5 days and must end in a full 45h rest, so Day 6 is not legal.
+            var cycleLength = CycleLength(weekly.LastWeeklyRestType);
+            if (cycleLength == 5 && projectedDayNumber is >= 6 && availability.Status != "Unavailable")
+                availability = new("Unavailable", $"Day {projectedDayNumber} after a reduced weekly rest last week: a full 45-hour weekly rest is needed before driving again.");
 
             var liveWorking = load is not null && HasLiveWorkingEvidence(
                 load,
@@ -218,10 +223,30 @@ public sealed class DriverDispatchStatusController(
                 projectedDayNumber,
                 earliest.StartUtc,
                 earliest.Source,
-                earliest.IsAssumption);
+                earliest.IsAssumption)
+            {
+                CycleLength = cycleLength,
+                LastWeeklyRestType = weekly.LastWeeklyRestType,
+                CycleNote = CycleNote(projectedDayNumber, cycleLength)
+            };
         }).ToList();
 
         return Ok(new { planningDate, drivers = result });
+    }
+
+    internal static int? CycleLength(string? lastWeeklyRestType) => lastWeeklyRestType switch
+    {
+        "Reduced24" => 5,
+        "Regular45" => 6,
+        _ => null
+    };
+
+    internal static string? CycleNote(int? day, int? cycleLength)
+    {
+        if (day is null || cycleLength is null) return null;
+        if (day > cycleLength) return cycleLength == 5 ? "Must take a full 45h weekly rest" : "Weekly rest due";
+        if (day == cycleLength) return cycleLength == 5 ? "Last day — then a full 45h rest" : "Last day — then weekly rest (24h allowed)";
+        return null;
     }
 
     internal static int ReconcileProjectedDay(
@@ -416,4 +441,10 @@ public sealed record DriverDispatchStatusRow(
     int? ProjectedDayNumber,
     DateTimeOffset? EarliestStartUtc,
     string? EarliestStartSource,
-    bool EarliestStartIsAssumption);
+    bool EarliestStartIsAssumption)
+{
+    /// <summary>Days in the current block: 6 after a full 45h weekly rest, 5 after a reduced one.</summary>
+    public int? CycleLength { get; init; }
+    public string? LastWeeklyRestType { get; init; }
+    public string? CycleNote { get; init; }
+}

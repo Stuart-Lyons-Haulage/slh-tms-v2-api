@@ -109,7 +109,7 @@ public sealed class DriverDispatchController(
             ? new List<Load>()
             : await db.Loads.AsNoTracking()
                 .Include(load => load.Stops)
-                .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-7) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
+                .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-14) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
                 .OrderByDescending(load => load.PlanningDate)
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .ToListAsync(ct);
@@ -198,6 +198,9 @@ public sealed class DriverDispatchController(
         var tachoDays = await tachoDayTask;
 
         var rows = new List<DriverDispatchDriver>();
+        // Fair share of long work: how much far-away work each driver has had in the last
+        // fortnight, so the furthest runs are not always given to the same people.
+        var recentWork = DriverWorkloadFairness.Summarise(history, planningDate);
         foreach (var driver in selectedDrivers)
         {
             var allocated = loads.Where(load => load.DriverId == driver.Id).OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue).ToList();
@@ -294,7 +297,13 @@ public sealed class DriverDispatchController(
                 assistantScore,
                 suggestion,
                 rosterEntry?.FromDate,
-                rosterEntry?.ThroughDate));
+                rosterEntry?.ThroughDate)
+            {
+                WorkingStyle = DriverWorkloadFairness.WorkingStyle(driver.DriverType, driver.DriverGroup),
+                RecentRuns = recentWork.GetValueOrDefault(driver.Id)?.Runs ?? 0,
+                RecentLongRuns = recentWork.GetValueOrDefault(driver.Id)?.LongRuns ?? 0,
+                RecentFurthestMiles = recentWork.GetValueOrDefault(driver.Id)?.FurthestMilesTotal ?? 0
+            });
         }
 
         var snapshot = new
@@ -718,4 +727,11 @@ public sealed record DriverDispatchDriver(
     int? AssistantScore,
     string? Suggestion,
     DateOnly? AgencyBookedFrom,
-    DateOnly? AgencyBookedThrough);
+    DateOnly? AgencyBookedThrough)
+{
+    /// <summary>Tramper (nights out allowed), Day or Night driver, from Driver Master group/type.</summary>
+    public string? WorkingStyle { get; init; }
+    public int RecentRuns { get; init; }
+    public int RecentLongRuns { get; init; }
+    public int RecentFurthestMiles { get; init; }
+}
