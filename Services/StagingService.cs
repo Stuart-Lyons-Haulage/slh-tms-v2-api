@@ -449,6 +449,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         else
         {
             order = existing;
+            var before = OrderChangeImpact.Snapshot(existing);
             existing.SourceStagedImportId = item.Id;
             existing.SourceMovementId = movement.Id;
             existing.CollectionDate = collectionDate;
@@ -465,6 +466,17 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             existing.MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink") ?? existing.MapLink, 1000);
             if (existing.Status == OrderStatus.Planned)
                 existing.NeedsReplan = true;
+
+            // Follow the amendment through to dispatch: if the order is on a run, or the
+            // run has gone to Samsara, raise a change for the planners to action.
+            var changes = OrderChangeImpact.Diff(before, OrderChangeImpact.Snapshot(existing));
+            if (changes.Count > 0)
+            {
+                var runs = await OrderChangeImpact.RunsForOrderAsync(db, existing, ct);
+                if (runs.Count > 0) existing.NeedsReplan = true;
+                var source = string.Join(" · ", new[] { Text(payload, "sourceSenderName") ?? Text(payload, "sourceSender"), Text(payload, "sourceSubject") }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                await OrderChangeImpact.RecordAsync(db, existing, "Amended", changes, string.IsNullOrWhiteSpace(source) ? null : source, item.ReviewedBy, ct, runs);
+            }
         }
         await CrateTrayBookingMatcher.TryMatchAsync(db, order, payload, item.ReviewedBy, ct);
     }
