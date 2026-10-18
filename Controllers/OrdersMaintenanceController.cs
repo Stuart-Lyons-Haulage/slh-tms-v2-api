@@ -17,6 +17,7 @@ public sealed class OrdersMaintenanceController(TmsDbContext db, ILogger<OrdersM
         if (order is null) return NotFound(new { message = "Order was not found." });
         if (order.Status == OrderStatus.Cancelled) return BadRequest(new { message = "A cancelled order cannot be amended." });
 
+        var before = Slh.Tms.Api.Services.OrderChangeImpact.Snapshot(order);
         var reference = Clip(request.Reference, 80);
         var customerCode = Clip(request.CustomerCode, 40);
         if (string.IsNullOrWhiteSpace(reference) || string.IsNullOrWhiteSpace(customerCode))
@@ -67,6 +68,13 @@ public sealed class OrdersMaintenanceController(TmsDbContext db, ILogger<OrdersM
             logger.LogWarning(ex, "Linked planning stops could not be updated for order {OrderId}; saving the order amendment without stop maintenance.", id);
         }
 
+        var changes = Slh.Tms.Api.Services.OrderChangeImpact.Diff(before, Slh.Tms.Api.Services.OrderChangeImpact.Snapshot(order));
+        if (changes.Count > 0)
+        {
+            var runs = await Slh.Tms.Api.Services.OrderChangeImpact.RunsForOrderAsync(db, order, ct);
+            if (runs.Count > 0) order.NeedsReplan = true;
+            await Slh.Tms.Api.Services.OrderChangeImpact.RecordAsync(db, order, "Amended", changes, "Edited in the TMS", User.Identity?.Name, ct, runs);
+        }
         await db.SaveChangesAsync(ct);
         return Ok(order);
     }
@@ -77,6 +85,11 @@ public sealed class OrdersMaintenanceController(TmsDbContext db, ILogger<OrdersM
         var order = await db.TransportOrders.SingleOrDefaultAsync(item => item.Id == id, ct);
         if (order is null) return NotFound(new { message = "Order was not found." });
         if (order.Status == OrderStatus.Delivered) return BadRequest(new { message = "A delivered order cannot be deleted." });
+
+        // Work out where the order is before its stops are removed, so a cancellation on a
+        // run that has already gone to Samsara raises a live-route alert.
+        var runsBeforeCancel = await Slh.Tms.Api.Services.OrderChangeImpact.RunsForOrderAsync(db, order, ct);
+        var previousStatus = order.Status;
 
         var removedStops = 0;
         try
@@ -91,8 +104,17 @@ public sealed class OrdersMaintenanceController(TmsDbContext db, ILogger<OrdersM
         }
 
         order.Status = OrderStatus.Cancelled;
+        await Slh.Tms.Api.Services.OrderChangeImpact.RecordAsync(db, order, "Cancelled",
+            [new Slh.Tms.Api.Services.OrderChangeImpact.FieldChange("Status", previousStatus.ToString(), "Cancelled")],
+            "Cancelled in the TMS", User.Identity?.Name, ct, runsBeforeCancel);
         await db.SaveChangesAsync(ct);
-        return Ok(new { order.Id, order.Reference, status = order.Status.ToString(), removedStops });
+        var live = runsBeforeCancel.Where(run => run.Live).Select(run => run.Reference).ToList();
+        return Ok(new
+        {
+            order.Id, order.Reference, status = order.Status.ToString(), removedStops,
+            liveRoutes = live,
+            message = live.Count > 0 ? $"Cancelled. {string.Join(", ", live)} has already been sent to Samsara: amend the driver's route." : null
+        });
     }
 
     private static bool IsPlanningSchemaUnavailable(Exception exception)
