@@ -34,6 +34,15 @@ public sealed class DailyComplianceController(
     public async Task<IActionResult> Report([FromQuery] DateOnly date, CancellationToken ct)
         => Ok(await BuildReport(date, ct));
 
+    /// <summary>Record that the office chased a missing check or saw the paper walkround.</summary>
+    [HttpPost("checks"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> RecordCheck([FromBody] ComplianceChecks.Request request, CancellationToken ct)
+    {
+        if (request.AssetId == Guid.Empty || request.DriverId == Guid.Empty) return BadRequest(new { message = "assetId and driverId are required." });
+        var user = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value;
+        return Ok(await ComplianceChecks.RecordAsync(db, request, user, ct));
+    }
+
     [HttpGet("export.csv")]
     public async Task<IActionResult> Export([FromQuery] DateOnly date, CancellationToken ct)
     {
@@ -266,7 +275,9 @@ public sealed class DailyComplianceController(
             }
         }
 
+        var officeActions = await ComplianceChecks.ForDateAsync(db, date, ct);
         rows = rows
+            .Select(row => ApplyOfficeAction(row, officeActions))
             .GroupBy(x => $"{x.AssetType}|{x.AssetId}|{x.DriverId}|{x.TachoDutyStartUtc:O}|{x.FleetioInspectionId}", StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(row => !string.IsNullOrWhiteSpace(row.RunReference)).ThenBy(row => row.RunReference).First())
             .OrderBy(row => row.Status == "Non-compliant" ? 0 : row.Status == "Review" ? 1 : row.Status == "Paper evidence required" ? 2 : 3)
@@ -304,6 +315,30 @@ public sealed class DailyComplianceController(
                 rows.Count(x => x.FleetioInspectionId is not null),
                 rows.Count(x => x.TachoPreUseOtherWorkMinutes is not null)),
             rows);
+    }
+
+    private static ComplianceRow ApplyOfficeAction(ComplianceRow row, Dictionary<string, List<ComplianceChecks.Action>> actions)
+    {
+        if (row.Status == "Compliant" || !actions.TryGetValue(ComplianceChecks.KeyFor(row.AssetType, row.AssetId, row.DriverId), out var list) || list.Count == 0)
+            return row;
+        string Stamp(ComplianceChecks.Action action) =>
+            $"{action.RecordedBy ?? "office"} {TimeZoneInfo.ConvertTime(action.RecordedAtUtc, London):HH:mm}{(action.Note is null ? "" : $": {action.Note}")}";
+        var paper = list.LastOrDefault(action => action.Kind == ComplianceChecks.PaperCheck);
+        // A paper check covers a missing electronic walkround, never reported defects.
+        if (paper is not null && (row.FleetioFailedItems ?? 0) == 0)
+        {
+            var agency = row.EmploymentType == "Agency";
+            return row with
+            {
+                Status = agency ? "Compliant" : "Review",
+                Reason = agency
+                    ? $"Paper walkround check seen ({Stamp(paper)})."
+                    : $"Paper walkround check seen ({Stamp(paper)}). Employed drivers must still complete it in Fleetio.",
+                OfficeAction = $"Paper check seen · {Stamp(paper)}"
+            };
+        }
+        var chased = list.Last();
+        return row with { OfficeAction = $"{(chased.Kind == ComplianceChecks.PaperCheck ? "Paper check seen" : "Chased")} · {Stamp(chased)}" };
     }
 
     private ComplianceRow BuildRow(string assetType, Guid assetId, string assetName, string runReference, Driver driver, string employment,
@@ -754,6 +789,6 @@ public sealed class DailyComplianceController(
     public sealed record ComplianceSummary(int AssetsOperated, int Green, int Amber, int Red, int Vehicles, int Trailers, int FleetioChecks, int TachoPreUseConfirmed);
     public sealed record ComplianceRow(string AssetType, Guid AssetId, string AssetName, string RunReference, Guid DriverId, string DriverName, string EmploymentType,
         DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoFirstDriveUtc, int? TachoPreUseOtherWorkMinutes, int? TachoWorkMinutes, int? TachoDriveMinutes, int? TachoRestMinutes, int? TachoAvailableMinutes, int? TachoBreakMinutes, DateTimeOffset? FirstMovementUtc, string? FleetioInspectionId, string? FleetioForm,
-        DateTimeOffset? FleetioSubmittedAtUtc, string? FleetioUser, bool? FleetioDriverMatched, int? FleetioFailedItems, string Status, string Reason);
+        DateTimeOffset? FleetioSubmittedAtUtc, string? FleetioUser, bool? FleetioDriverMatched, int? FleetioFailedItems, string Status, string Reason, string? OfficeAction = null);
     public sealed record ComplianceReport(DateOnly Date, DateTimeOffset GeneratedAtUtc, CompliancePolicy Policy, SourceStatus SourceStatus, ComplianceSummary Summary, IReadOnlyList<ComplianceRow> Rows);
 }
