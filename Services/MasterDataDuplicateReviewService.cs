@@ -557,6 +557,7 @@ public static class MasterDataDuplicateReviewService
 
         foreach (var duplicate in duplicates)
         {
+            await DriverTachoActivity.SetHoldAsync(db, duplicate.Id, DriverTachoActivity.MergedAction, actor, ct);
             db.MasterDataAudits.Add(new MasterDataAudit
             {
                 EntityType = "Driver",

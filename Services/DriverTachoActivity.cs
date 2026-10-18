@@ -62,7 +62,8 @@ public static class DriverTachoActivity
         var cutoff = now.AddDays(-Days);
 
         var drivers = await db.Drivers.ToListAsync(ct);
-        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        if (db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) != true)
+            await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
 
         var onRecentRuns = (await db.Loads.AsNoTracking()
             .Where(load => load.DriverId != null && load.PlanningDate >= today.AddDays(-Days) && load.Status != LoadStatus.Cancelled)
@@ -92,6 +93,7 @@ public static class DriverTachoActivity
         foreach (var driver in toArchive)
         {
             driver.Active = false;
+            await SetHoldAsync(db, driver.Id, ArchiveAction, actor, ct);
             db.MasterDataAudits.Add(new MasterDataAudit
             {
                 EntityType = "Driver",
@@ -103,13 +105,7 @@ public static class DriverTachoActivity
         }
 
         // Restore: archived by this rule, driving again in the last week, and nobody active holds the identity.
-        var archivedByRule = (await db.MasterDataAudits.AsNoTracking()
-            .Where(audit => audit.EntityType == "Driver" && (audit.Action == ArchiveAction || audit.Action == RestoreAction))
-            .Select(audit => new { audit.EntityId, audit.Action, audit.ChangedAtUtc })
-            .ToListAsync(ct))
-            .GroupBy(audit => audit.EntityId)
-            .Where(group => group.OrderByDescending(audit => audit.ChangedAtUtc).First().Action == ArchiveAction)
-            .Select(group => group.Key).ToHashSet();
+        var archivedByRule = await HoldsAsync(db, ArchiveAction, ct);
         var restored = 0;
         foreach (var driver in drivers.Where(driver => !driver.Active && archivedByRule.Contains(driver.Id) && !toArchive.Contains(driver)))
         {
@@ -117,6 +113,7 @@ public static class DriverTachoActivity
             var member = TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId);
             if (member.Length > 0 && drivers.Any(other => other.Active && other.Id != driver.Id && TachoDriverIdentityRules.MemberMatches(other.TachoMasterDriverId, member))) continue;
             driver.Active = true;
+            await ClearHoldAsync(db, driver.Id, ct);
             restored++;
             db.MasterDataAudits.Add(new MasterDataAudit
             {
@@ -134,14 +131,59 @@ public static class DriverTachoActivity
 
     /// <summary>
     /// Driver ids the Tacho sync must not switch back on: archived by this rule and not restored
-    /// since, or merged into another driver by a planner.
+    /// since, or merged into another driver by a planner. Kept as small records rather than read
+    /// from the audit trail, which is written a little later in the background.
     /// </summary>
-    public static async Task<HashSet<Guid>> HeldArchivedAsync(TmsDbContext db, CancellationToken ct) =>
-        (await db.MasterDataAudits.AsNoTracking()
-            .Where(audit => audit.EntityType == "Driver" && (audit.Action == ArchiveAction || audit.Action == RestoreAction || audit.Action == MergedAction))
-            .Select(audit => new { audit.EntityId, audit.Action, audit.ChangedAtUtc })
-            .ToListAsync(ct))
-        .GroupBy(audit => audit.EntityId)
-        .Where(group => group.OrderByDescending(audit => audit.ChangedAtUtc).First().Action is ArchiveAction or MergedAction)
-        .Select(group => group.Key).ToHashSet();
+    public static async Task<HashSet<Guid>> HeldArchivedAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var held = await HoldsAsync(db, null, ct);
+        // Holds added in this unit of work but not saved yet count too.
+        foreach (var entry in db.ChangeTracker.Entries<StagedImport>().Where(entry => entry.Entity.EntityType == HoldType && entry.Entity.Status == StagingStatus.Promoted))
+            if (TryId(entry.Entity.IdempotencyKey, out var id)) held.Add(id);
+        return held;
+    }
+
+    private const string HoldType = "driveractivityhold";
+
+    private static async Task<HashSet<Guid>> HoldsAsync(TmsDbContext db, string? reason, CancellationToken ct)
+    {
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(row => row.EntityType == HoldType && row.Status == StagingStatus.Promoted)
+            .Select(row => new { row.IdempotencyKey, row.ReviewNote })
+            .ToListAsync(ct);
+        return rows.Where(row => reason is null || row.ReviewNote == reason)
+            .Select(row => TryId(row.IdempotencyKey, out var id) ? id : Guid.Empty)
+            .Where(id => id != Guid.Empty).ToHashSet();
+    }
+
+    public static async Task SetHoldAsync(TmsDbContext db, Guid driverId, string reason, string? actor, CancellationToken ct)
+    {
+        var key = $"{HoldType}:{driverId:N}";
+        var row = db.ChangeTracker.Entries<StagedImport>().Select(entry => entry.Entity).FirstOrDefault(item => item.IdempotencyKey == key)
+                  ?? await db.StagedImports.FirstOrDefaultAsync(item => item.IdempotencyKey == key, ct);
+        if (row is null)
+        {
+            row = new StagedImport { EntityType = HoldType, IdempotencyKey = key, PayloadJson = "{}", Source = "Driver Master" };
+            db.StagedImports.Add(row);
+        }
+        row.PayloadJson = JsonSerializer.Serialize(new { driverId, reason, atUtc = DateTimeOffset.UtcNow, by = actor });
+        row.Status = StagingStatus.Promoted;
+        row.ReviewNote = reason;
+        row.ReviewedBy = actor;
+        row.ReviewedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    private static async Task ClearHoldAsync(TmsDbContext db, Guid driverId, CancellationToken ct)
+    {
+        var key = $"{HoldType}:{driverId:N}";
+        var row = await db.StagedImports.FirstOrDefaultAsync(item => item.IdempotencyKey == key, ct);
+        if (row is not null) row.Status = StagingStatus.Rejected;
+    }
+
+    private static bool TryId(string key, out Guid id)
+    {
+        id = Guid.Empty;
+        var colon = key.LastIndexOf(':');
+        return colon >= 0 && Guid.TryParse(key[(colon + 1)..], out id);
+    }
 }
