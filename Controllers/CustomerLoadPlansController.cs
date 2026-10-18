@@ -200,6 +200,85 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         });
     }
 
+    /// <summary>
+    /// One click per customer: a ready-to-send Outlook email (.eml) with the load plan PDF
+    /// attached (kind=plan), or the delivery times table in the body (kind=times). The planner
+    /// opens it, checks it and presses Send from their own mailbox; info@ is copied in.
+    /// </summary>
+    [HttpGet("draft"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Draft([FromQuery] DateOnly date, [FromQuery] string customerCode, [FromQuery] string kind = "plan", CancellationToken ct = default)
+    {
+        var deliveryTimes = string.Equals(kind, "times", StringComparison.OrdinalIgnoreCase);
+        var preview = await BuildPreview(date, ct);
+        var plan = preview.Plans.FirstOrDefault(item => string.Equals(item.CustomerCode, customerCode, StringComparison.OrdinalIgnoreCase));
+        if (plan is null) return NotFound(new { message = $"Nothing is planned for {customerCode} on {date:dd/MM/yyyy}." });
+
+        string subject, html, attachmentName;
+        if (deliveryTimes)
+        {
+            var rows = DeliveryTimeRows(plan, await LatestDeliveryEtas(date, ct));
+            subject = DeliveryTimesSubject(plan.CustomerName, date);
+            html = DeliveryTimesBody(date, rows);
+            attachmentName = DeliveryTimesAttachment(plan.CustomerName, date);
+        }
+        else
+        {
+            subject = plan.Subject;
+            html = OutlookDraft.TextToHtml(plan.Body);
+            attachmentName = plan.AttachmentName;
+        }
+        var to = plan.To.ToList();
+        var cc = plan.Cc.Append(Mailbox)
+            .Where(address => !to.Contains(address, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var eml = OutlookDraft.Build(to, cc, subject, html, attachmentName, CustomerLoadPlanPdf.Build(plan));
+
+        var user = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "Planner";
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = DraftEntityType,
+            IdempotencyKey = $"draft:{(deliveryTimes ? "times" : "plan")}:{date:yyyyMMdd}:{SafeKey(plan.CustomerCode)}:{Guid.NewGuid():N}",
+            PayloadJson = JsonSerializer.Serialize(new DraftRecord(date, plan.CustomerCode, deliveryTimes ? DeliveryTimesKind : null, user, DateTimeOffset.UtcNow), Json),
+            Status = StagingStatus.Promoted,
+            Source = $"Opened in Outlook / {plan.CustomerCode} / {date:yyyy-MM-dd}",
+            ReviewedBy = user,
+            ReviewedAtUtc = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+        return File(eml, "message/rfc822", Path.ChangeExtension(attachmentName, ".eml"));
+    }
+
+    private const string DraftEntityType = "outbound-load-plan-draft";
+    private sealed record DraftRecord(DateOnly PlanningDate, string CustomerCode, string? Kind, string? OpenedBy, DateTimeOffset OpenedAtUtc);
+
+    /// <summary>Last time each customer's email was opened in Outlook for the date and kind.</summary>
+    private async Task<Dictionary<string, DraftRecord>> LastDrafts(DateOnly date, string? kind, CancellationToken ct)
+    {
+        var dateText = date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == DraftEntityType && item.PayloadJson.Contains(dateText))
+            .OrderByDescending(item => item.ReceivedAtUtc)
+            .Select(item => item.PayloadJson)
+            .Take(500)
+            .ToListAsync(ct);
+        var result = new Dictionary<string, DraftRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var json in rows)
+        {
+            try
+            {
+                var draft = JsonSerializer.Deserialize<DraftRecord>(json, Json);
+                if (draft is null || draft.PlanningDate != date || !string.Equals(draft.Kind, kind, StringComparison.OrdinalIgnoreCase)) continue;
+                result.TryAdd(draft.CustomerCode, draft);
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
+
+    private static string Greeting() =>
+        TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).Hour < 12 ? "Good morning" : "Good afternoon";
+
     /// <summary>The automatic-send schedule, with today's state per customer.</summary>
     [HttpGet("schedule"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Schedule(CancellationToken ct)
@@ -211,6 +290,8 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         var timesPreview = await BuildPreview(today, ct);
         var planSends = await LastSends(tomorrow, null, ct);
         var timeSends = await LastSends(today, DeliveryTimesKind, ct);
+        var planDrafts = await LastDrafts(tomorrow, null, ct);
+        var timeDrafts = await LastDrafts(today, DeliveryTimesKind, ct);
         var stuck = await db.StagedImports.AsNoTracking()
             .CountAsync(item => item.EntityType == EntityType && item.Status == StagingStatus.Approved && item.ReceivedAtUtc < DateTimeOffset.UtcNow.AddMinutes(-10), ct);
         var customers = plans.Plans.Select(plan => (plan.CustomerCode, plan.CustomerName, plan.To))
@@ -234,6 +315,8 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
                     loadPlanStatus = LastStatus(planSend),
                     loadPlanHold = CustomerCommsSchedule.HoldFor(code, tomorrow),
                     deliveryTimesStatus = LastStatus(timeSend),
+                    loadPlanOpenedInOutlook = planDrafts.GetValueOrDefault(code) is { } planDraft ? new { planDraft.OpenedBy, planDraft.OpenedAtUtc } : null,
+                    deliveryTimesOpenedInOutlook = timeDrafts.GetValueOrDefault(code) is { } timeDraft ? new { timeDraft.OpenedBy, timeDraft.OpenedAtUtc } : null,
                     hasPlanTomorrow = plans.Plans.Any(item => string.Equals(item.CustomerCode, code, StringComparison.OrdinalIgnoreCase)),
                     hasDeliveriesToday = timesPreview.Plans.Any(item => string.Equals(item.CustomerCode, code, StringComparison.OrdinalIgnoreCase))
                 };
@@ -272,6 +355,7 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         var sends = await LastSends(date, kind, ct);
         if (sends.TryGetValue(customerCode, out var existing) && existing.Status is StagingStatus.Approved or StagingStatus.Promoted)
             return "Already sent";
+        if ((await LastDrafts(date, kind, ct)).ContainsKey(customerCode)) return "Already done in Outlook";
         var key = $"auto:{(deliveryTimes ? "times" : "plan")}:{date:yyyyMMdd}:{SafeKey(customerCode)}";
         if (await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct)) return "Already sent";
 
@@ -625,7 +709,7 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
             ? string.Empty
             : "\n\nLoading guides (mixed euro and standard pallets, at the back of the attachment):\n" +
               string.Join("\n", guides.Select(guide => $"{guide.LoadReference} loading guide: {guide.Code}"));
-        return $"Good afternoon,\n\nPlease find attached the Stuart Lyons load plan for {date:dd/MM/yyyy}.{guideLines}\n\nIf anything needs amending, please reply to this email and the planning team will review it.\n\nKind Regards,\nStuart Lyons Haulage\nT: 01243 555536\nE: {Mailbox}";
+        return $"{Greeting()},\n\nPlease find attached the Stuart Lyons load plan for {date:dd/MM/yyyy}.{guideLines}\n\nIf anything needs amending, please reply to this email and the planning team will review it.\n\nKind Regards,\nStuart Lyons Haulage\nT: 01243 555536\nE: {Mailbox}";
     }
 
     private static List<string> CleanRecipients(IEnumerable<string> values) => values
@@ -728,7 +812,7 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
     {
         static string Cell(string? value) => $"<td style=\"padding:4px 8px;border:1px solid #ccc\">{System.Net.WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(value) ? "—" : value)}</td>";
         var body = new System.Text.StringBuilder();
-        body.Append($"Good afternoon,<br><br>Please see your delivery times for {date:dddd dd/MM/yyyy}. Live ETAs come from our vehicle tracking and are correct at the time shown.<br><br>");
+        body.Append($"{Greeting()},<br><br>Please see your delivery times for {date:dddd dd/MM/yyyy}. Live ETAs come from our vehicle tracking and are correct at the time shown.<br><br>");
         body.Append("<table style=\"border-collapse:collapse;font-family:Arial,sans-serif;font-size:10pt\"><tr style=\"background:#f0f0f0\">");
         foreach (var heading in new[] { "Delivery", "Order ref", "Pallets", "Vehicle", "Planned", "Live ETA", "ETA as at" })
             body.Append($"<th style=\"padding:4px 8px;border:1px solid #ccc;text-align:left\">{heading}</th>");
