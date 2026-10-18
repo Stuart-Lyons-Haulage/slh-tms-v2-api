@@ -35,7 +35,8 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
         try
         {
             rows = await db.StagedImports.AsNoTracking()
-                .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+                .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected &&
+                            x.PayloadJson.Contains(date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)))
                 .OrderByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)

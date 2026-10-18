@@ -17,7 +17,8 @@ public static class SitePlanningProfileStore
         if (sites.Count == 0) return;
         var profiles = await ReadProfilesAsync(db, sites, ct);
         var rows = await db.StagedImports.AsNoTracking()
-            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected &&
+                        x.PayloadJson.Contains(date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)))
             .OrderByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
 
         foreach (var row in rows)
