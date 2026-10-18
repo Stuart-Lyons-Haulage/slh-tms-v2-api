@@ -718,6 +718,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         parsed = ExcludeManualOnlyOrders(parsed);
         if (parsed.Orders.Count == 0)
             return parsed;
+        parsed = HandlingUnitClassifier.Apply(parsed);
 
         PlannerSourceMasterDataResolver? replayResolver = null;
         if (reuseMasterDataForReplay)

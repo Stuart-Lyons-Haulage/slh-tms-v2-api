@@ -819,7 +819,7 @@ public sealed class EmailOrderIntakeService
                 row.Trolleys,
                 "Double H",
                 row.Depot,
-                "Waitrose depot delivery",
+                "Waitrose depot delivery (trolleys)",
                 []))
             .ToList();
     }
@@ -1810,6 +1810,23 @@ public sealed class EmailOrderIntakeService
             ["intakeWarnings"] = warnings
         };
 
+        // "10 pallets + 4 trolleys" is one order with two lines, each with its own count,
+        // so trolleys are never added into the pallet figure.
+        var unitQuantities = HandlingUnitClassifier.UnitQuantities(string.Join("\n", OrderContentLines(body)));
+        if (unitQuantities.Count > 1)
+        {
+            payload["sourceLines"] = unitQuantities.Select(item => new Dictionary<string, object?>
+            {
+                ["sourceRowKey"] = $"unit-{item.Unit.ToLowerInvariant()}",
+                ["palletType"] = item.Unit,
+                ["pallets"] = item.Quantity
+            }).ToList();
+            payload["pallets"] = unitQuantities.Sum(item => item.Quantity);
+            foreach (var item in unitQuantities) payload[item.Unit.ToLowerInvariant()] = item.Quantity;
+            payload["unitType"] = "Mixed";
+            payload["handlingUnitType"] = "Mixed";
+        }
+
         return new ParsedEmailOrder("body-1", naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
 
@@ -2692,6 +2709,14 @@ public sealed class EmailOrderIntakeService
 
     private static string? InferHandlingUnitType(string sourceText)
     {
+        // Go by what a quantity is stated in ("12 trolleys"), not by whichever unit word
+        // appears first anywhere in the email; a signature mentioning trays must not
+        // turn a pallet booking into a tray collection.
+        var quantified = HandlingUnitClassifier.UnitQuantities(sourceText);
+        if (quantified.Count > 0)
+            return quantified[0].Unit == "Trays" && Regex.IsMatch(sourceText, @"\beuro\s*pool\s+trays?\b", RegexOptions.IgnoreCase)
+                ? "Euro Pool Trays"
+                : quantified[0].Unit;
         if (Regex.IsMatch(sourceText, @"\beuro\s+pool\s+trays?\b", RegexOptions.IgnoreCase)) return "Euro Pool Trays";
         if (Regex.IsMatch(sourceText, @"\btrays?\b", RegexOptions.IgnoreCase)) return "Trays";
         if (Regex.IsMatch(sourceText, @"\bcrates?\b", RegexOptions.IgnoreCase)) return "Crates";
