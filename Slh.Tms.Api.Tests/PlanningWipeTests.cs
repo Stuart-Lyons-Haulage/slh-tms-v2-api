@@ -60,19 +60,21 @@ public sealed class PlanningWipeTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Needs_an_admin_a_matching_confirmation_and_no_future_date()
+    public async Task Needs_the_owner_a_check_first_a_matching_confirmation_and_no_future_date()
     {
         var planner = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write,Tms.Approve");
-        Assert.Equal(HttpStatusCode.Forbidden, (await planner.GetAsync("/api/v1/admin/planning-wipe?through=2019-06-18")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await planner.GetAsync("/api/v1/admin/planning-wipe/status")).StatusCode);
 
         var admin = factory.CreateClientWithUser("admin@lyonshaulage.com", "Tms.Write,Tms.Approve");
         admin.DefaultRequestHeaders.Add("X-Test-Roles", "TMS.Admin");
-        Assert.Equal(HttpStatusCode.OK, (await admin.GetAsync("/api/v1/admin/planning-wipe?through=2019-06-18")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await admin.GetAsync("/api/v1/admin/planning-wipe/status")).StatusCode);
 
         // The system owner, signed in with Microsoft and no app role, is allowed too.
         var owner = factory.CreateClientWithUser("daniel@lyonshaulage.com", "Tms.Write");
-        Assert.Equal(HttpStatusCode.OK, (await owner.GetAsync("/api/v1/admin/planning-wipe?through=2019-06-18")).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync("/api/v1/admin/planning-wipe", new { through = "2019-06-18", confirm = "yes" })).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await admin.GetAsync("/api/v1/admin/planning-wipe?through=2099-01-01")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.PostAsJsonAsync("/api/v1/admin/planning-wipe/check", new { through = "2099-01-01" })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.PostAsJsonAsync("/api/v1/admin/planning-wipe", new { through = "2019-06-18", confirm = "yes" })).StatusCode);
+        // Right confirmation but no check yet for that date.
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.PostAsJsonAsync("/api/v1/admin/planning-wipe", new { through = "2019-06-18", confirm = "2019-06-18" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await owner.PostAsJsonAsync("/api/v1/admin/planning-wipe/check", new { through = "2019-06-18" })).StatusCode);
     }
 }
