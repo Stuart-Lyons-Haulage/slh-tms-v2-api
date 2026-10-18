@@ -32,11 +32,11 @@ public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
             .Where(item => item.Status == StagingStatus.PendingReview && item.EntityType == "order");
         var pendingCount = await pendingQuery.CountAsync(ct);
         var newest = await pendingQuery.OrderByDescending(item => item.ReceivedAtUtc).Select(item => (DateTimeOffset?)item.ReceivedAtUtc).FirstOrDefaultAsync(ct);
-        var key = $"{pendingCount}|{newest:O}";
+        var fingerprint = $"{pendingCount}|{newest:O}";
         List<IReadOnlyList<DateOnly>> pendingDates;
         lock (PendingDatesSync)
         {
-            pendingDates = pendingDatesCache is { } cached && cached.Key == key && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(2)
+            pendingDates = pendingDatesCache is { } cached && cached.Key == fingerprint && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(2)
                 ? cached.Dates
                 : null!;
         }
@@ -44,7 +44,7 @@ public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
         {
             var payloads = await pendingQuery.Select(item => item.PayloadJson).ToListAsync(ct);
             pendingDates = payloads.Select(payload => (IReadOnlyList<DateOnly>)StagingQueueProjection.PlanningDates(payload).ToList()).ToList();
-            lock (PendingDatesSync) pendingDatesCache = (key, DateTimeOffset.UtcNow, pendingDates);
+            lock (PendingDatesSync) pendingDatesCache = (fingerprint, DateTimeOffset.UtcNow, pendingDates);
         }
 
         var counts = Enumerable.Range(0, to.DayNumber - from.DayNumber + 1)
