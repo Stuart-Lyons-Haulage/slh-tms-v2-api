@@ -36,19 +36,25 @@ public static class CustomerLoadPlanPdf
     {
         var pages = plan.Rows.Chunk(RowsPerPage).ToList();
         if (pages.Count == 0) pages.Add([]);
+        // One loading-guide page per run that mixes euro and standard pallets.
+        var guides = LoadingGuide.ForPlan(plan.Rows);
+        var totalPages = pages.Count + guides.Count;
+        var contents = pages.Select((rows, index) => BuildPage(plan, rows, index + 1, totalPages))
+            .Concat(guides.Select((guide, index) => BuildGuidePage(plan, guide, pages.Count + index + 1, totalPages)))
+            .ToList();
 
         var objects = new List<byte[]>();
-        var pageIds = Enumerable.Range(0, pages.Count).Select(index => 5 + index * 2).ToArray();
+        var pageIds = Enumerable.Range(0, contents.Count).Select(index => 5 + index * 2).ToArray();
         objects.Add(Ascii("<< /Type /Catalog /Pages 2 0 R >>"));
-        objects.Add(Ascii($"<< /Type /Pages /Kids [{string.Join(' ', pageIds.Select(id => $"{id} 0 R"))}] /Count {pages.Count} >>"));
+        objects.Add(Ascii($"<< /Type /Pages /Kids [{string.Join(' ', pageIds.Select(id => $"{id} 0 R"))}] /Count {contents.Count} >>"));
         objects.Add(Ascii("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
         objects.Add(Ascii("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"));
 
-        for (var pageIndex = 0; pageIndex < pages.Count; pageIndex++)
+        for (var pageIndex = 0; pageIndex < contents.Count; pageIndex++)
         {
             var pageObjectId = 5 + pageIndex * 2;
             var contentObjectId = pageObjectId + 1;
-            var content = BuildPage(plan, pages[pageIndex], pageIndex + 1, pages.Count);
+            var content = contents[pageIndex];
             var contentBytes = Encoding.ASCII.GetBytes(content);
             objects.Add(Ascii($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {N(PageWidth)} {N(PageHeight)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {contentObjectId} 0 R >>"));
             objects.Add(Join(Ascii($"<< /Length {contentBytes.Length} >>\nstream\n"), contentBytes, Ascii("\nendstream")));
@@ -141,6 +147,100 @@ public static class CustomerLoadPlanPdf
         Text(b, "F1", 7.2, Margin, footerY, "Generated from the live SLH TMS plan. Please notify info@lyonshaulage.com of any amendments.", 0.36, 0.40, 0.44);
         TextRight(b, "F1", 7.2, PageWidth - Margin, footerY, DateTimeOffset.UtcNow.ToString("dd/MM/yyyy HH:mm 'UTC'", CultureInfo.InvariantCulture), 0.36, 0.40, 0.44);
         return b.ToString();
+    }
+
+    private static string BuildGuidePage(CustomerLoadPlanPreview plan, LoadingGuide.Guide guide, int page, int pageCount)
+    {
+        var b = new StringBuilder();
+        Fill(b, 0, 0, PageWidth, PageHeight, 1, 1, 1);
+        Fill(b, Margin, PageHeight - 104, PageWidth - Margin * 2, 68, 0.035, 0.18, 0.31);
+        Fill(b, Margin, PageHeight - 109, PageWidth - Margin * 2, 5, 0.18, 0.55, 0.32);
+        Text(b, "F2", 20, Margin + 18, PageHeight - 66, $"{guide.LoadReference} loading guide: {guide.Code}", 1, 1, 1);
+        Text(b, "F1", 9, Margin + 19, PageHeight - 84, $"{guide.Euro} euro + {guide.Standard} standard pallets   |   last drop loaded first at the nose", 0.86, 0.94, 0.98);
+        TextRight(b, "F2", 15, PageWidth - Margin - 18, PageHeight - 65, plan.CustomerName, 1, 1, 1);
+        TextRight(b, "F1", 9, PageWidth - Margin - 18, PageHeight - 84, $"Planning date {plan.PlanningDate:dd/MM/yyyy}   |   Page {page} of {pageCount}", 0.86, 0.94, 0.98);
+
+        // Trailer deck seen from above: nose (cab end) on the left, doors on the right.
+        const double scale = 76; // points per metre
+        const double deckWidth = 2.45;
+        var deckLeft = Margin + 60;
+        var deckTop = PageHeight - 160;
+        var deckHeight = deckWidth * scale;
+        StrokeRect(b, deckLeft, deckTop - deckHeight, LoadingGuide.DeckLengthMetres * scale, deckHeight, 0.09, 0.24, 0.37, 2);
+        Text(b, "F2", 9, Margin, deckTop - deckHeight / 2 + 4, "NOSE", 0.09, 0.24, 0.37);
+        Text(b, "F1", 7, Margin, deckTop - deckHeight / 2 - 7, "(cab end)", 0.36, 0.40, 0.44);
+        Text(b, "F2", 9, deckLeft + LoadingGuide.DeckLengthMetres * scale + 8, deckTop - deckHeight / 2 + 4, "DOORS", 0.09, 0.24, 0.37);
+
+        var x = deckLeft;
+        foreach (var row in guide.Rows)
+        {
+            var depth = row.DepthMetres * scale;
+            var across = row.Type == "Euro" ? (row.Layout.Contains("lengthways") ? 1.2 : 0.8) : 1.2;
+            var y = deckTop;
+            foreach (var pallet in row.Pallets)
+            {
+                var height = across * scale;
+                var (r, g, bl) = row.Type == "Euro" ? (1.0, 0.93, 0.84) : (0.86, 0.92, 1.0);
+                Fill(b, x + 1, y - height + 1, depth - 2, height - 2, r, g, bl);
+                StrokeRect(b, x + 1, y - height + 1, depth - 2, height - 2, row.Type == "Euro" ? 0.92 : 0.15, row.Type == "Euro" ? 0.35 : 0.39, row.Type == "Euro" ? 0.05 : 0.92, 0.9);
+                Text(b, "F2", 6.6, x + 4, y - 11, Clip(Short(pallet.Delivery), depth - 6, 6.6), 0.10, 0.13, 0.16);
+                Text(b, "F1", 6.2, x + 4, y - 20, Clip(Short(pallet.Collection), depth - 6, 6.2), 0.25, 0.29, 0.33);
+                Text(b, "F1", 6.2, x + 4, y - 29, row.Type == "Euro" ? "EURO" : "STD", 0.25, 0.29, 0.33);
+                y -= height;
+            }
+            Text(b, "F2", 7, x + depth / 2 - 4, deckTop - deckHeight - 12, row.Number.ToString(CultureInfo.InvariantCulture), 0.10, 0.13, 0.16);
+            x += depth;
+        }
+        if (guide.OverLength)
+            Text(b, "F2", 10, deckLeft, deckTop - deckHeight - 30, $"Check: this layout needs {guide.LengthMetres:0.0}m of a {LoadingGuide.DeckLengthMetres}m deck. Planner to confirm before loading.", 0.75, 0.10, 0.10);
+        else
+            Text(b, "F1", 8.5, deckLeft, deckTop - deckHeight - 30, $"Uses {guide.LengthMetres:0.0}m of {LoadingGuide.DeckLengthMetres}m. Euro rows of 3 sit widthways (1.2m); an odd euro remainder turns lengthways (0.8m). Standard rows of 2 (1.0m).", 0.25, 0.29, 0.33);
+
+        // Row list for the loaders, nose first.
+        var tableTop = deckTop - deckHeight - 52;
+        (string Header, double Width)[] columns = [("Row (from nose)", 90), ("Pallets", 60), ("Type / layout", 130), ("Collect from", 300), ("Deliver to", 300), ("Order", 220)];
+        var tableWidth = columns.Sum(column => column.Width);
+        Fill(b, Margin, tableTop - 22, tableWidth, 22, 0.09, 0.24, 0.37);
+        var cx = Margin;
+        foreach (var column in columns)
+        {
+            Text(b, "F2", 7.4, cx + 4, tableTop - 14, column.Header, 1, 1, 1);
+            cx += column.Width;
+        }
+        var ty = tableTop - 22;
+        foreach (var row in guide.Rows.Take(24))
+        {
+            ty -= 17;
+            if (row.Number % 2 == 0) Fill(b, Margin, ty, tableWidth, 17, 0.965, 0.975, 0.98);
+            var values = new[]
+            {
+                row.Number.ToString(CultureInfo.InvariantCulture),
+                row.Pallets.Count.ToString(CultureInfo.InvariantCulture),
+                $"{(row.Type == "Euro" ? "Euro" : "Standard")} {row.Layout}",
+                string.Join(", ", row.Pallets.Select(p => p.Collection).Distinct(StringComparer.OrdinalIgnoreCase)),
+                string.Join(", ", row.Pallets.Select(p => p.Delivery).Distinct(StringComparer.OrdinalIgnoreCase)),
+                string.Join(", ", row.Pallets.Select(p => p.OrderReference).Distinct(StringComparer.OrdinalIgnoreCase))
+            };
+            cx = Margin;
+            for (var index = 0; index < columns.Length; index++)
+            {
+                StrokeRect(b, cx, ty, columns[index].Width, 17, 0.80, 0.83, 0.85, 0.45);
+                Text(b, index == 0 ? "F2" : "F1", 7, cx + 4, ty + 6, Clip(values[index], columns[index].Width, 7), 0.10, 0.13, 0.16);
+                cx += columns[index].Width;
+            }
+        }
+
+        Stroke(b, Margin, 35, PageWidth - Margin, 35, 0.82, 0.85, 0.87, 0.5);
+        Text(b, "F1", 7.2, Margin, 25, "Generated from the live SLH TMS plan. Load in row order from the nose; please contact info@lyonshaulage.com before changing the layout.", 0.36, 0.40, 0.44);
+        return b.ToString();
+    }
+
+    private static string Short(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        foreach (var prefix in new[] { "NWF-", "Aldi-", "ALDI ", "Morrisons-" })
+            if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && text.Length > prefix.Length + 2) return text[prefix.Length..];
+        return text;
     }
 
     private static string Clip(string? value, double width, double fontSize)

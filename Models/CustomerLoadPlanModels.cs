@@ -15,7 +15,9 @@ public sealed record CustomerLoadPlanRow(
     string? VehicleRegistration,
     string? TrailerNumber,
     string Status,
-    string? Notes);
+    string? Notes,
+    string? PalletType = null,
+    int? DeliverySequence = null);
 
 public sealed record CustomerLoadPlanPreview(
     string CustomerCode,

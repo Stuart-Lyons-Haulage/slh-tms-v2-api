@@ -38,7 +38,10 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
     }
 
     [HttpPost("queue"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> Queue(QueueCustomerLoadPlanRequest request, CancellationToken ct)
+    public Task<IActionResult> Queue(QueueCustomerLoadPlanRequest request, CancellationToken ct) =>
+        QueueLoadPlanCore(request, null, User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "Dispatch", ct);
+
+    private async Task<IActionResult> QueueLoadPlanCore(QueueCustomerLoadPlanRequest request, string? idempotencyKey, string actor, CancellationToken ct)
     {
         var preview = await BuildPreview(request.PlanningDate, ct);
         var plan = preview.Plans.FirstOrDefault(item => string.Equals(item.CustomerCode, request.CustomerCode, StringComparison.OrdinalIgnoreCase));
@@ -62,11 +65,10 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
             plan.TotalPallets);
 
         var now = DateTimeOffset.UtcNow;
-        var actor = User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "Dispatch";
         var item = new StagedImport
         {
             EntityType = EntityType,
-            IdempotencyKey = $"load-plan:{request.PlanningDate:yyyyMMdd}:{SafeKey(plan.CustomerCode)}:{Guid.NewGuid():N}",
+            IdempotencyKey = idempotencyKey ?? $"load-plan:{request.PlanningDate:yyyyMMdd}:{SafeKey(plan.CustomerCode)}:{Guid.NewGuid():N}",
             PayloadJson = JsonSerializer.Serialize(queued, Json),
             Status = StagingStatus.Approved,
             Source = $"Dispatch load plan / {plan.CustomerCode} / {request.PlanningDate:yyyy-MM-dd}",
@@ -132,7 +134,10 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
     /// <summary>Queues a customer's delivery times (HTML table in the body, load plan PDF
     /// attached) on the same outbox the Info-mailbox flow already sends.</summary>
     [HttpPost("delivery-times/queue"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> QueueDeliveryTimes(QueueCustomerLoadPlanRequest request, CancellationToken ct)
+    public Task<IActionResult> QueueDeliveryTimes(QueueCustomerLoadPlanRequest request, CancellationToken ct) =>
+        QueueDeliveryTimesCore(request, null, User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "Dispatch", ct);
+
+    private async Task<IActionResult> QueueDeliveryTimesCore(QueueCustomerLoadPlanRequest request, string? idempotencyKey, string actor, CancellationToken ct)
     {
         var preview = await BuildPreview(request.PlanningDate, ct);
         var plan = preview.Plans.FirstOrDefault(item => string.Equals(item.CustomerCode, request.CustomerCode, StringComparison.OrdinalIgnoreCase));
@@ -158,11 +163,10 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
             DeliveryTimesKind);
 
         var now = DateTimeOffset.UtcNow;
-        var actor = User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "Dispatch";
         var item = new StagedImport
         {
             EntityType = EntityType,
-            IdempotencyKey = $"delivery-times:{request.PlanningDate:yyyyMMdd}:{SafeKey(plan.CustomerCode)}:{Guid.NewGuid():N}",
+            IdempotencyKey = idempotencyKey ?? $"delivery-times:{request.PlanningDate:yyyyMMdd}:{SafeKey(plan.CustomerCode)}:{Guid.NewGuid():N}",
             PayloadJson = JsonSerializer.Serialize(queued, Json),
             Status = StagingStatus.Approved,
             Source = $"Dispatch delivery times / {plan.CustomerCode} / {request.PlanningDate:yyyy-MM-dd}",
@@ -194,6 +198,116 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
             recipients = to,
             message = $"{plan.CustomerName} delivery times queued to send from {Mailbox}."
         });
+    }
+
+    /// <summary>The automatic-send schedule, with today's state per customer.</summary>
+    [HttpGet("schedule"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Schedule(CancellationToken ct)
+    {
+        var settings = await CustomerCommsSchedule.LoadAsync(db, ct);
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        var tomorrow = today.AddDays(1);
+        var plans = await BuildPreview(tomorrow, ct);
+        var timesPreview = await BuildPreview(today, ct);
+        var planSends = await LastSends(tomorrow, null, ct);
+        var timeSends = await LastSends(today, DeliveryTimesKind, ct);
+        var stuck = await db.StagedImports.AsNoTracking()
+            .CountAsync(item => item.EntityType == EntityType && item.Status == StagingStatus.Approved && item.ReceivedAtUtc < DateTimeOffset.UtcNow.AddMinutes(-10), ct);
+        var customers = plans.Plans.Select(plan => (plan.CustomerCode, plan.CustomerName, plan.To))
+            .Concat(timesPreview.Plans.Select(plan => (plan.CustomerCode, plan.CustomerName, plan.To)))
+            .Concat(settings.Customers.Keys.Select(code => (code, code, (IReadOnlyList<string>)[])))
+            .GroupBy(item => item.Item1, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var code = group.Key;
+                var name = group.Select(item => item.Item2).FirstOrDefault(value => !string.Equals(value, code, StringComparison.OrdinalIgnoreCase)) ?? code;
+                var choice = settings.Customers.GetValueOrDefault(code) ?? new CustomerCommsSchedule.Choice(false, false);
+                planSends.TryGetValue(code, out var planSend);
+                timeSends.TryGetValue(code, out var timeSend);
+                return new
+                {
+                    customerCode = code,
+                    customerName = name,
+                    recipients = group.SelectMany(item => item.Item3).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    choice.LoadPlan,
+                    choice.DeliveryTimes,
+                    loadPlanStatus = LastStatus(planSend),
+                    loadPlanHold = CustomerCommsSchedule.HoldFor(code, tomorrow),
+                    deliveryTimesStatus = LastStatus(timeSend),
+                    hasPlanTomorrow = plans.Plans.Any(item => string.Equals(item.CustomerCode, code, StringComparison.OrdinalIgnoreCase)),
+                    hasDeliveriesToday = timesPreview.Plans.Any(item => string.Equals(item.CustomerCode, code, StringComparison.OrdinalIgnoreCase))
+                };
+            })
+            .OrderBy(item => item.customerName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return Ok(new
+        {
+            settings.LoadPlanTime,
+            settings.DeliveryTimesTime,
+            settings.LoadPlanLatest,
+            today,
+            tomorrow,
+            emailsWaitingOverTenMinutes = stuck,
+            customers
+        });
+    }
+
+    [HttpPut("schedule"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SaveSchedule([FromBody] CustomerCommsSchedule.Settings request, CancellationToken ct)
+    {
+        if (!CustomerCommsSchedule.IsTime(request.LoadPlanTime) || !CustomerCommsSchedule.IsTime(request.DeliveryTimesTime) || !CustomerCommsSchedule.IsTime(request.LoadPlanLatest))
+            return BadRequest(new { message = "Times must be HH:mm." });
+        await CustomerCommsSchedule.SaveAsync(db, request, User.Identity?.Name ?? "Customer Comms", ct);
+        return Ok(request);
+    }
+
+    /// <summary>
+    /// Used by the schedule: queue one customer's load plan (tomorrow) or delivery times
+    /// (today) exactly as the Customer Comms buttons do, once per customer per day.
+    /// A load plan is held while any of that customer's orders are not on a run yet.
+    /// </summary>
+    internal async Task<string> QueueAutomaticAsync(DateOnly date, string customerCode, bool deliveryTimes, CancellationToken ct)
+    {
+        var kind = deliveryTimes ? DeliveryTimesKind : null;
+        var sends = await LastSends(date, kind, ct);
+        if (sends.TryGetValue(customerCode, out var existing) && existing.Status is StagingStatus.Approved or StagingStatus.Promoted)
+            return "Already sent";
+        var key = $"auto:{(deliveryTimes ? "times" : "plan")}:{date:yyyyMMdd}:{SafeKey(customerCode)}";
+        if (await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct)) return "Already sent";
+
+        if (!deliveryTimes)
+        {
+            var unplanned = await UnplannedOrdersAsync(date, customerCode, ct);
+            if (unplanned > 0) return $"Held: {unplanned} order{(unplanned == 1 ? "" : "s")} not on a run yet";
+        }
+
+        var request = new QueueCustomerLoadPlanRequest(date, customerCode, null, null, null, null);
+        var result = deliveryTimes
+            ? await QueueDeliveryTimesCore(request, key, "Scheduled send", ct)
+            : await QueueLoadPlanCore(request, key, "Scheduled send", ct);
+        return result switch
+        {
+            AcceptedResult => "Queued",
+            NotFoundObjectResult => "Nothing planned",
+            BadRequestObjectResult => "Held: no email address for this customer in Master data",
+            _ => "Not sent"
+        };
+    }
+
+    private async Task<int> UnplannedOrdersAsync(DateOnly date, string customerCode, CancellationToken ct)
+    {
+        var orders = await db.TransportOrders.AsNoTracking()
+            .Where(order => order.CollectionDate == date && order.CustomerCode == customerCode && order.Status != OrderStatus.Cancelled)
+            .Select(order => order.Id)
+            .ToListAsync(ct);
+        if (orders.Count == 0) return 0;
+        var onRuns = new HashSet<Guid>();
+        foreach (var day in new[] { date.AddDays(-1), date, date.AddDays(1) })
+            foreach (var load in await PlanningResilience.ReadLoadsAsync(db, day, ct))
+                if (load.Status != LoadStatus.Cancelled)
+                    foreach (var stop in load.Stops)
+                        if (stop.OrderId is Guid id) onRuns.Add(id);
+        return orders.Count(id => !onRuns.Contains(id));
     }
 
     [HttpGet("outbox"), Authorize(Policy = "TmsWrite")]
@@ -338,6 +452,7 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         var trailerById = trailers.ToDictionary(trailer => trailer.Id);
 
+        var palletTypes = await PalletTypesAsync(orders, ct);
         var rows = new List<CustomerLoadPlanRow>();
         foreach (var binding in orderBindings)
         {
@@ -362,7 +477,9 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
                 load.VehicleId is Guid vehicleId && vehicleById.TryGetValue(vehicleId, out var vehicle) ? vehicle.Registration : null,
                 load.TrailerId is Guid trailerId && trailerById.TryGetValue(trailerId, out var trailer) ? trailer.TrailerNumber : null,
                 load.Status.ToString(),
-                order.DriverInstructions));
+                order.DriverInstructions,
+                palletTypes.GetValueOrDefault(order.Id),
+                binding.Stop.Sequence));
         }
 
         var previous = await db.StagedImports.AsNoTracking()
@@ -398,7 +515,7 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
                     customerName,
                     planningDate,
                     SubjectFor(group.Key, customerName, planningDate),
-                    BodyFor(planningDate),
+                    BodyFor(planningDate, planRows),
                     AttachmentFor(group.Key, customerName, planningDate),
                     recipients,
                     [],
@@ -412,6 +529,46 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         if (orphaned > 0) warnings.Add($"{orphaned} run-linked order(s) could not be resolved into a customer load plan.");
         if (plans.Any(plan => plan.To.Count == 0)) warnings.Add("Some customers have no active email contact in Master Data. Add recipients in the preview before sending.");
         return new CustomerLoadPlanPreviewResponse(planningDate, DateTimeOffset.UtcNow, plans, warnings);
+    }
+
+    /// <summary>Euro / standard (etc.) for each order, from the booking it was approved from.</summary>
+    private async Task<Dictionary<Guid, string>> PalletTypesAsync(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
+    {
+        var result = new Dictionary<Guid, string>();
+        var bySource = orders.Where(order => order.SourceStagedImportId != null)
+            .GroupBy(order => order.SourceStagedImportId!.Value)
+            .ToDictionary(group => group.Key, group => group.Select(order => order.Id).ToList());
+        if (bySource.Count == 0) return result;
+        try
+        {
+            foreach (var chunk in bySource.Keys.Chunk(400))
+            {
+                var payloads = await db.StagedImports.AsNoTracking()
+                    .Where(item => chunk.Contains(item.Id))
+                    .Select(item => new { item.Id, item.PayloadJson })
+                    .ToListAsync(ct);
+                foreach (var row in payloads)
+                {
+                    try
+                    {
+                        using var document = JsonDocument.Parse(row.PayloadJson);
+                        string? type = null;
+                        foreach (var name in new[] { "palletType", "loadUnitType", "unitType", "handlingUnitType", "palletFormat", "capacityType" })
+                            if (document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString()))
+                            { type = value.GetString(); break; }
+                        if (type is null) continue;
+                        foreach (var orderId in bySource[row.Id]) result[orderId] = type;
+                    }
+                    catch (JsonException) { }
+                }
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Pallet types for the customer load plan could not be read; loading guides will be skipped.");
+            db.ChangeTracker.Clear();
+        }
+        return result;
     }
 
     private static CustomerLoadPlanPreview ToPreview(QueuedLoadPlan plan) => new(
@@ -461,8 +618,15 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         return $"{safe} Load Plan-{compact}.pdf";
     }
 
-    private static string BodyFor(DateOnly date) =>
-        $"Good afternoon,\n\nPlease find attached the Stuart Lyons load plan for {date:dd/MM/yyyy}.\n\nIf anything needs amending, please reply to this email and the planning team will review it.\n\nKind Regards,\nStuart Lyons Haulage\nT: 01243 555536\nE: {Mailbox}";
+    private static string BodyFor(DateOnly date, IReadOnlyList<CustomerLoadPlanRow>? rows = null)
+    {
+        var guides = rows is null ? [] : LoadingGuide.ForPlan(rows);
+        var guideLines = guides.Count == 0
+            ? string.Empty
+            : "\n\nLoading guides (mixed euro and standard pallets, at the back of the attachment):\n" +
+              string.Join("\n", guides.Select(guide => $"{guide.LoadReference} loading guide: {guide.Code}"));
+        return $"Good afternoon,\n\nPlease find attached the Stuart Lyons load plan for {date:dd/MM/yyyy}.{guideLines}\n\nIf anything needs amending, please reply to this email and the planning team will review it.\n\nKind Regards,\nStuart Lyons Haulage\nT: 01243 555536\nE: {Mailbox}";
+    }
 
     private static List<string> CleanRecipients(IEnumerable<string> values) => values
         .Select(value => value?.Trim() ?? string.Empty)
