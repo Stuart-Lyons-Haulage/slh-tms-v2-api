@@ -31,6 +31,9 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
     // POSTs that only read (they carry a list of drivers in the body); they must not wipe the cache.
     private static readonly string[] ReadOnlyPosts = ["/api/dispatch/available-times"];
 
+    /// <summary>For changes made outside a request (a background clear-out, say).</summary>
+    public static void ClearReadCache() => ReadCache.Clear();
+
     public async Task InvokeAsync(HttpContext context, PlanningChangeNotifier notifier)
     {
         var path = context.Request.Path.Value ?? string.Empty;
