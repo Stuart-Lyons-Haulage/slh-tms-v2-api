@@ -40,7 +40,29 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
         amendedPayload["poNumber"] = po;
         amendedPayload["customerCode"] = customer;
         amendedPayload["collectionDate"] = date;
+
+        // The sites the planner typed win over any older detail fields from the original read.
+        foreach (var (typed, names) in new[]
+        {
+            (FirstText(request.Payload, "collectionSite", "sellerName"), new[] { "collectionSiteName", "collectionSite", "collectionLocation", "sellerName" }),
+            (FirstText(request.Payload, "deliverySite", "stallNumber"), new[] { "deliverySiteName", "deliverySite", "deliveryLocation", "stallNumber", "destination" })
+        })
+            if (!string.IsNullOrWhiteSpace(typed))
+                foreach (var name in names) amendedPayload[name] = typed;
         StagedOrderPayloadAmendment.Apply(amendedPayload);
+
+        // A "couldn't read this email" card that a planner has filled in is now a real order
+        // from that email: it counts as captured, turns the Outlook tag green and is not
+        // archived if the email is re-read later.
+        if (item.IdempotencyKey.EndsWith(":mapping-exception", StringComparison.Ordinal))
+        {
+            var amendedKey = $"{item.IdempotencyKey[..^":mapping-exception".Length]}:amended-{item.Id.ToString("N")[..8]}";
+            if (amendedKey.Length <= 200 && !await db.StagedImports.AnyAsync(row => row.IdempotencyKey == amendedKey, ct))
+                item.IdempotencyKey = amendedKey;
+            if (item.Source?.StartsWith("Info mailbox mapping exception", StringComparison.Ordinal) == true)
+                item.Source = "Info mailbox (amended by planner)" + item.Source["Info mailbox mapping exception".Length..];
+            amendedPayload["intakeStatus"] = "Amended";
+        }
 
         var previousStatus = item.Status;
         item.PayloadJson = amendedPayload.ToJsonString();
@@ -59,6 +81,43 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
             User.Identity?.Name ?? User.FindFirst("oid")?.Value));
         await db.SaveChangesAsync(ct);
         return Ok(item);
+    }
+
+    /// <summary>
+    /// One email, more than one order (e.g. "21 from Leythorne and 12 from Funtington"):
+    /// adds another card from the same email, without dates, to fill in and save.
+    /// </summary>
+    [HttpPost("{id:guid}/copy-undated"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> CopyUndated(Guid id, CancellationToken ct)
+    {
+        var item = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(row => row.Id == id, ct);
+        if (item is null) return NotFound();
+        if (!string.Equals(item.EntityType, "order", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "Only orders can be copied." });
+        var payload = JsonNode.Parse(item.PayloadJson)?.AsObject() ?? new JsonObject();
+        foreach (var name in new[] { "collectionDate", "deliveryDate", "pallets", "poNumber", "customerPo", "sourceLines", "intakeNaturalKey", "intakeMatchKeys", "amendmentMatchKey" })
+            payload.Remove(name);
+        payload["intakeStatus"] = "AddedByPlanner";
+        payload["intakeWarnings"] = new JsonArray("Added by a planner as another order from the same email; fill in the details and save.");
+        var colon = item.IdempotencyKey.LastIndexOf(':');
+        var stem = colon > 0 ? item.IdempotencyKey[..colon] : item.IdempotencyKey;
+        if (stem.StartsWith("archived-", StringComparison.Ordinal)) stem = $"manual:{item.Id:N}";
+        var key = $"{stem}:added-{Guid.NewGuid().ToString("N")[..8]}";
+        if (key.Length > 200) key = $"manual:{item.Id:N}:added-{Guid.NewGuid().ToString("N")[..8]}";
+        var copy = new StagedImport
+        {
+            EntityType = "order",
+            IdempotencyKey = key,
+            PayloadJson = payload.ToJsonString(),
+            Status = StagingStatus.PendingReview,
+            Source = item.Source,
+            ReceivedAtUtc = item.ReceivedAtUtc,
+            ReviewNote = $"Added by {User.Identity?.Name ?? "a planner"} from the same email as {item.Id}."
+        };
+        db.StagedImports.Add(copy);
+        db.StagedImportEvents.Add(StagingAudit.Create(copy, "Received", null, copy.ReviewNote, User.Identity?.Name));
+        await db.SaveChangesAsync(ct);
+        return Ok(copy);
     }
 
     [HttpPost("{id:guid}/confirm-delivery-site"), Authorize(Policy = "TmsApprove")]

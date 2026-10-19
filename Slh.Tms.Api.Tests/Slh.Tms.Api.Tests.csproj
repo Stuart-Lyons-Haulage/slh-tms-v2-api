@@ -24,5 +24,6 @@
     <None Update="Fixtures\Vitacress Collections WAITROSE 19.10.26.xls" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures\NWF SLH Outbound PO 19.10.26.pdf" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures\NWF SLH Collection Sheet 19.10.26.xlsx" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Barfoots Euro Pool Return 0332403646 20.10.2026.pdf" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

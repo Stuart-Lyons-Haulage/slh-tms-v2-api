@@ -22,7 +22,9 @@ internal sealed record EuroPoolPdfConfirmation(
     DateOnly? LoadingDate,
     string? CollectionSite,
     string? Destination,
-    IReadOnlyList<EuroPoolPdfLineItem> LineItems);
+    IReadOnlyList<EuroPoolPdfLineItem> LineItems,
+    DateOnly? UnloadingDate = null,
+    bool IsReturn = false);
 
 /// <summary>
 /// Controller-local intake guard. Because OrderIntakeController resolves unqualified
@@ -68,11 +70,25 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     private static readonly Regex EuroPoolSalesOrderRegex = new(
-        @"Sales\s+order\s+number\s*:\s*(?<order>\d{6,})(?!\d)",
+        @"Sales\s*order\s*number\s*:\s*(?<order>\d{6,})(?!\d)|(?<!\d)(?<order>\d{6,})\s*Sales\s*order\s*number\s*:",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolLoadingDateRegex = new(
-        @"(?<![A-Za-z])Loading\s+date\s*:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})(?=\D|$)",
+        @"(?<![A-Za-z])Loading\s*date\s*:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})(?=\D|$)|(?<![\d/])(?<date>\d{1,2}/\d{1,2}/\d{4})\s*(?<![A-Za-z])Loading\s*date\s*:",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex EuroPoolUnloadingDateRegex = new(
+        @"Unloading\s*date\s*:\s*(?<date>\d{1,2}/\d{1,2}/\d{4})(?=\D|$)|(?<![\d/])(?<date>\d{1,2}/\d{1,2}/\d{4})\s*Unloading\s*date\s*:",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // "Flow type: Return" (trays going back to Euro Pool) - written either way round.
+    private static readonly Regex EuroPoolReturnFlowRegex = new(
+        @"Flow\s*type\s*:\s*Return\b|\bReturn\s*Flow\s*type\s*:",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Body split for a return: "21 pallets from Leythorne and 12 from Funtington".
+    private static readonly Regex EuroPoolBodySiteSplitRegex = new(
+        @"(?<![\d.,/])(?<qty>\d{1,3})\s*(?:x\s*)?(?:pallets?|plts?|stacks?|load\s*carriers?)?\s+(?:of\s+trays\s+)?from\s+(?<site>[A-Za-z]{3,20}(?:\s+(?:Hill|Farm))?)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolCollectionRegex = new(
@@ -80,7 +96,7 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolBarfootsDestinationRegex = new(
-        @"\bBarfoots\s+(?<site>Sefter|Leythorne)(?:\s+Farm)?",
+        @"\bBarfoots\s+(?<site>Sefter|Leythorne|Funtington)(?:\s+Farm)?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex EuroPoolSummerBerryDestinationRegex = new(
@@ -105,6 +121,10 @@ public sealed class SpecialistMailboxOrderParser
         var waitrosePdf = TryParseWaitroseBookingPdf(request);
         if (waitrosePdf is not null)
             return waitrosePdf;
+
+        var barfootsMovement = TryParseBarfootsTrayMovementEmail(request);
+        if (barfootsMovement is not null)
+            return barfootsMovement;
 
         var southbound = TryParseSouthboundLoadPlan(request);
         if (southbound is not null)
@@ -533,6 +553,13 @@ public sealed class SpecialistMailboxOrderParser
                     continue;
 
                 recognisedConfirmation = true;
+                // Some confirmations leave the loading date blank and give only the
+                // unloading (depot) date; a return goes from the grower to Euro Pool.
+                var loadingDate = parsed.LoadingDate ?? parsed.UnloadingDate;
+                var unloadingDate = parsed.UnloadingDate ?? parsed.LoadingDate;
+                if (parsed.IsReturn)
+                    parsed = parsed with { CollectionSite = parsed.Destination, Destination = parsed.CollectionSite };
+                parsed = parsed with { LoadingDate = loadingDate };
                 if (parsed.SalesOrderNumber is null || parsed.LoadingDate is null ||
                     string.IsNullOrWhiteSpace(parsed.CollectionSite) ||
                     string.IsNullOrWhiteSpace(parsed.Destination) || parsed.LineItems.Count == 0)
@@ -550,7 +577,8 @@ public sealed class SpecialistMailboxOrderParser
                 var rowWarnings = new List<string>();
                 var totalQuantity = parsed.LineItems.Sum(row => row.TotalQuantity);
                 var carrierQuantity = parsed.LineItems.Sum(row => row.CarrierQuantity);
-                var isBarfoots = parsed.Destination.StartsWith("Barfoots ", StringComparison.OrdinalIgnoreCase);
+                var isBarfoots = parsed.Destination.StartsWith("Barfoots ", StringComparison.OrdinalIgnoreCase) ||
+                                 parsed.CollectionSite.StartsWith("Barfoots ", StringComparison.OrdinalIgnoreCase);
                 var customerCode = isBarfoots ? "BARFOOTS" : "SUMMERBERRY";
                 var reference = BuildReference(parsed.SalesOrderNumber, parsed.Destination);
                 var naturalKey = $"{customerCode}|EUROPOOL|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyy-MM-dd}";
@@ -571,8 +599,8 @@ public sealed class SpecialistMailboxOrderParser
                     ["customerPo"] = parsed.SalesOrderNumber,
                     ["customerCode"] = customerCode,
                     ["collectionDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                    ["deliveryDate"] = parsed.LoadingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                    ["deliveryDateBasis"] = "Same day as confirmed Euro Pool loading date",
+                    ["deliveryDate"] = (unloadingDate ?? parsed.LoadingDate.Value).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    ["deliveryDateBasis"] = parsed.UnloadingDate is not null ? "Euro Pool unloading date" : "Same day as confirmed Euro Pool loading date",
                     // Euro Pool order quantity is load-carrier quantity; retain the
                     // tray total separately so mapping has a usable handling-unit count.
                     ["pallets"] = carrierQuantity,
@@ -589,7 +617,7 @@ public sealed class SpecialistMailboxOrderParser
                     ["stallNumber"] = parsed.Destination,
                     ["destination"] = parsed.Destination,
                     ["marketName"] = customerCode,
-                    ["jobType"] = "Euro Pool tray collection",
+                    ["jobType"] = parsed.IsReturn ? "Euro Pool tray return" : "Euro Pool tray collection",
                     ["orderType"] = "Delivery",
                     ["driverInstructions"] = instructions,
                     ["temperatureRequirement"] = null,
@@ -616,6 +644,40 @@ public sealed class SpecialistMailboxOrderParser
                     ["plannerReady"] = true,
                     ["intakeStatus"] = "ReadyForReview"
                 };
+                // A return collected from more than one farm: the email body says how many from
+                // each ("21 pallets from Leythorne and 12 from Funtington"). Split only when the
+                // body adds up to the confirmed load-carrier count.
+                var splits = parsed.IsReturn
+                    ? EuroPoolBodySiteSplitRegex.Matches(MailboxBodyNormalizer.Normalize(request.BodyText, request.BodyHtml)).Cast<Match>()
+                        .Select(match => (Qty: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture),
+                            Site: $"Barfoots {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(match.Groups["site"].Value.Trim().ToLowerInvariant())}"))
+                        .Where(item => item.Qty > 0)
+                        .GroupBy(item => item.Site, StringComparer.OrdinalIgnoreCase).Select(group => (Qty: group.Sum(item => item.Qty), Site: group.Key))
+                        .ToList()
+                    : [];
+                if (splits.Count > 1 && splits.Sum(item => item.Qty) == carrierQuantity)
+                {
+                    foreach (var split in splits)
+                    {
+                        var part = new Dictionary<string, object?>(payload)
+                        {
+                            ["pallets"] = split.Qty,
+                            ["loadCarrierQuantity"] = split.Qty,
+                            ["sellerName"] = split.Site,
+                            ["collectionSite"] = split.Site,
+                            ["collectionPoint"] = split.Site,
+                            ["intakeNaturalKey"] = $"{naturalKey}|{split.Site}",
+                            ["intakeMatchKeys"] = new[] { $"{customerCode}|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}|{NormaliseKey(split.Site)}" },
+                            ["amendmentMatchKey"] = $"{customerCode}|{parsed.SalesOrderNumber}|{parsed.LoadingDate:yyyyMMdd}|{NormaliseKey(split.Site)}",
+                            ["driverInstructions"] = $"{instructions} · Split from the email: {split.Qty} from {split.Site}"
+                        };
+                        orders.Add(new ParsedEmailOrder(
+                            $"barfoots-europool-{parsed.SalesOrderNumber}-{NormaliseKey(split.Site)}", $"{naturalKey}|{split.Site}",
+                            JsonSerializer.SerializeToElement(part), rowWarnings));
+                    }
+                    continue;
+                }
+
                 var element = JsonSerializer.SerializeToElement(payload);
                 orders.Add(new ParsedEmailOrder(
                     $"barfoots-europool-{parsed.SalesOrderNumber}", naturalKey, element, rowWarnings));
@@ -654,6 +716,16 @@ public sealed class SpecialistMailboxOrderParser
             out var date)
             ? date
             : null;
+        var unloadingMatch = EuroPoolUnloadingDateRegex.Match(searchableText);
+        DateOnly? unloadingDate = DateOnly.TryParseExact(
+            unloadingMatch.Groups["date"].Value,
+            ["d/M/yyyy", "dd/MM/yyyy"],
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out var unloading)
+            ? unloading
+            : null;
+        var isReturn = EuroPoolReturnFlowRegex.IsMatch(searchableText);
         var collectionMatch = EuroPoolCollectionRegex.Match(searchableText);
         var destinationMatch = EuroPoolBarfootsDestinationRegex.Match(searchableText);
         var summerBerryDestinationMatch = EuroPoolSummerBerryDestinationRegex.Match(searchableText);
@@ -670,6 +742,7 @@ public sealed class SpecialistMailboxOrderParser
                 ParseEuroPoolQuantity(match.Groups["totalQty"].Value)))
             .Where(row => row.CarrierQuantity > 0 && row.UnitsPerCarrier > 0 && row.TotalQuantity > 0)
             .ToList();
+        if (lineItems.Count == 0) lineItems = SquashedEuroPoolLineItems(itemText);
 
         return new EuroPoolPdfConfirmation(
             orderMatch.Success ? orderMatch.Groups["order"].Value : null,
@@ -680,7 +753,63 @@ public sealed class SpecialistMailboxOrderParser
                 : summerBerryDestinationMatch.Success
                     ? $"Summer Berry {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(summerBerryDestinationMatch.Groups["site"].Value.ToLowerInvariant())}"
                     : null,
-            lineItems);
+            lineItems,
+            unloadingDate,
+            isReturn);
+    }
+
+    // The PDF library reads the real confirmations with the table cells run together:
+    // "21000021186-Green trayLPR PR080 EPConditioned 300Folded IN122523.024" - order qty 12,
+    // 252 trays per pallet, 3.024 trays. The three numbers are separated by checking that
+    // qty x per-pallet = total.
+    private static readonly Regex EuroPoolSquashedLineStartRegex = new(
+        @"(?<material>2\d{7})(?=\d{3}-[A-Za-z])",
+        RegexOptions.Compiled);
+    private static readonly Regex EuroPoolSquashedCarrierRegex = new(
+        @"(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)",
+        RegexOptions.Compiled);
+
+    internal static List<EuroPoolPdfLineItem> SquashedEuroPoolLineItems(string itemText)
+    {
+        var end = itemText.IndexOf("Transport", StringComparison.OrdinalIgnoreCase);
+        if (end > 0) itemText = itemText[..end];
+        var starts = EuroPoolSquashedLineStartRegex.Matches(itemText).Cast<Match>().ToList();
+        var items = new List<EuroPoolPdfLineItem>();
+        for (var i = 0; i < starts.Count; i++)
+        {
+            var segment = itemText[starts[i].Index..(i + 1 < starts.Count ? starts[i + 1].Index : itemText.Length)].Trim();
+            var carrier = EuroPoolSquashedCarrierRegex.Match(segment);
+            // The numbers come last, straight after the logistic variant ("Folded IN").
+            var tail = Regex.Match(segment, @"(?<=[A-Za-z]\s*)(?<nums>\d[\d.,]*)$");
+            if (!carrier.Success || !tail.Success) continue;
+            var split = SplitEuroPoolNumbers(tail.Groups["nums"].Value);
+            if (split is null) continue;
+            items.Add(new EuroPoolPdfLineItem(starts[i].Groups["material"].Value, carrier.Groups["carrier"].Value.Trim(),
+                split.Value.Qty, split.Value.PerCarrier, split.Value.Total));
+        }
+        return items;
+    }
+
+    internal static (int Qty, int PerCarrier, int Total)? SplitEuroPoolNumbers(string run)
+    {
+        run = run.Trim();
+        for (var k = 1; k < run.Length; k++)
+        {
+            var totalText = run[k..];
+            if (!Regex.IsMatch(totalText, @"^\d{1,3}(?:[.,]\d{3})*$")) continue;
+            var prefix = run[..k];
+            if (!prefix.All(char.IsDigit)) continue;
+            var total = ParseEuroPoolQuantity(totalText);
+            for (var j = 1; j < prefix.Length; j++)
+            {
+                if (prefix[j] == '0') continue;
+                if (!int.TryParse(prefix[..j], NumberStyles.None, CultureInfo.InvariantCulture, out var qty) ||
+                    !int.TryParse(prefix[j..], NumberStyles.None, CultureInfo.InvariantCulture, out var perCarrier)) continue;
+                if (qty > 0 && perCarrier is > 0 and <= 5000 && (long)qty * perCarrier == total)
+                    return (qty, perCarrier, total);
+            }
+        }
+        return null;
     }
 
     private static int ParseEuroPoolQuantity(string value)
@@ -690,6 +819,77 @@ public sealed class SpecialistMailboxOrderParser
         return int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var quantity)
             ? quantity
             : 0;
+    }
+
+    private static readonly Regex BarfootsMovementRouteRegex = new(
+        @"\bfrom\s+(?<from>[A-Za-z][A-Za-z&' -]{1,40}?)\s+to\s+(?<to>[A-Za-z][A-Za-z&' -]{1,40}?)(?=\s*,|\s+[A-Z]{1,4}-?\d{5,}|\s+\d{1,2}[./]\d{1,2}\b|\s+on\s+\d|\s+depot\b|\s*$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex BarfootsMovementDateRegex = new(
+        @"(?<![\d/.])(?<d>\d{1,2})[./](?<m>\d{1,2})(?:[./](?<y>\d{2,4}))?(?![\d/])",
+        RegexOptions.Compiled);
+    private static readonly Regex BarfootsMovementReferenceRegex = new(
+        @"\b(?<ref>[A-Z]{1,4}-?\d{6,}|\d{8,})\b",
+        RegexOptions.Compiled);
+    private static readonly Regex BarfootsMovementPalletsRegex = new(
+        @"(?<![\d.,/])(?<qty>\d{1,3})\s*(?:pallets?|plts?|stacks?)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex BarfootsMovementKeywordRegex = new(
+        @"\b(?:collection|collect|return|delivery|deliver|trays)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Barfoots one-off movements written in the subject, e.g. "Collection rental trays from
+    /// Sefter to Curdworth F00181085 19.10" with "26 pallets" in the body. Route, date and
+    /// reference come from the subject; pallets from the body (flagged when missing).
+    /// Emails with a PDF go to the Euro Pool / Waitrose PDF readers instead.
+    /// </summary>
+    private static EmailIntakeParseResult? TryParseBarfootsTrayMovementEmail(MailboxEmailIntakeRequest request)
+    {
+        if (!(request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase)) return null;
+        var subject = Regex.Replace(Regex.Replace(request.Subject ?? string.Empty, @"^\s*(?:(?:RE|FW|FWD)\s*:\s*)+", string.Empty, RegexOptions.IgnoreCase), @"\s+", " ").Trim();
+        if (!BarfootsMovementKeywordRegex.IsMatch(subject)) return null;
+        if (subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase)) return null;
+        if ((request.Attachments ?? []).Any(item => item.IsInline != true &&
+                string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".pdf", StringComparison.OrdinalIgnoreCase))) return null;
+        var route = BarfootsMovementRouteRegex.Match(subject);
+        var dateMatch = BarfootsMovementDateRegex.Match(subject);
+        if (!route.Success || !dateMatch.Success) return null;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var day = int.Parse(dateMatch.Groups["d"].Value, CultureInfo.InvariantCulture);
+        var month = int.Parse(dateMatch.Groups["m"].Value, CultureInfo.InvariantCulture);
+        var year = dateMatch.Groups["y"].Success ? int.Parse(dateMatch.Groups["y"].Value, CultureInfo.InvariantCulture) : received.Year;
+        if (year < 100) year += 2000;
+        if (month is < 1 or > 12 || day < 1 || day > DateTime.DaysInMonth(year, month)) return null;
+        var date = new DateOnly(year, month, day);
+        if (!dateMatch.Groups["y"].Success && date < DateOnly.FromDateTime(received.UtcDateTime).AddMonths(-6)) date = date.AddYears(1);
+
+        static string Site(string value)
+        {
+            var clean = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value.Trim().ToLowerInvariant());
+            return Regex.IsMatch(clean, @"^(Sefter|Leythorne|Funtington|Bognor)(\s+Farm)?$", RegexOptions.IgnoreCase) ? $"Barfoots {clean}" : clean;
+        }
+        var from = Site(route.Groups["from"].Value);
+        var to = Site(route.Groups["to"].Value);
+        var body = MailboxBodyNormalizer.Normalize(request.BodyText, request.BodyHtml);
+        var palletsMatch = BarfootsMovementPalletsRegex.Match(body);
+        var pallets = palletsMatch.Success ? int.Parse(palletsMatch.Groups["qty"].Value, CultureInfo.InvariantCulture) : 0;
+        var reference = BarfootsMovementReferenceRegex.Match(subject) is { Success: true } refMatch ? refMatch.Groups["ref"].Value : null;
+
+        var warnings = new List<string>();
+        if (pallets <= 0) warnings.Add("The email doesn't say how many pallets; enter the quantity before approval.");
+        if (reference is null) warnings.Add("No Barfoots reference in the subject; a reference was generated from the email.");
+        var poNumber = BuildReference(reference ?? $"BF{date:ddMM}", to);
+        var payload = BuildPayload(request, poNumber, reference, "BARFOOTS", date, date, pallets, from, to, null, null, null, null, 0,
+            "Barfoots movement email (subject route)", warnings, "BARFOOTS");
+        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+        if (subject.Contains("tray", StringComparison.OrdinalIgnoreCase)) root["loadUnitType"] = "Trays";
+        root["intakeProfile"] = "BARFOOTS_SUBJECT_ROUTE";
+        if (pallets <= 0) { root["plannerReady"] = false; root["intakeConfidence"] = "Low"; }
+        return new EmailIntakeParseResult(
+            [new ParsedEmailOrder($"barfoots-move-{NormaliseKey(reference ?? from + to)}-{date:yyyyMMdd}",
+                NaturalKey(request, "BARFOOTS", from, to, date, pallets), JsonSerializer.SerializeToElement(root), warnings)],
+            warnings, null);
     }
 
     private static EmailIntakeParseResult? TryParseWaitroseBookingPdf(MailboxEmailIntakeRequest request)
