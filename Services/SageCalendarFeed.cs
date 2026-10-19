@@ -82,10 +82,20 @@ public sealed class SageCalendarFeed(IHttpClientFactory httpClientFactory, IData
         try
         {
             var client = httpClientFactory.CreateClient("SageCalendar");
-            using var response = await client.GetAsync(url, ct);
+            // Calendar apps identify themselves; some hosts turn away requests that don't.
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (compatible; SLH-TMS calendar sync; +https://tms.lyonshaulage.com)");
+            request.Headers.TryAddWithoutValidation("Accept", "text/calendar, text/plain, */*");
+            using var response = await client.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode)
-                return await StoreAsync(db, Failed($"Sage HR returned {(int)response.StatusCode}. If the link was reset in Sage, paste the new one."), ct);
+                return await StoreAsync(db, Failed($"Sage HR returned {(int)response.StatusCode} {response.ReasonPhrase}. If the link was reset in Sage, paste the new one."), ct);
             ics = await response.Content.ReadAsStringAsync(ct);
+            if (!ics.Contains("BEGIN:VCALENDAR", StringComparison.OrdinalIgnoreCase))
+            {
+                var kind = response.Content.Headers.ContentType?.MediaType ?? "unknown";
+                var hint = ics.Contains("<html", StringComparison.OrdinalIgnoreCase) ? "a web page (usually the Sage sign-in page), not a calendar" : $"something that isn't a calendar ({kind})";
+                return await StoreAsync(db, Failed($"Sage HR sent back {hint}. Copy the link again from Who's off > Sync with my calendar and paste it here."), ct);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
