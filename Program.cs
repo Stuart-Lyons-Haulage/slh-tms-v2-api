@@ -337,6 +337,10 @@ builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
+builder.Services.AddDataProtection();
+builder.Services.AddHttpClient("SageCalendar", client => { client.Timeout = TimeSpan.FromSeconds(30); });
+builder.Services.AddSingleton<SageCalendarFeed>();
+builder.Services.AddHostedService<SageCalendarSyncService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
