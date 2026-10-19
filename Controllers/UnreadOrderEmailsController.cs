@@ -73,8 +73,17 @@ public sealed class UnreadOrderEmailsController(
         }
 
         var intake = new OrderIntakeController(db, stagingService, intakeLogger) { ControllerContext = ControllerContext };
-        await intake.Intake(request, ct);
+        var outcome = await intake.Intake(request, ct);
         db.ChangeTracker.Clear();
+        // The intake now classes this email as not an order (a transport PO, a POD request,
+        // a figures email): nothing to plan, so the card closes instead of sitting there.
+        if (outcome is OkObjectResult { Value: { } value } && IsIgnored(value))
+        {
+            var reason = value.GetType().GetProperty("reason")?.GetValue(value) as string;
+            if (await db.StagedImports.AsNoTracking().AnyAsync(item => item.Id == id && item.Status == StagingStatus.PendingReview, ct))
+                await CloseAsync(id, $"Re-read: not an order email ({reason ?? "nothing to plan"}).", ct);
+            return Ok(new { orders = 0, cleared = true, notOrder = true, message = $"Not an order email{(reason is null ? "" : $" ({reason})")}; card closed." });
+        }
 
         var captured = request.MessageId is null ? 0 : await CapturedCountAsync(request.MessageId, ct);
         var stillOpen = await db.StagedImports.AsNoTracking().AnyAsync(item => item.Id == id && item.Status == StagingStatus.PendingReview, ct);
@@ -123,6 +132,9 @@ public sealed class UnreadOrderEmailsController(
             return placeholder || (fromEmail && undated);
         }).ToList();
     }
+
+    private static bool IsIgnored(object value) =>
+        value.GetType().GetProperty("ignored")?.GetValue(value) is true;
 
     private static bool IsDate(string? value) => value is { Length: >= 10 } && DateOnly.TryParseExact(value[..10], "yyyy-MM-dd", out _);
 
