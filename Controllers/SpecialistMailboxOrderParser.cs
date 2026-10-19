@@ -353,6 +353,14 @@ public sealed class SpecialistMailboxOrderParser
                             root["loadUnitType"] = sheetCustomer.Equals("JS", StringComparison.OrdinalIgnoreCase) ? "Crates" : "Trays";
                             root["palletType"] = root["loadUnitType"]!.GetValue<string>();
                             root["crateCustomer"] = sheetCustomer;
+                            // Only a row with NWF's Transport PO is a confirmed job. Without one it is a
+                            // booking: it holds space in Booking & Capacity until a later sheet adds the
+                            // PO, and lapses if the day passes without one.
+                            if (string.IsNullOrWhiteSpace(transportPo))
+                            {
+                                root["bookingOnly"] = true;
+                                root["plannerReady"] = false;
+                            }
                             root["southboundCollection"] = true;
                             root["routeLeg"] = "Southbound";
                             root["planningGroup"] = "Southbound collections";

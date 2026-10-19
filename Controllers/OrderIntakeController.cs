@@ -63,6 +63,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         await EnsureSourceEmailEvidence(request, ct);
 
         var parsed = await ParseEmail(request, ct);
+        var bookingOnly = parsed.Orders.Where(order => IsBookingOnly(order.Payload)).ToList();
+        if (bookingOnly.Count > 0)
+        {
+            var held = await HoldNwfBookingsAsync(request, bookingOnly, ct);
+            parsed = parsed with { Orders = parsed.Orders.Except(bookingOnly).ToList() };
+            if (parsed.Orders.Count == 0 && parsed.IgnoredReason is null)
+                return Ok(new { ignored = true, reason = $"{held.Bookings} NWF booking(s) without a Transport PO held in Booking & Capacity", staged = 0, existing = 0, superseded = held.Closed, linked = 0, warnings = parsed.Warnings, outlookCategory = (string?)null });
+        }
         if (parsed.IgnoredReason is not null)
         {
             var linked = 0;
@@ -598,6 +606,55 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return await db.CustomerEmailRoutes.AsNoTracking().AnyAsync(route => route.Active &&
             ((route.SenderEmail != null && route.SenderEmail.ToLower() == sender) ||
              (route.SenderDomain != null && route.SenderDomain.ToLower().TrimStart('@') == domain)), ct);
+    }
+
+    private static bool IsBookingOnly(JsonElement payload) =>
+        payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("bookingOnly", out var value) && value.ValueKind == JsonValueKind.True;
+
+    /// <summary>
+    /// NWF sheet rows with no Transport PO: kept as bookings (capacity held, status PreOrder)
+    /// rather than order cards. Any order card made earlier for the same row is closed.
+    /// </summary>
+    private async Task<(int Bookings, int Closed)> HoldNwfBookingsAsync(MailboxEmailIntakeRequest request, List<ParsedEmailOrder> rows, CancellationToken ct)
+    {
+        var evidenceKey = SourceEvidenceKeyBuilder.For(request.MessageId, request.InternetMessageId);
+        var evidence = await db.StagedImports.FirstOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
+        var bookings = 0;
+        if (evidence is not null)
+            foreach (var row in rows)
+            {
+                var node = JsonNode.Parse(row.Payload.GetRawText())?.AsObject();
+                if (node is null) continue;
+                node["bookingCustomer"] = node["customerCode"]?.ToString();
+                node["customerCode"] = "NWF";
+                if (await NwfBookingReservationSync.UpsertAsync(db, evidence, JsonSerializer.SerializeToElement(node), User.Identity?.Name, ct) is not null) bookings++;
+            }
+
+        static string Key(JsonElement payload, string name) =>
+            payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? (value.GetString() ?? string.Empty).Trim().ToUpperInvariant() : string.Empty;
+        var held = rows.Select(row => (Key(row.Payload, "cratePo"), Key(row.Payload, "collectionDate"), Key(row.Payload, "stallNumber"))).ToHashSet();
+        var cards = await db.StagedImports
+            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview && item.PayloadJson.Contains("NWF_CONFIRMED_ALDI_COLLECTION_WORKBOOK"))
+            .ToListAsync(ct);
+        var closed = 0;
+        foreach (var card in cards)
+        {
+            JsonElement payload;
+            try { using var document = JsonDocument.Parse(card.PayloadJson); payload = document.RootElement.Clone(); }
+            catch (JsonException) { continue; }
+            if (Key(payload, "transportPo").Length > 0) continue;
+            if (!held.Contains((Key(payload, "cratePo"), Key(payload, "collectionDate"), Key(payload, "stallNumber")))) continue;
+            var previous = card.Status;
+            card.Status = StagingStatus.Archived;
+            card.IdempotencyKey = $"archived-booking:{card.Id:N}";
+            card.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            card.ReviewedBy = "NWF booking rule";
+            card.ReviewNote = "No NWF Transport PO yet: held as a booking in Booking & Capacity, not an order.";
+            db.StagedImportEvents.Add(StagingAudit.Create(card, "HeldAsBooking", previous, card.ReviewNote, card.ReviewedBy));
+            closed++;
+        }
+        await db.SaveChangesAsync(ct);
+        return (bookings, closed);
     }
 
     private static bool LooksLikeNonOrderMessage(MailboxEmailIntakeRequest request) =>
