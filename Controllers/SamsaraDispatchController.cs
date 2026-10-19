@@ -1073,6 +1073,28 @@ public sealed class SamsaraDispatchController(
                     stopNotes));
             }
 
+            // Samsara rejects stops that share a scheduled arrival time when stop
+            // external IDs are attached. Nudge any colliding arrival forward so the
+            // sequence is strictly increasing, never moving a stop earlier than planned.
+            if (!options.RecomputeScheduledTimes)
+            {
+                DateTimeOffset? previousArrival = null;
+                for (var i = 0; i < samsaraStops.Count; i++)
+                {
+                    var arrival = samsaraStops[i].ScheduledArrivalTime;
+                    if (arrival is null) continue;
+                    if (previousArrival is DateTimeOffset prev && arrival <= prev)
+                    {
+                        var bumped = prev.AddMinutes(1);
+                        var departure = samsaraStops[i].ScheduledDepartureTime;
+                        if (departure is DateTimeOffset dep && dep < bumped) departure = bumped;
+                        samsaraStops[i] = samsaraStops[i] with { ScheduledArrivalTime = bumped, ScheduledDepartureTime = departure };
+                        arrival = bumped;
+                    }
+                    previousArrival = arrival;
+                }
+            }
+
             if (missingLocations.Count > 0)
                 return BadRequest(new
                 {
@@ -1148,7 +1170,7 @@ public sealed class SamsaraDispatchController(
             var request = new SamsaraRouteRequest(
                 load.Id,
                 SamsaraRouteName(load),
-                notes,
+                SamsaraNoteRules.LimitJobNotes(notes),
                 samsaraDriverId,
                 string.IsNullOrWhiteSpace(samsaraDriverId) ? samsaraVehicleId : null,
                 samsaraStops);
