@@ -37,6 +37,18 @@ public sealed class VerifiedWorkbookIntakeParserTests
             order.Payload.GetProperty("temperatureRequirement").GetString() == "+3℃");
     }
 
+    [Theory]
+    [InlineData("Aldi Confirmed Booking for delivery Thursday 24.09.2026")]
+    [InlineData("Aldi Pumpkins Confirmed Booking for delivery Thursday 24.09.2026")]
+    [InlineData("RE: ALDI confirmed booking 24.09.2026")]
+    public void BarfootsAldiWorkbook_IsRecognised_WhenWordsSitBetweenAldiAndConfirmedBooking(string subject)
+    {
+        var request = BarfootsRequest("barfoots-aldi-subject", BuildBarfootsWorkbook(13)) with { Subject = subject };
+        var result = new IntakeParser().TryParse(request);
+        Assert.NotNull(result);
+        Assert.Equal(2, result!.Orders.Count);
+    }
+
     [Fact]
     public void BarfootsAldiWorkbook_MissingTemperatureInAttachment_IsFlaggedForReview()
     {

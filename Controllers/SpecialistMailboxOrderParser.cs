@@ -1555,8 +1555,10 @@ public sealed class SpecialistMailboxOrderParser
     {
         var sender = request.SenderAddress ?? string.Empty;
         var subject = request.Subject ?? string.Empty;
+        // "Aldi Confirmed Booking", but also "Aldi Pumpkins Confirmed Booking" etc: Aldi + confirmed booking.
         if (!sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("Aldi Confirmed Booking", StringComparison.OrdinalIgnoreCase))
+            !subject.Contains("Aldi", StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(subject, @"confirm(?:ed)?\s+booking", RegexOptions.IgnoreCase))
             return null;
 
         var planningDate = ExtractPlanningDate(request);
