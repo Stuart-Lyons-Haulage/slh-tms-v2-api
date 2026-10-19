@@ -1608,14 +1608,24 @@ public sealed class SpecialistMailboxOrderParser
                         var destination = CellText(row, depotIndex);
                         var collection = BarfootsCollectionSite(CellText(row, collectionIndex));
                         var pallets = CellInt(row, palletsIndex);
-                        var date = CellDate(row, 0) ?? planningDate;
+                        // The row's own date if it has one, otherwise the sheet's planning date.
+                        var date = FirstDate(row) ?? CellDate(row, 0) ?? planningDate;
+                        // The whole sheet is an Aldi confirmed booking, so every depot row is an Aldi
+                        // RDC (Cardiff, Sawley, Bolton...) even when the cell doesn't repeat "Aldi".
+                        // Skip only obvious non-data rows (headers/totals) and blanks.
                         if (date is null || pallets is null or <= 0 ||
                             string.IsNullOrWhiteSpace(collection) ||
                             string.IsNullOrWhiteSpace(destination) ||
-                            !destination.StartsWith("ALDI", StringComparison.OrdinalIgnoreCase))
+                            Regex.IsMatch(destination, @"^(?:depot|destination|total|grand\s*total|aldi\s*$)", RegexOptions.IgnoreCase))
                             continue;
+                        // One tidy destination per RDC: "ALDI CARDIFF" and "Cardiff" both become "Aldi Cardiff".
+                        var depot = Regex.Replace(destination.Trim(), @"^\s*aldi\s+", string.Empty, RegexOptions.IgnoreCase).Trim();
+                        destination = $"Aldi {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(depot.ToLowerInvariant())}";
 
-                        if (Math.Abs(date.Value.DayNumber - planningDate.Value.DayNumber) > 1)
+                        // A confirmed booking sheet can cover a week; stage every dated row in a
+                        // sensible forward window rather than only the one day named in the subject.
+                        var received = DateOnly.FromDateTime((request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).UtcDateTime);
+                        if (date.Value < received.AddDays(-1) || date.Value > received.AddDays(14))
                             continue;
 
                         var temperature = CellText(row, temperatureIndex);
