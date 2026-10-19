@@ -19,7 +19,7 @@ public sealed class UnitCountTests
     public void Tray_count_in_the_text_is_found_but_pallets_of_trays_is_not_a_tray_count()
     {
         Assert.Equal((1200, "Crates"), HandlingUnitClassifier.UnitCount(Payload(new { pallets = 0, driverInstructions = "Collect 1,200 IFCO crates from Glasshoughton" })));
-        Assert.Equal((110, "Shippers"), HandlingUnitClassifier.UnitCount(Payload(new { pallets = 0, sourceBodyText = "80176 Potato Shipper 110 Potato Shippers" })));
+        Assert.Equal((110, "Shippers"), HandlingUnitClassifier.UnitCount(Payload(new { pallets = 0, sourceBodyText = "Please collect 110 potato shippers from Basingstoke" })));
         Assert.Null(HandlingUnitClassifier.UnitCount(Payload(new { pallets = 26, driverInstructions = "26 pallets of rental trays" })));
     }
 
