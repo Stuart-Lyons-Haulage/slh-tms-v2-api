@@ -103,6 +103,9 @@ public sealed class SamsaraClientTests
         Assert.Equal(2, stops[1].GetProperty("sequenceNumber").GetInt32());
         Assert.True(stops[1].TryGetProperty("scheduledArrivalTime", out _));
         Assert.True(stops[1].TryGetProperty("scheduledDepartureTime", out _));
+        Assert.False(stops[0].GetProperty("singleUseLocation").TryGetProperty("latitude", out _));
+        Assert.False(stops[0].GetProperty("singleUseLocation").TryGetProperty("longitude", out _));
+        Assert.Equal("Depot", stops[0].GetProperty("singleUseLocation").GetProperty("address").GetString());
     }
 
     [Fact]
@@ -146,8 +149,8 @@ public sealed class SamsaraClientTests
         var root = document.RootElement;
         Assert.Equal("SITE123", root.GetProperty("externalIds").GetProperty("slhTmsSite").GetString());
         Assert.Equal(300, root.GetProperty("geofence").GetProperty("circle").GetProperty("radiusMeters").GetInt32());
-        Assert.Equal(50.84, root.GetProperty("latitude").GetDouble(), 2);
-        Assert.Equal(-0.67, root.GetProperty("longitude").GetDouble(), 2);
+        Assert.False(root.TryGetProperty("latitude", out _));
+        Assert.False(root.TryGetProperty("longitude", out _));
     }
 
     [Fact]
