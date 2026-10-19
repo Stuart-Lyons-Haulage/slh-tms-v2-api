@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
@@ -19,50 +20,85 @@ public sealed class WarehouseMovementService(TmsDbContext db)
             .ToListAsync(ct);
         var warehouseNames = WarehouseNames(canonical, aliasMappings);
 
-        var loads = await db.Loads.AsNoTracking().Include(x => x.Stops).Where(x => x.PlanningDate == date && x.Status != LoadStatus.Cancelled).ToListAsync(ct);
-        var loadIds = loads.Select(x => x.Id).ToList();
-        var allocations = await ReadLatestAllocations(loadIds, date, ct);
-        var lineIds = allocations.Where(x => x.SourceLineId is not null).Select(x => x.SourceLineId!.Value).Distinct().ToList();
-        var lines = await db.OrderSourceLines.AsNoTracking().Where(x => lineIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
-        var revisionIds = lines.Values.Select(x => x.RevisionId).Distinct().ToList();
-        var revisions = await db.OrderRevisions.AsNoTracking().Where(x => revisionIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
-        var movementIds = revisions.Values.Select(x => x.MovementId).Distinct().ToList();
-        var linkedOrders = await db.TransportOrders.AsNoTracking().Where(x => x.SourceMovementId != null).ToListAsync(ct);
-        var orders = linkedOrders.Where(x => movementIds.Contains(x.SourceMovementId!.Value)).ToList();
-        var orderByMovement = orders.GroupBy(x => x.SourceMovementId!.Value).ToDictionary(x => x.Key, x => x.First());
+        // Same sources as Pallet Order and Planner: SQL orders/runs merged with the planning
+        // register. Yesterday is included so overnight work arriving today shows as inbound.
+        var orders = await ReadOrdersAsync(date.AddDays(-1), date, ct);
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, date, ct))
+            .Concat(await PlanningResilience.ReadLoadsAsync(db, date.AddDays(-1), ct))
+            .Where(x => x.Status != LoadStatus.Cancelled)
+            .GroupBy(x => x.Id).Select(x => x.First()).ToList();
+        var loadById = loads.ToDictionary(x => x.Id);
+        var allocations = await ReadLatestAllocations(loads.Select(x => x.Id).ToList(), [date, date.AddDays(-1)], ct);
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var trailerIds = loads.Where(x => x.TrailerId is not null).Select(x => x.TrailerId!.Value).Distinct().ToList();
+        var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
         var trailers = await db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
-        var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
         var drivers = await db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
 
         var inbound = new List<WarehouseMovementRow>();
         var outbound = new List<WarehouseMovementRow>();
-        foreach (var allocation in allocations.Where(x => x.Pallets > 0 && x.SourceLineId is not null))
+
+        // Orders on runs. Source lines (when the order came through the new intake) give the
+        // exact sites, pallet type and load reference; otherwise the order itself is used.
+        var orderById = orders.GroupBy(x => x.Id).ToDictionary(x => x.Key, x => x.First());
+        var missingIds = allocations.Select(x => x.OrderId).Where(id => !orderById.ContainsKey(id)).Distinct().ToList();
+        if (missingIds.Count > 0)
+            foreach (var order in await db.TransportOrders.AsNoTracking().Where(x => missingIds.Contains(x.Id)).ToListAsync(ct))
+                orderById[order.Id] = order;
+        var lineIds = allocations.Where(x => x.SourceLineId is not null).Select(x => x.SourceLineId!.Value).Distinct().ToList();
+        var lines = lineIds.Count == 0 ? [] : await db.OrderSourceLines.AsNoTracking().Where(x => lineIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var onRun = new HashSet<Guid>();
+        foreach (var allocation in allocations.Where(x => x.Pallets > 0))
         {
-            if (!lines.TryGetValue(allocation.SourceLineId!.Value, out var line) || !revisions.TryGetValue(line.RevisionId, out var revision)) continue;
-            orderByMovement.TryGetValue(revision.MovementId, out var order);
-            var load = loads.Single(x => x.Id == allocation.LoadId);
-            var warehouseStop = load.Stops.OrderBy(x => x.Sequence).FirstOrDefault(x => MatchesWarehouse(x.Name, warehouseNames));
-            if (warehouseStop is null) continue;
-            var direction = MatchesWarehouse(line.DeliverySite, warehouseNames) ? "Inbound"
-                : MatchesWarehouse(line.CollectionSite, warehouseNames) ? "Outbound" : null;
+            if (!loadById.TryGetValue(allocation.LoadId, out var load)) continue;
+            orderById.TryGetValue(allocation.OrderId, out var order);
+            OrderSourceLine? line = allocation.SourceLineId is Guid lineId && lines.TryGetValue(lineId, out var found) ? found : null;
+            if (order is null && line is null) continue;
+            if (order?.Status == OrderStatus.Cancelled) continue;
+            var from = line?.CollectionSite ?? order?.SellerName;
+            var to = line?.DeliverySite ?? order?.StallNumber;
+            var direction = MatchesWarehouse(to, warehouseNames) ? "Inbound" : MatchesWarehouse(from, warehouseNames) ? "Outbound" : null;
             if (direction is null) continue;
-            var row = new WarehouseMovementRow(direction, load.Id, load.Reference, Period(line.CollectionTimeFrom),
+            var due = direction == "Inbound"
+                ? line?.DeliveryDate ?? order?.DeliveryDate ?? order?.CollectionDate
+                : line?.CollectionDate ?? order?.CollectionDate;
+            // Yesterday's runs only count when they arrive here today.
+            if (load.PlanningDate != date && (direction != "Inbound" || due != date)) continue;
+            onRun.Add(allocation.OrderId);
+            var stop = load.Stops.OrderBy(x => x.Sequence).FirstOrDefault(x => MatchesWarehouse(x.Name, warehouseNames));
+            var time = line?.CollectionTimeFrom;
+            (direction == "Inbound" ? inbound : outbound).Add(new WarehouseMovementRow(direction, load.Id, load.Reference, Period(time),
                 load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) ? driver.DisplayName : null,
                 load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) ? vehicle.Registration : null,
                 load.TrailerId is Guid trailerId && trailers.TryGetValue(trailerId, out var trailer) ? trailer.TrailerNumber : null,
-                order?.CustomerCode ?? "Unknown", line.CollectionSite, line.DeliverySite, order?.Reference,
-                line.LoadReference, line.PalletType, allocation.Pallets, line.TemperatureRequirement,
-                direction == "Inbound" ? line.DeliveryDate : line.CollectionDate,
-                direction == "Inbound" ? null : line.CollectionTimeFrom, warehouseStop.PlannedArrivalUtc, load.Status.ToString(), null)
+                order?.CustomerCode ?? "Unknown", from, to, order?.Reference,
+                line?.LoadReference, line?.PalletType, allocation.Pallets, line?.TemperatureRequirement,
+                due, direction == "Inbound" ? null : time, stop?.PlannedArrivalUtc, load.Status.ToString(), null)
             {
-                MovementKey = $"load:{load.Id:N}:line:{line.Id:N}:{direction.ToLowerInvariant()}",
+                MovementKey = line is not null
+                    ? $"load:{load.Id:N}:line:{line.Id:N}:{direction.ToLowerInvariant()}"
+                    : $"load:{load.Id:N}:order:{allocation.OrderId:N}:{direction.ToLowerInvariant()}",
                 Source = "Planned run"
-            };
-            (direction == "Inbound" ? inbound : outbound).Add(row);
+            });
         }
+
+        // Approved work coming to or leaving SLH that isn't on a run yet, so the warehouse sees it coming.
+        foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled && !onRun.Contains(x.Id) && !allocations.Any(a => a.OrderId == x.Id && a.Pallets > 0 && a.Date == date)))
+        {
+            string? direction = null;
+            if (MatchesWarehouse(order.StallNumber, warehouseNames) && (order.DeliveryDate ?? order.CollectionDate) == date) direction = "Inbound";
+            else if (MatchesWarehouse(order.SellerName, warehouseNames) && order.CollectionDate == date) direction = "Outbound";
+            if (direction is null) continue;
+            (direction == "Inbound" ? inbound : outbound).Add(new WarehouseMovementRow(direction, Guid.Empty, "Not on a run yet", "Unallocated", null, null, null,
+                order.CustomerCode, order.SellerName, order.StallNumber, order.Reference, null, null, order.Pallets ?? 0, null,
+                direction == "Inbound" ? order.DeliveryDate ?? order.CollectionDate : order.CollectionDate, null, null, "Awaiting plan", null)
+            {
+                MovementKey = $"order:{order.Id:N}:{(direction == "Inbound" ? "in" : "out")}",
+                Source = "Approved order"
+            });
+        }
+
         // Live ETAs from tracking (Samsara) for our own trucks heading into SLH.
         var warehouseStopIds = loads.SelectMany(load => load.Stops).Where(stop => MatchesWarehouse(stop.Name, warehouseNames)).Select(stop => stop.Id).ToList();
         Dictionary<Guid, EtaSnapshot> etas = warehouseStopIds.Count == 0 ? [] : (await db.EtaSnapshots.AsNoTracking()
@@ -72,18 +108,6 @@ public sealed class WarehouseMovementService(TmsDbContext db)
             .ToDictionary(x => x.Key, x => x.OrderByDescending(item => item.CapturedAtUtc).First());
         inbound = inbound.Select(row => WithEta(row, loads, warehouseNames, etas)).ToList();
         outbound = outbound.Select(row => WithEta(row, loads, warehouseNames, etas)).ToList();
-
-        // Approved work leaving SLH that is not on a run yet, so the warehouse can see it coming.
-        var allocatedOrderIds = allocations.Select(x => x.OrderId).ToHashSet();
-        var unplannedOutbound = (await db.TransportOrders.AsNoTracking()
-                .Where(x => x.CollectionDate == date && x.Status != OrderStatus.Cancelled)
-                .ToListAsync(ct))
-            .Where(order => !allocatedOrderIds.Contains(order.Id) && MatchesWarehouse(order.SellerName, warehouseNames))
-            .Select(order => new WarehouseMovementRow("Outbound", Guid.Empty, "Not on a run yet", "Unallocated", null, null, null,
-                order.CustomerCode, order.SellerName, order.StallNumber, order.Reference, null, null, order.Pallets ?? 0, null,
-                order.CollectionDate, null, null, "Awaiting plan", null) { MovementKey = $"order:{order.Id:N}:out", Source = "Approved order" })
-            .ToList();
-        outbound.AddRange(unplannedOutbound);
 
         // Customers bringing goods to SLH themselves (e.g. Emery "delivered to your site today
         // pm"): warehouse-only inbound, not a job for the planners.
@@ -212,22 +236,40 @@ public sealed class WarehouseMovementService(TmsDbContext db)
             ? value.ValueKind switch { JsonValueKind.String => value.GetString(), JsonValueKind.Number => value.GetRawText(), _ => null }
             : null;
 
-    private async Task<List<WarehouseAllocation>> ReadLatestAllocations(List<Guid> loadIds, DateOnly date, CancellationToken ct)
+    private async Task<List<WarehouseAllocation>> ReadLatestAllocations(List<Guid> loadIds, DateOnly[] dates, CancellationToken ct)
     {
-        var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == "planningpalletallocation" && x.Status == StagingStatus.Promoted).OrderByDescending(x => x.ReceivedAtUtc).Take(20000).ToListAsync(ct);
-        var latest = new Dictionary<(Guid, Guid?), WarehouseAllocation>();
-        foreach (var row in rows)
+        if (loadIds.Count == 0) return [];
+        var texts = dates.Select(d => d.ToString("yyyy-MM-dd")).ToArray();
+        var query = db.StagedImports.AsNoTracking().Where(x => x.EntityType == "planningpalletallocation" && x.Status == StagingStatus.Promoted);
+        // Only rows for these days (each allocation records its date).
+        query = texts.Length == 2
+            ? query.Where(x => x.PayloadJson.Contains(texts[0]) || x.PayloadJson.Contains(texts[1]))
+            : query.Where(x => x.PayloadJson.Contains(texts[0]));
+        var rows = await query.OrderByDescending(x => x.ReceivedAtUtc).Take(5000).Select(x => x.PayloadJson).ToListAsync(ct);
+        var wanted = loadIds.ToHashSet();
+        var latest = new Dictionary<(Guid, Guid, Guid?), WarehouseAllocation>();
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+        foreach (var json in rows)
         {
             try
             {
-                var allocation = JsonSerializer.Deserialize<WarehouseAllocation>(row.PayloadJson, new JsonSerializerOptions(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true });
-                if (allocation is null || allocation.Date != date || !loadIds.Contains(allocation.LoadId)) continue;
-                var key = (allocation.LoadId, allocation.SourceLineId);
-                if (!latest.ContainsKey(key)) latest[key] = allocation;
+                var allocation = JsonSerializer.Deserialize<WarehouseAllocation>(json, options);
+                if (allocation is null || !dates.Contains(allocation.Date) || !wanted.Contains(allocation.LoadId)) continue;
+                latest.TryAdd((allocation.LoadId, allocation.OrderId, allocation.SourceLineId), allocation);
             }
             catch (JsonException) { }
         }
         return latest.Values.ToList();
+    }
+
+    private async Task<List<TransportOrder>> ReadOrdersAsync(DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var result = new Dictionary<string, TransportOrder>(StringComparer.OrdinalIgnoreCase);
+        foreach (var order in await db.TransportOrders.AsNoTracking().Where(x => x.CollectionDate >= from && x.CollectionDate <= to).Take(4000).ToListAsync(ct))
+            result[order.Reference] = order;
+        foreach (var order in await PlanningRegisterStore.ReadOrdersAsync(db, from, to, ct))
+            result.TryAdd(order.Reference, order);
+        return result.Values.ToList();
     }
 
     private static string Period(TimeOnly? time) => time is null ? "Unallocated" : time.Value.Hour < 17 ? "AM" : "PM";
