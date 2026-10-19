@@ -7,7 +7,7 @@ public sealed class SageCalendarFeedTests
 {
     private const string Ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" +
         "BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261019\r\nDTEND;VALUE=DATE:20261024\r\nSUMMARY:Jennifer Banks - Holiday\r\nEND:VEVENT\r\n" +
-        "BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261020\r\nDTEND;VALUE=DATE:20261021\r\nSUMMARY:Ben Joshua Madge - Sick\r\n leave\r\nEND:VEVENT\r\n" +
+        "BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261020\r\nDTEND;VALUE=DATE:20261021\r\nSUMMARY:Ben Joshua Madge - Sick\r\n  leave\r\nEND:VEVENT\r\n" +
         "BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261022\r\nDTEND;VALUE=DATE:20261023\r\nSUMMARY:Barry King - Non-working day\r\nEND:VEVENT\r\n" +
         "BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261019\r\nDTEND;VALUE=DATE:20261020\r\nSUMMARY:Someone Else - Holiday\r\nEND:VEVENT\r\n" +
         "END:VCALENDAR\r\n";
