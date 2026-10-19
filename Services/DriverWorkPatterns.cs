@@ -38,7 +38,7 @@ public static class DriverWorkPatterns
 
         if (text.Any(char.IsLetter))
         {
-            var days = text.Split([',', ' ', '/'], StringSplitOptions.RemoveEmptyEntries)
+            var days = text.Split(new[] { ',', ' ', '/' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(token => Array.FindIndex(DayNames, name => token.StartsWith(name, StringComparison.OrdinalIgnoreCase)))
                 .ToList();
             if (days.Count == 0 || days.Any(index => index < 0)) return null;
@@ -51,7 +51,7 @@ public static class DriverWorkPatterns
         var cycle = new List<bool>();
         foreach (var part in text.Split(',', StringSplitOptions.RemoveEmptyEntries))
         {
-            var pieces = part.Split(['-', '/', ':'], StringSplitOptions.TrimEntries);
+            var pieces = part.Split(new[] { '-', '/', ':' }, StringSplitOptions.TrimEntries);
             if (pieces.Length != 2 || !int.TryParse(pieces[0], out var on) || !int.TryParse(pieces[1], out var off)) return null;
             if (on is < 1 or > 14 || off is < 0 or > 14) return null;
             cycle.AddRange(Enumerable.Repeat(true, on));
@@ -85,7 +85,7 @@ public static class DriverWorkPatterns
         if (weekdays) return string.Join(", ", DayNames.Where((_, index) => cycle[index]));
         return string.Join(", then ", blocks.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(part =>
         {
-            var pieces = part.Split(['-', '/', ':'], StringSplitOptions.TrimEntries);
+            var pieces = part.Split(new[] { '-', '/', ':' }, StringSplitOptions.TrimEntries);
             return $"{pieces[0]} on {pieces[1]} off";
         }));
     }
