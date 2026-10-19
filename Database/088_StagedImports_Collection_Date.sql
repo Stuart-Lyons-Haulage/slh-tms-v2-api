@@ -6,21 +6,29 @@
    included) of every order record in the window on every refresh, and it had grown
    into the ~40-second pallet load that makes the whole site feel slow.
 
-   Add a PERSISTED computed CollectionDate parsed from the payload and index it, so the
-   read becomes an exact (EntityType, CollectionDate) index seek instead of a JSON scan.
-
-   Additive, idempotent and non-destructive:
-   - JSON_VALUE is deterministic and returns NULL for a payload with no collectionDate.
-   - TRY_CONVERT(date, ..., 23) returns NULL for anything that is not an ISO yyyy-MM-dd
-     date, so no existing row can fail the computation.
-   Both are deterministic and precise, which is what SQL Server requires to PERSIST and
-   index a computed column. The expression matches the EF mapping in TmsDbContext. */
+   Add a plain, indexed CollectionDate column so the read is an exact index seek.
+   - The column is populated on write when an order is promoted (StagingService).
+   - This migration backfills recent existing rows from the payload (bounded window).
+   Additive, idempotent and non-destructive. JSON_VALUE returns NULL for a payload with
+   no collectionDate, and TRY_CONVERT(..., 23) yields NULL for anything that is not an
+   ISO yyyy-MM-dd date, so no existing row can fail the backfill. */
 
 IF OBJECT_ID(N'dbo.StagedImports', N'U') IS NOT NULL
    AND COL_LENGTH(N'dbo.StagedImports', N'CollectionDate') IS NULL
 BEGIN
-    ALTER TABLE dbo.StagedImports ADD CollectionDate AS
-        TRY_CONVERT(date, LEFT(JSON_VALUE(PayloadJson, '$.collectionDate'), 10), 23) PERSISTED;
+    ALTER TABLE dbo.StagedImports ADD CollectionDate date NULL;
+END;
+GO
+
+IF OBJECT_ID(N'dbo.StagedImports', N'U') IS NOT NULL
+   AND COL_LENGTH(N'dbo.StagedImports', N'CollectionDate') IS NOT NULL
+BEGIN
+    UPDATE dbo.StagedImports
+       SET CollectionDate = TRY_CONVERT(date, LEFT(JSON_VALUE(PayloadJson, '$.collectionDate'), 10), 23)
+     WHERE CollectionDate IS NULL
+       AND (EntityType = N'order' OR EntityType = N'register:order')
+       AND ReceivedAtUtc >= DATEADD(day, -120, SYSDATETIMEOFFSET())
+       AND JSON_VALUE(PayloadJson, '$.collectionDate') IS NOT NULL;
 END;
 GO
 

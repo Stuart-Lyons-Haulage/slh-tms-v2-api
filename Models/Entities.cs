@@ -196,10 +196,10 @@ public sealed class StagedImport
     [MaxLength(200)] public string? ReviewedBy { get; set; }
     [MaxLength(1000)] public string? ReviewNote { get; set; }
     public byte[] RowVersion { get; set; } = [];
-    // PERSISTED computed column (see migration 088): the order's collection date parsed
-    // from PayloadJson, indexed so date-scoped reads are an index seek, not a JSON scan.
-    // Read-only; the database maintains it. Null on the in-memory test provider.
-    public DateOnly? CollectionDate { get; private set; }
+    // Indexed order collection date (migration 088) so date-scoped pallet reads are an
+    // index seek, not a PayloadJson LIKE scan. Set on write when an order is promoted
+    // (StagingService.PromoteOrder) and backfilled for recent rows by the migration.
+    public DateOnly? CollectionDate { get; set; }
 }
 public sealed class StagedImportEvent
 {
