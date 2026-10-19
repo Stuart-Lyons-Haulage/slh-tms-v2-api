@@ -319,6 +319,13 @@ builder.Services.AddHttpClient<FleetioClient>()
 builder.Services.AddHttpClient<SamsaraClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()
     .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Samsara"));
+// Keyless UK postcode geocoder: fills Site/Depot latitude & longitude so Samsara
+// route stops carry coordinates and the optimiser can judge proximity. Not Azure.
+builder.Services.AddHttpClient<PostcodesIoClient>(client =>
+    client.BaseAddress = new Uri("https://api.postcodes.io/"))
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddHttpMessageHandler<ProviderResilienceHandler>();
+builder.Services.AddScoped<SiteGeocodingService>();
 
 // Provider polling and derived-data maintenance must never take the operational
 // API down. Each worker already records and retries its own failures; this is a
