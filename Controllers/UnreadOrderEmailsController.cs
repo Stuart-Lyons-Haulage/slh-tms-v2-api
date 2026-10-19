@@ -94,20 +94,44 @@ public sealed class UnreadOrderEmailsController(
         return Ok(new { closed = true, captured });
     }
 
-    private async Task<List<StagedImport>> PlaceholdersAsync(CancellationToken ct) =>
-        (await db.StagedImports.AsNoTracking()
-            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview &&
-                           ((item.Source != null && item.Source.StartsWith("Info mailbox mapping exception")) ||
-                            item.IdempotencyKey.EndsWith(":mapping-exception")))
-            .ToListAsync(ct));
+    /// <summary>
+    /// Every order waiting for review that has no usable date and came from an email: the
+    /// "couldn't read" placeholders and orders a reader produced without dates. Both can be
+    /// re-read from the stored email.
+    /// </summary>
+    private async Task<List<StagedImport>> PlaceholdersAsync(CancellationToken ct)
+    {
+        var pending = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
+            .ToListAsync(ct);
+        return pending.Where(item =>
+        {
+            var payload = Read(item.PayloadJson);
+            var fromEmail = Text(payload, "sourceMessageId", "sourceEmailMessageId") is not null;
+            var placeholder = (item.Source?.StartsWith("Info mailbox mapping exception", StringComparison.Ordinal) ?? false) ||
+                              item.IdempotencyKey.EndsWith(":mapping-exception", StringComparison.Ordinal);
+            var undated = !IsDate(Text(payload, "collectionDate")) && !IsDate(Text(payload, "deliveryDate"));
+            return placeholder || (fromEmail && undated);
+        }).ToList();
+    }
 
+    private static bool IsDate(string? value) => value is { Length: >= 10 } && DateOnly.TryParseExact(value[..10], "yyyy-MM-dd", out _);
+
+    /// <summary>Orders from this email that are in the TMS with a usable date (so plannable).</summary>
     private async Task<int> CapturedCountAsync(string messageId, CancellationToken ct)
     {
         var prefix = OrderIntakeController.BuildOrderIdempotencyKey(messageId, string.Empty);
         if (prefix.Length >= 200) return 0;
-        return await db.StagedImports.AsNoTracking()
-            .CountAsync(item => item.EntityType == "order" && Captured.Contains(item.Status) &&
-                                item.IdempotencyKey.StartsWith(prefix) && !item.IdempotencyKey.EndsWith(":mapping-exception"), ct);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "order" && Captured.Contains(item.Status) &&
+                           item.IdempotencyKey.StartsWith(prefix) && !item.IdempotencyKey.EndsWith(":mapping-exception"))
+            .Select(item => item.PayloadJson)
+            .ToListAsync(ct);
+        return rows.Count(json =>
+        {
+            var payload = Read(json);
+            return IsDate(Text(payload, "collectionDate")) || IsDate(Text(payload, "deliveryDate"));
+        });
     }
 
     private async Task<StagedImport?> EvidenceAsync(JsonElement payload, CancellationToken ct)
