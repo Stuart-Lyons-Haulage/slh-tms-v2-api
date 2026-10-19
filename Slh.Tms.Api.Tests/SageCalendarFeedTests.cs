@@ -31,6 +31,34 @@ public sealed class SageCalendarFeedTests
     }
 
     [Fact]
+    public void Real_sage_titles_birthdays_holidays_half_days_pending_and_archived()
+    {
+        var ezard = Guid.NewGuid(); var morgan = Guid.NewGuid(); var gavin = Guid.NewGuid(); var gone = Guid.NewGuid();
+        var ics = "BEGIN:VCALENDAR\r\n" +
+            Event("20261019", "20261020", "Robert Ezard - Rest Day, Full day") +
+            Event("20261019", "20261020", "John Henry Morgan - Annual Leave WP, First part of the day,") +
+            Event("20261021", "20261022", "Robert Ezard - Birthday") +
+            Event("20261225", "20261226", "Christmas Day") +
+            Event("20261022", "20261023", "PENDING APPROVAL - Gavin Tullet - Annual Leave ES, Full day") +
+            Event("20261020", "20261021", "Old Driver - Rest Day, Full day") +
+            "END:VCALENDAR\r\n";
+        var snapshot = SageCalendarFeed.Build(SageCalendarFeed.ParseEvents(ics),
+            [(ezard, "Robert Ezard"), (morgan, "John Morgan"), (gavin, "Gavin Tullett")],
+            new DateTimeOffset(2026, 10, 19, 8, 0, 0, TimeSpan.Zero), [(gone, "Old Driver")]);
+
+        Assert.Equal("Rest Day", Assert.Single(snapshot.Days, day => day.DriverId == ezard).Type);
+        Assert.Equal("NonWorking", Assert.Single(snapshot.Days, day => day.DriverId == ezard).Kind);
+        Assert.Equal("Annual Leave WP (morning)", Assert.Single(snapshot.Days, day => day.DriverId == morgan).Type);
+        Assert.Equal("Annual Leave ES (pending approval)", Assert.Single(snapshot.Days, day => day.DriverId == gavin).Type);
+        Assert.Equal(2, snapshot.Ignored);
+        Assert.Empty(snapshot.Unmatched);
+        Assert.Contains("Old Driver", snapshot.ArchivedDrivers!);
+    }
+
+    private static string Event(string start, string end, string summary) =>
+        $"BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:{start}\r\nDTEND;VALUE=DATE:{end}\r\nSUMMARY:{summary}\r\nEND:VEVENT\r\n";
+
+    [Fact]
     public void Only_sage_hr_calendar_links_are_accepted()
     {
         Assert.Equal("https://x.sage.hr/calendar/sync/abc", SageCalendarFeed.Normalise("webcal://x.sage.hr/calendar/sync/abc"));

@@ -30,6 +30,8 @@ public sealed class SageCalendarController(TmsDbContext db, SageCalendarFeed fee
             events = snapshot?.Events ?? 0,
             matched = snapshot?.Matched ?? 0,
             unmatched = snapshot?.Unmatched ?? [],
+            archivedDrivers = snapshot?.ArchivedDrivers ?? [],
+            ignored = snapshot?.Ignored ?? 0,
             types = snapshot?.Types ?? new Dictionary<string, int>(),
             driversOffToday = snapshot?.Days.Where(day => day.Date == today).Select(day => new { day.DriverName, day.Kind, day.Type }) ?? [],
             leaveDays = snapshot?.Days.Count(day => day.Kind == "Leave") ?? 0,
