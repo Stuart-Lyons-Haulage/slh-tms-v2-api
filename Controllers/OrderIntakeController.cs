@@ -1033,6 +1033,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             IsLangmeadCoopBooking(request))
             return true;
 
+        // Great Bear sends the Waitrose backhaul booking form; "Waitrose" is only inside the sheet.
+        if ((request.SenderAddress ?? string.Empty).EndsWith("@greatbear.co.uk", StringComparison.OrdinalIgnoreCase) &&
+            (request.Attachments ?? []).Any(item => item.IsInline != true &&
+                Path.GetExtension(item.Name ?? string.Empty).ToLowerInvariant() is ".xlsx" or ".xls" or ".xlsm"))
+            return true;
+
         return source.Contains("WAITROSE", StringComparison.Ordinal)
             || source.Contains("ALDI", StringComparison.Ordinal)
             || source.Contains("MORRISONS", StringComparison.Ordinal)
