@@ -80,7 +80,7 @@ public sealed class SamsaraClientTests
                 "driver-1",
                 null,
                 [
-                    new SamsaraRouteStopRequest(firstStop, 1, "SLH Depot", "address-1", "Depot", 50.0, -0.1, 250, null, start, "Start"),
+                    new SamsaraRouteStopRequest(firstStop, 1, "SLH Depot", null, "Depot", 50.0, -0.1, 250, null, start, "Start"),
                     new SamsaraRouteStopRequest(lastStop, 2, "Customer", "address-2", "Customer", 51.0, -0.2, 250, finish, finish, "Deliver")
                 ]),
             CancellationToken.None);
