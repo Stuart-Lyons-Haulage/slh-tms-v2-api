@@ -658,7 +658,7 @@ public sealed class SamsaraDispatchController(
         }
 
         var csv = new StringBuilder();
-        csv.AppendLine("Route Name,Assigned Driver Username,Assigned Vehicle Name,Stop Name,Stop Arrival Time,Stop Departure Time,Stop Notes,Address Name,Latitude,Longitude,Full Address");
+        csv.AppendLine("Route Name,Assigned Driver Username,Assigned Vehicle Name,Stop Name,Stop Arrival Time,Stop Departure Time,Stop Notes,Address Name,Full Address");
 
         for (var index = 0; index < orderedStops.Count; index++)
         {
@@ -696,8 +696,6 @@ public sealed class SamsaraDispatchController(
                 Csv(FormatCsvTime(departure)),
                 Csv(stopNotes),
                 Csv(addressName),
-                Csv(resolved.Latitude?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                Csv(resolved.Longitude?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 Csv(resolved.Address)
             }));
         }
@@ -882,8 +880,7 @@ public sealed class SamsaraDispatchController(
                 using var addressGate = new SemaphoreSlim(4, 4);
                 var sitesToSync = physicalStops
                     .Where(item => item.Representative.SiteId is not null &&
-                                   item.Representative.Latitude is not null &&
-                                   item.Representative.Longitude is not null &&
+                                   !string.IsNullOrWhiteSpace(item.Representative.Address) &&
                                    !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
                     .GroupBy(item => item.Representative.SiteId!.Value)
                     .Select(group => group.First())
@@ -901,8 +898,8 @@ public sealed class SamsaraDispatchController(
                                 site.ExternalCode,
                                 site.DriverTextName ?? site.Name,
                                 item.Representative.Address!,
-                                item.Representative.Latitude!.Value,
-                                item.Representative.Longitude!.Value,
+                                null,
+                                null,
                                 site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
                             ct);
                         return new AddressSyncResult(site.Id, result.AddressId);
@@ -1178,8 +1175,8 @@ public sealed class SamsaraDispatchController(
         var handoverSite = relay.HandoverSiteId is Guid handoverSiteId
             ? sites.FirstOrDefault(site => site.Id == handoverSiteId)
             : sites.FirstOrDefault(site => SameSite(site, relay.HandoverSite));
-        if (handoverSite is null || handoverSite.Latitude is null || handoverSite.Longitude is null)
-            return BadRequest(new { message = $"The relay handover site '{relay.HandoverSite}' must be an active Site Master location with coordinates." });
+        if (handoverSite is null || string.IsNullOrWhiteSpace(handoverSite.CollectionAddress))
+            return BadRequest(new { message = $"The relay handover site '{relay.HandoverSite}' must be an active Site Master location with a physical address." });
 
         var split = relay.HandoverAfterStopSequence is int requestedSplit
             ? requestedSplit
@@ -1198,8 +1195,8 @@ public sealed class SamsaraDispatchController(
             handoverSite.DriverTextName ?? handoverSite.Name,
             null,
             handoverSite.CollectionAddress ?? handoverSite.Name,
-            (double)handoverSite.Latitude.Value,
-            (double)handoverSite.Longitude.Value,
+            null,
+            null,
             handoverSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters,
             handoverTime,
             handoverTime,
