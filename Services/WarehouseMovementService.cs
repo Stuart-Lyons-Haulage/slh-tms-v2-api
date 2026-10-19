@@ -272,6 +272,16 @@ public sealed class WarehouseMovementService(TmsDbContext db)
         return result.Values.ToList();
     }
 
+    private static string Period(TimeOnly? time) => time is null ? "Unallocated" : time.Value.Hour < 17 ? "AM" : "PM";
+    private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+    private static HashSet<string> WarehouseNames(Site canonical, IReadOnlyCollection<IntegrationMapping> mappings)
+    {
+        var names = new[] { canonical.Name, canonical.ExternalCode, canonical.DriverTextName, canonical.Aliases, "Barnham Coldstore", "Stuart Lyons Distribution", "Stuart Lions Distribution" }
+            .Concat(mappings.SelectMany(x => new[] { x.ExternalKey, x.ExternalLabel, x.NormalizedExternalValue }));
+        return names.Where(x => !string.IsNullOrWhiteSpace(x))
+            .SelectMany(x => x!.Split(new char[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Select(Normalize).Where(x => x.Length > 2).ToHashSet(StringComparer.Ordinal);
+    }
     private static bool MatchesWarehouse(string? value, IReadOnlySet<string> warehouseNames)
     {
         var normalized = Normalize(value);
