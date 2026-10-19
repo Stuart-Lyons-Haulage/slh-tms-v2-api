@@ -218,7 +218,8 @@ public sealed class DispatchService(
     public async Task<IReadOnlyList<DispatchAvailableTimeDto>> GetAvailableTimesAsync(
         DispatchAvailableTimesRequest request,
         CancellationToken ct,
-        bool forceTachoRefresh = false)
+        bool forceTachoRefresh = false,
+        bool allowExistingAllocation = false)
     {
         var ids = request.DriverIds.Distinct().ToArray();
         if (ids.Length == 0) return [];
@@ -249,8 +250,11 @@ public sealed class DispatchService(
             var availableFrom = DispatchTachoRules.AvailableFrom(shiftEnd, rest);
 
             availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability);
-            string? breach = sharedAvailability is { Dispatchable: false }
-                ? string.Join(" · ", sharedAvailability.BlockReasons)
+            var actionableBlocks = sharedAvailability?.BlockReasons
+                .Where(reason => !allowExistingAllocation || !reason.StartsWith("Already allocated", StringComparison.Ordinal))
+                .ToArray() ?? [];
+            string? breach = actionableBlocks.Length > 0
+                ? string.Join(" · ", actionableBlocks)
                 : null;
             if (breach is null)
             {
@@ -479,6 +483,7 @@ public sealed class DispatchService(
             logger.LogWarning(exception, "Dispatch run operational enrichment was unavailable; core run data will still be returned.");
             db.ChangeTracker.Clear();
         }
+
 
         var trailerIds = loads.Where(load => load.TrailerId is not null).Select(load => load.TrailerId!.Value).Distinct().ToArray();
         var trailerById = trailerIds.Length == 0
