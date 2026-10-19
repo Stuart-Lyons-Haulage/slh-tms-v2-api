@@ -290,7 +290,7 @@ public sealed class SamsaraDispatchController(
             message = !samsara.IsConfigured
                 ? $"Samsara settings are incomplete: {string.Join(", ", samsara.MissingSettings)}."
                 : candidates.Count == 0
-                    ? "No active Master Sites currently have both an address and coordinates for reusable Samsara Addresses."
+                    ? "No active Master Sites currently have a physical address for reusable Samsara Addresses."
                     : $"{candidates.Count} active Master Site(s) are ready for Samsara Address synchronisation."
         });
     }
@@ -322,8 +322,8 @@ public sealed class SamsaraDispatchController(
                         candidate.Site.ExternalCode,
                         candidate.Site.DriverTextName ?? candidate.Site.Name,
                         candidate.Site.CollectionAddress!,
-                        (double)candidate.Site.Latitude!.Value,
-                        (double)candidate.Site.Longitude!.Value,
+                        null,
+                        null,
                         candidate.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
                     ct);
                 return new SiteAddressSyncResult(candidate.Site, result, null);
@@ -1416,9 +1416,7 @@ public sealed class SamsaraDispatchController(
 
     private static List<SiteAddressCandidate> ToSiteAddressCandidates(IEnumerable<Site> sites) => sites
             .Where(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
-                          !string.IsNullOrWhiteSpace(site.CollectionAddress) &&
-                          site.Latitude is not null &&
-                          site.Longitude is not null)
+                          !string.IsNullOrWhiteSpace(site.CollectionAddress))
             .Select(site => new SiteAddressCandidate(site))
             .ToList();
 
