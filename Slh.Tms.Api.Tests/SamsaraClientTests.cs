@@ -103,8 +103,8 @@ public sealed class SamsaraClientTests
         Assert.Equal(2, stops[1].GetProperty("sequenceNumber").GetInt32());
         Assert.True(stops[1].TryGetProperty("scheduledArrivalTime", out _));
         Assert.True(stops[1].TryGetProperty("scheduledDepartureTime", out _));
-        Assert.False(stops[0].GetProperty("singleUseLocation").TryGetProperty("latitude", out _));
-        Assert.False(stops[0].GetProperty("singleUseLocation").TryGetProperty("longitude", out _));
+        Assert.Equal(50.0, stops[0].GetProperty("singleUseLocation").GetProperty("latitude").GetDouble());
+        Assert.Equal(-0.1, stops[0].GetProperty("singleUseLocation").GetProperty("longitude").GetDouble());
         Assert.Equal("Depot", stops[0].GetProperty("singleUseLocation").GetProperty("address").GetString());
     }
 
