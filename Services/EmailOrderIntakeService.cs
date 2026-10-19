@@ -373,52 +373,10 @@ public sealed class EmailOrderIntakeService
     private static readonly Regex SbDetailAddress = new(@"^Ad+ress\s+of\s+delivery\s*:\s*(?<v>.+)$", RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// Summer Berry one-off customer details, e.g. "20.10.2026 Spinneys/JHF delivery":
-    /// Customer : … / Depot Date: dd.MM.yyyy / Collection : dd.MM - HH:mm / Pallets : n /
-    /// Adress of delivery : … (the farm isn't stated, so it goes to review for that).
+    /// Summer Berry one-off customer details, e.g. "20.10.2026 Spinneys/JHF delivery"
+    /// (Customer : / Depot Date: / Pallets :). Read by the labelled-body parser; this lets
+    /// the email through the intake gate so it reaches it.
     /// </summary>
-    private static List<ParsedEmailOrder> ParseSummerBerryCustomerDetails(MailboxEmailIntakeRequest request, string body, DateTimeOffset receivedAt)
-    {
-        if (!LooksLikeSummerBerryCustomerDetails(request)) return [];
-        var lines = OrderContentLines(body);
-        string? customer = null, address = null, time = null;
-        DateOnly? depot = null, collection = null;
-        int? pallets = null;
-        for (var i = 0; i < lines.Count; i++)
-        {
-            var line = lines[i];
-            if (SbDetailCustomer.Match(line) is { Success: true } c) customer ??= Regex.Replace(c.Groups["v"].Value, @"\s*order\s*$", string.Empty, RegexOptions.IgnoreCase).Trim();
-            else if (SbDetailDepotDate.Match(line) is { Success: true } d) depot ??= BuildDate(d.Groups["d"].Value, d.Groups["m"].Value, d.Groups["y"].Value, receivedAt);
-            else if (SbDetailCollection.Match(line) is { Success: true } col)
-            {
-                collection ??= BuildDate(col.Groups["d"].Value, col.Groups["m"].Value, col.Groups["y"].Success ? col.Groups["y"].Value : string.Empty, receivedAt);
-                if (col.Groups["t"].Success) time ??= NormaliseTime(col.Groups["t"].Value.Replace('.', ':'));
-            }
-            else if (SbDetailPallets.Match(line) is { Success: true } p) pallets ??= int.Parse(p.Groups["n"].Value, CultureInfo.InvariantCulture);
-            else if (SbDetailAddress.Match(line) is { Success: true } a)
-            {
-                address ??= a.Groups["v"].Value.Trim();
-                if (i + 1 < lines.Count && !lines[i + 1].Contains(':')) address = $"{address}, {lines[i + 1]}";
-            }
-        }
-        if (depot is null || pallets is null or <= 0 || string.IsNullOrWhiteSpace(customer)) return [];
-        var collectionDate = collection ?? depot.Value;
-        if (collectionDate > depot.Value) collectionDate = depot.Value;
-        var destination = string.IsNullOrWhiteSpace(address) ? customer! : address!;
-        var warnings = new List<string> { "Summer Berry farm isn't stated in this email; confirm which Summer Berry site to collect from before planning." };
-        var order = BuildStructuredOrder(
-            request,
-            $"summerberry-details-{NormaliseKey(customer)}-{depot.Value:yyyyMMdd}",
-            "SUMMERBERRY", null, collectionDate, depot.Value, pallets.Value,
-            "Summer Berry", destination.Length > 120 ? destination[..120] : destination,
-            $"TSBC {customer} delivery", warnings, time);
-        var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(order.Payload.GetRawText()) ?? [];
-        payload["overnightRoute"] = collectionDate < depot.Value;
-        payload["routeTiming"] = collectionDate < depot.Value ? "Overnight" : "SameDay";
-        payload["deliveryCustomer"] = customer;
-        return [new ParsedEmailOrder(order.SourceKey, order.NaturalKey, JsonSerializer.SerializeToElement(payload), order.Warnings)];
-    }
-
     internal static bool LooksLikeSummerBerryCustomerDetails(MailboxEmailIntakeRequest request)
     {
         if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk")) return false;
@@ -665,9 +623,6 @@ public sealed class EmailOrderIntakeService
     {
         var summerBerryDepotBlocks = ParseSummerBerryDepotDateBlocks(request, body, receivedAt);
         if (summerBerryDepotBlocks.Count > 0) return summerBerryDepotBlocks;
-
-        var summerBerryDetails = ParseSummerBerryCustomerDetails(request, body, receivedAt);
-        if (summerBerryDetails.Count > 0) return summerBerryDetails;
 
         var emery = ParseEmeryWaitroseBody(request, body, receivedAt);
         if (emery.Count > 0) return emery;
