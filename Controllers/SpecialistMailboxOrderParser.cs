@@ -742,6 +742,7 @@ public sealed class SpecialistMailboxOrderParser
                 ParseEuroPoolQuantity(match.Groups["totalQty"].Value)))
             .Where(row => row.CarrierQuantity > 0 && row.UnitsPerCarrier > 0 && row.TotalQuantity > 0)
             .ToList();
+        if (lineItems.Count == 0) lineItems = SquashedEuroPoolLineItems(itemText);
 
         return new EuroPoolPdfConfirmation(
             orderMatch.Success ? orderMatch.Groups["order"].Value : null,
@@ -755,6 +756,60 @@ public sealed class SpecialistMailboxOrderParser
             lineItems,
             unloadingDate,
             isReturn);
+    }
+
+    // The PDF library reads the real confirmations with the table cells run together:
+    // "21000021186-Green trayLPR PR080 EPConditioned 300Folded IN122523.024" - order qty 12,
+    // 252 trays per pallet, 3.024 trays. The three numbers are separated by checking that
+    // qty x per-pallet = total.
+    private static readonly Regex EuroPoolSquashedLineStartRegex = new(
+        @"(?<material>2\d{7})(?=\d{3}-[A-Za-z])",
+        RegexOptions.Compiled);
+    private static readonly Regex EuroPoolSquashedCarrierRegex = new(
+        @"(?<carrier>[A-Z]{2,6}\s+[A-Z0-9]{2,8}\s+EP)",
+        RegexOptions.Compiled);
+
+    internal static List<EuroPoolPdfLineItem> SquashedEuroPoolLineItems(string itemText)
+    {
+        var end = itemText.IndexOf("Transport", StringComparison.OrdinalIgnoreCase);
+        if (end > 0) itemText = itemText[..end];
+        var starts = EuroPoolSquashedLineStartRegex.Matches(itemText).Cast<Match>().ToList();
+        var items = new List<EuroPoolPdfLineItem>();
+        for (var i = 0; i < starts.Count; i++)
+        {
+            var segment = itemText[starts[i].Index..(i + 1 < starts.Count ? starts[i + 1].Index : itemText.Length)].Trim();
+            var carrier = EuroPoolSquashedCarrierRegex.Match(segment);
+            // The numbers come last, straight after the logistic variant ("Folded IN").
+            var tail = Regex.Match(segment, @"(?<=[A-Za-z]\s*)(?<nums>\d[\d.,]*)$");
+            if (!carrier.Success || !tail.Success) continue;
+            var split = SplitEuroPoolNumbers(tail.Groups["nums"].Value);
+            if (split is null) continue;
+            items.Add(new EuroPoolPdfLineItem(starts[i].Groups["material"].Value, carrier.Groups["carrier"].Value.Trim(),
+                split.Value.Qty, split.Value.PerCarrier, split.Value.Total));
+        }
+        return items;
+    }
+
+    internal static (int Qty, int PerCarrier, int Total)? SplitEuroPoolNumbers(string run)
+    {
+        run = run.Trim();
+        for (var k = 1; k < run.Length; k++)
+        {
+            var totalText = run[k..];
+            if (!Regex.IsMatch(totalText, @"^\d{1,3}(?:[.,]\d{3})*$")) continue;
+            var prefix = run[..k];
+            if (!prefix.All(char.IsDigit)) continue;
+            var total = ParseEuroPoolQuantity(totalText);
+            for (var j = 1; j < prefix.Length; j++)
+            {
+                if (prefix[j] == '0') continue;
+                if (!int.TryParse(prefix[..j], NumberStyles.None, CultureInfo.InvariantCulture, out var qty) ||
+                    !int.TryParse(prefix[j..], NumberStyles.None, CultureInfo.InvariantCulture, out var perCarrier)) continue;
+                if (qty > 0 && perCarrier is > 0 and <= 5000 && (long)qty * perCarrier == total)
+                    return (qty, perCarrier, total);
+            }
+        }
+        return null;
     }
 
     private static int ParseEuroPoolQuantity(string value)
