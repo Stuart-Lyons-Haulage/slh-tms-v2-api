@@ -785,7 +785,10 @@ public sealed class SamsaraDispatchController(
             if (driver is not null)
             {
                 var available = (await dispatch.GetAvailableTimesAsync(
-                    new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []), ct, forceTachoRefresh: true))
+                    new DispatchAvailableTimesRequest(load.PlanningDate, [driver.Id], state?.UseReducedDailyRest == true ? [driver.Id] : []),
+                    ct,
+                    forceTachoRefresh: true,
+                    allowExistingAllocation: true))
                     .Single();
                 if (available.AvailableFrom is null || !string.IsNullOrWhiteSpace(available.BreachDetail))
                     return BadRequest(new { message = available.BreachDetail ?? "A legal dispatch start cannot be calculated from completed TachoMaster duty data." });
