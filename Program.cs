@@ -342,6 +342,7 @@ builder.Services.AddHttpClient("SageCalendar", client => { client.Timeout = Time
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = true, MaxAutomaticRedirections = 5, AutomaticDecompression = System.Net.DecompressionMethods.All });
 builder.Services.AddSingleton<SageCalendarFeed>();
 builder.Services.AddHostedService<SageCalendarSyncService>();
+builder.Services.AddSingleton<RequestLatencyMonitor>();
 builder.Services.AddHostedService<SamsaraReconciliationService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
