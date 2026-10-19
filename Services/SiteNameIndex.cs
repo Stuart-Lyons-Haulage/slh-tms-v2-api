@@ -38,7 +38,7 @@ public sealed class SiteNameIndex
                     index.Add(site.Name, site.Id);
                     index.Add(site.DriverTextName, site.Id);
                     index.Add(site.ExternalCode, site.Id);
-                    foreach (var alias in (site.Aliases ?? string.Empty).Split([',', ';', '|', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    foreach (var alias in (site.Aliases ?? string.Empty).Split(new[] { ',', ';', '|', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                         index.Add(alias, site.Id);
                 }
             }

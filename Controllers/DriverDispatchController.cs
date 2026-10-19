@@ -14,6 +14,7 @@ public sealed class DriverDispatchController(
     TmsDbContext db,
     SageHrClient sageHr,
     TachoMasterClient tachoMaster,
+    SiteTimingRuleStore timingRuleStore,
     IMemoryCache cache,
     ILogger<DriverDispatchController> logger) : ControllerBase
 {
@@ -164,6 +165,10 @@ public sealed class DriverDispatchController(
 
         if (loads.Count > 0)
             await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
+
+        var timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct);
+        try { await MasterDetailStore.EnrichSitesAsync(db, timingSites, ct); } catch { }
+        var timingRules = await timingRuleStore.ReadAsync(ct);
 
         // Detail enrichment supplies agency name, coding and skills, but does not
         // change the Master Data employment classification.
@@ -350,12 +355,33 @@ public sealed class DriverDispatchController(
                     stop.Latitude,
                     stop.Longitude,
                     stop.PlannedArrivalUtc,
+                    latestAccessTimeUtc = LatestCollectionAccessUtc(load, stop, timingRules, timingSites),
                     stop.PlannerNote
                 })
             })
         };
         cache.Set(cacheKey, snapshot, TimeSpan.FromSeconds(10));
         return Ok(snapshot);
+    }
+
+    private static DateTimeOffset? LatestCollectionAccessUtc(
+        Load load,
+        LoadStop stop,
+        IReadOnlyList<SiteTimingRule> rules,
+        IReadOnlyList<Site> sites)
+    {
+        if (!stop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase)) return null;
+        var final = load.Stops.OrderBy(item => item.Sequence).LastOrDefault();
+        if (final is null) return stop.PlannedArrivalUtc;
+        var rule = rules.FirstOrDefault(candidate => SiteTimingRuleMatcher.Match(
+            candidate,
+            CleanStopName(stop.Name),
+            CleanStopName(final.Name),
+            null,
+            sites));
+        return rule is null
+            ? stop.PlannedArrivalUtc
+            : SiteTimingRuleMatcher.CollectionWindow(rule, load.PlanningDate).End ?? stop.PlannedArrivalUtc;
     }
 
     [HttpPost("drivers"), Authorize(Policy = "TmsWrite")]
