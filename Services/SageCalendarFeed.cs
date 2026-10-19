@@ -165,7 +165,7 @@ public sealed class SageCalendarFeed(IHttpClientFactory httpClientFactory, IData
     private static DateOnly? Date(string value) =>
         value.Length >= 8 && DateOnly.TryParseExact(value[..8], "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ? date : null;
 
-    private static string Unescape(string value) => value.Replace("\\n", " ").Replace("\\N", " ").Replace("\\,", ",").Replace("\;", ";").Replace("\\\\", "\\").Trim();
+    private static string Unescape(string value) => value.Replace("\\n", " ").Replace("\\N", " ").Replace("\\,", ",").Replace("\\;", ";").Replace("\\\\", "\\").Trim();
 
     private static readonly Regex NonWorking = new(@"\b(?:non[- ]?working|not\s+working|day\s+off|rest\s+day|off\s+day|weekend|working\s+pattern|unavailable)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
