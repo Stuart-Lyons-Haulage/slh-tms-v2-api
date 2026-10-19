@@ -1761,7 +1761,8 @@ public sealed class SpecialistMailboxOrderParser
     }
 
     private static bool RowContains(object?[] row, string value) =>
-        row.Select(CellText).Any(text => string.Equals(text?.Trim(), value, StringComparison.OrdinalIgnoreCase));
+        // Ignore extra spaces inside headings ("COLLECTION     DATE").
+        row.Select(CellText).Any(text => string.Equals(Regex.Replace(text ?? string.Empty, @"\s+", " ").Trim(), value, StringComparison.OrdinalIgnoreCase));
 
     private static DateOnly? FirstDate(object?[] row) => row.Select(CellDate).FirstOrDefault(value => value is not null);
     private static DateOnly? LastDate(object?[] row) => row.Select(CellDate).LastOrDefault(value => value is not null);

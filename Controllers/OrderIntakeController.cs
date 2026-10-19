@@ -509,6 +509,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // Covent Garden, say) must still get a card, or it vanishes without trace.
         if (IsInternalSender(request.SenderAddress) ||
             IsInternalPlannerSnapshot(request) ||
+            IsNwfTransportPurchaseOrder(request) ||
             LooksLikeNonOrderMessage(request) ||
             !HasOrderEvidence(request))
             return null;
@@ -673,6 +674,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 [],
                 [],
                 "Internal Lyons Collections/SB planner snapshot retained as source evidence; it was not converted into a transport order.");
+
+        if (IsNwfTransportPurchaseOrder(request))
+            return new EmailIntakeParseResult(
+                [],
+                [],
+                "NWF transport purchase order (what NWF will pay for haulage, for invoicing); not a collection order. Source evidence retained.");
 
         var nwfTransfer = IsNwfTransferSource(request);
         var operationalSignal = new EmailOrderIntakeService().Parse(request);
@@ -953,6 +960,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return barfootsWaitroseWave || summerBerryCoop || summerBerryDepotDate ||
                fowlerWelchWaitrose || hallHunterDirectDepot || emeryWaitrose || doubleHWaitrose || sainsburyGm;
     }
+
+    /// <summary>
+    /// "NWF SLH Outbound PO dd/MM": NWF's purchase order to Lyons for the transport it has
+    /// had (Runcton Leaf Transport Aldi, etc., with prices). Accounts paperwork, not work to plan.
+    /// </summary>
+    internal static bool IsNwfTransportPurchaseOrder(MailboxEmailIntakeRequest request) =>
+        (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) &&
+        Regex.IsMatch(request.Subject ?? string.Empty, @"\bOutbound\s+PO\b", RegexOptions.IgnoreCase);
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)
     {

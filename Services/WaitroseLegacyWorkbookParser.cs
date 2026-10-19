@@ -66,7 +66,9 @@ public static class WaitroseLegacyWorkbookParser
         .OrderBy(date => Math.Abs(date.DayNumber - anchor.DayNumber))
         .First(date => date.DayOfWeek == target);
 
-    private static bool Contains(object?[] row, string value) => row.Any(cell => Text(cell).Contains(value, StringComparison.OrdinalIgnoreCase));
+    // Headings are matched ignoring extra spaces: Vitacress's sheet says "COLLECTION     DATE".
+    private static bool Contains(object?[] row, string value) => row.Any(cell => Squash(Text(cell)).Contains(value, StringComparison.OrdinalIgnoreCase));
+    private static string Squash(string value) => System.Text.RegularExpressions.Regex.Replace(value, @"\s+", " ");
     private static string Text(object? value) => Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim() ?? string.Empty;
     private static int? Integer(object? value) => value switch
     {
