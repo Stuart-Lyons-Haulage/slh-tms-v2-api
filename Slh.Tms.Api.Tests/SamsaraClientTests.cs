@@ -13,11 +13,11 @@ public sealed class SamsaraClientTests
     [Fact]
     public void Job_notes_are_capped_at_samsaras_two_thousand_character_limit()
     {
-        var notes = new string('x', SamsaraNoteRules.MaximumJobNoteLength + 43);
+        var notes = new string('x', SamsaraNoteRules.MaximumJobNoteBytes + 43);
 
         var result = SamsaraNoteRules.LimitJobNotes(notes);
 
-        Assert.Equal(SamsaraNoteRules.MaximumJobNoteLength, result.Length);
+        Assert.Equal(SamsaraNoteRules.MaximumJobNoteBytes, result.Length);
         Assert.EndsWith("Samsara limit is 2,000 characters]", result);
     }
 
