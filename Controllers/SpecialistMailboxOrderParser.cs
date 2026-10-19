@@ -1618,8 +1618,9 @@ public sealed class SpecialistMailboxOrderParser
                             string.IsNullOrWhiteSpace(destination) ||
                             Regex.IsMatch(destination, @"^(?:depot|destination|total|grand\s*total|aldi\s*$)", RegexOptions.IgnoreCase))
                             continue;
-                        if (!destination.StartsWith("ALDI", StringComparison.OrdinalIgnoreCase))
-                            destination = $"Aldi {destination.Trim()}";
+                        // One tidy destination per RDC: "ALDI CARDIFF" and "Cardiff" both become "Aldi Cardiff".
+                        var depot = Regex.Replace(destination.Trim(), @"^\s*aldi\s+", string.Empty, RegexOptions.IgnoreCase).Trim();
+                        destination = $"Aldi {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(depot.ToLowerInvariant())}";
 
                         // A confirmed booking sheet can cover a week; stage every dated row in a
                         // sensible forward window rather than only the one day named in the subject.
