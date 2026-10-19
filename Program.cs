@@ -338,7 +338,8 @@ builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
 builder.Services.AddDataProtection();
-builder.Services.AddHttpClient("SageCalendar", client => { client.Timeout = TimeSpan.FromSeconds(30); });
+builder.Services.AddHttpClient("SageCalendar", client => { client.Timeout = TimeSpan.FromSeconds(30); })
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = true, MaxAutomaticRedirections = 5, AutomaticDecompression = System.Net.DecompressionMethods.All });
 builder.Services.AddSingleton<SageCalendarFeed>();
 builder.Services.AddHostedService<SageCalendarSyncService>();
 builder.Services.AddHostedService<SamsaraReconciliationService>();
