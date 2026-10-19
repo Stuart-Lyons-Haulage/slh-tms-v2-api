@@ -122,6 +122,10 @@ public sealed class SpecialistMailboxOrderParser
         if (waitrosePdf is not null)
             return waitrosePdf;
 
+        var greatBear = TryParseGreatBearWaitroseBookingForm(request);
+        if (greatBear is not null)
+            return greatBear;
+
         var barfootsMovement = TryParseBarfootsTrayMovementEmail(request);
         if (barfootsMovement is not null)
             return barfootsMovement;
@@ -849,8 +853,8 @@ public sealed class SpecialistMailboxOrderParser
         var subject = Regex.Replace(Regex.Replace(request.Subject ?? string.Empty, @"^\s*(?:(?:RE|FW|FWD)\s*:\s*)+", string.Empty, RegexOptions.IgnoreCase), @"\s+", " ").Trim();
         if (!BarfootsMovementKeywordRegex.IsMatch(subject)) return null;
         if (subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase)) return null;
-        if ((request.Attachments ?? []).Any(item => item.IsInline != true &&
-                string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".pdf", StringComparison.OrdinalIgnoreCase))) return null;
+        // Euro Pool / Waitrose PDFs are read earlier; other PDFs (a Tosca delivery note) are
+        // paperwork for the same job, so the subject still describes it.
         var route = BarfootsMovementRouteRegex.Match(subject);
         var dateMatch = BarfootsMovementDateRegex.Match(subject);
         if (!route.Success || !dateMatch.Success) return null;
@@ -890,6 +894,82 @@ public sealed class SpecialistMailboxOrderParser
             [new ParsedEmailOrder($"barfoots-move-{NormaliseKey(reference ?? from + to)}-{date:yyyyMMdd}",
                 NaturalKey(request, "BARFOOTS", from, to, date, pallets), JsonSerializer.SerializeToElement(root), warnings)],
             warnings, null);
+    }
+
+    /// <summary>
+    /// Great Bear "Lyons Haulage (Waitrose Backhaul) - Transport Booking" form (BOOKING IN
+    /// FORM.xlsx): label / value rows - supplier, pallet spaces, collection date, due date,
+    /// Waitrose PO, delivery point. Collected from the Great Bear site named in the contact.
+    /// </summary>
+    private static EmailIntakeParseResult? TryParseGreatBearWaitroseBookingForm(MailboxEmailIntakeRequest request)
+    {
+        if (!(request.SenderAddress ?? string.Empty).EndsWith("@greatbear.co.uk", StringComparison.OrdinalIgnoreCase)) return null;
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) && IsExcel(item.Name))
+            .ToList();
+        if (attachments.Count == 0) return null;
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        var recognised = false;
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                do
+                {
+                    var rows = ReadRows(reader);
+                    if (!rows.Any(row => RowContains(row, "Transport Booking")) || !rows.Any(row => RowContains(row, "Waitrose P.O"))) continue;
+                    recognised = true;
+                    object? Value(string label)
+                    {
+                        var row = rows.FirstOrDefault(item => item.Length > 0 && NormaliseKey(CellText(item[0])).StartsWith(NormaliseKey(label), StringComparison.Ordinal));
+                        return row?.Skip(1).FirstOrDefault(cell => !string.IsNullOrWhiteSpace(CellText(cell)));
+                    }
+                    var supplier = CellText(Value("Supplier name"))?.Trim();
+                    var pallets = int.TryParse(CellText(Value("Pallet Spaces")), NumberStyles.Integer, CultureInfo.InvariantCulture, out var spaces) ? spaces : 0;
+                    var collectionDate = CellDate(Value("Collection date"));
+                    var dueDate = CellDate(Value("Order due date")) ?? collectionDate;
+                    var po = CellText(Value("Waitrose P.O Number"))?.Trim();
+                    var deliveryPoint = CellText(Value("Delivery Point"))?.Trim();
+                    var contact = CellText(Value("Contact details of collection point")) ?? string.Empty;
+                    var instructions = CellText(Value("Any special instructions"));
+                    if (collectionDate is null || string.IsNullOrWhiteSpace(deliveryPoint))
+                    {
+                        warnings.Add($"'{attachment.Name}' is a Great Bear Waitrose booking form but its collection date or delivery point is blank.");
+                        continue;
+                    }
+                    // "sheffield.planning@greatbear.co.uk" -> Great Bear Sheffield.
+                    var siteMatch = Regex.Match(contact, @"(?<site>[a-z]+)\.planning@greatbear\.co\.uk", RegexOptions.IgnoreCase);
+                    var collection = siteMatch.Success
+                        ? $"Great Bear {CultureInfo.InvariantCulture.TextInfo.ToTitleCase(siteMatch.Groups["site"].Value.ToLowerInvariant())}"
+                        : "Great Bear";
+                    var destination = deliveryPoint.StartsWith("Waitrose", StringComparison.OrdinalIgnoreCase) ? deliveryPoint : $"Waitrose {deliveryPoint}";
+                    var rowWarnings = new List<string>();
+                    if (pallets <= 0) rowWarnings.Add("Pallet spaces were blank on the booking form; enter the quantity before approval.");
+                    if (!siteMatch.Success) rowWarnings.Add("The Great Bear site wasn't named on the form; confirm where to collect.");
+                    var reference = BuildReference(po ?? $"GB{collectionDate:ddMM}", destination);
+                    var payload = BuildPayload(request, reference, po, "WAITROSE", collectionDate.Value, dueDate!.Value, pallets, collection, destination,
+                        null, null, attachment.Name, null, 0, "Great Bear Waitrose backhaul booking form", rowWarnings, "WAITROSE");
+                    var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                    root["supplierName"] = supplier;
+                    root["intakeProfile"] = "GREATBEAR_WAITROSE_BOOKING_FORM";
+                    if (CellText(Value("Order weight")) is { } weight) root["weightKg"] = weight;
+                    if (!string.IsNullOrWhiteSpace(supplier) || !string.IsNullOrWhiteSpace(instructions))
+                        root["driverInstructions"] = string.Join(" · ", new[] { root["driverInstructions"]?.ToString(), supplier is null ? null : $"Supplier: {supplier}", instructions }.Where(item => !string.IsNullOrWhiteSpace(item)));
+                    orders.Add(new ParsedEmailOrder($"greatbear-waitrose-{NormaliseKey(po ?? supplier ?? "form")}-{collectionDate:yyyyMMdd}",
+                        NaturalKey(request, "WAITROSE", collection, destination, collectionDate.Value, pallets), JsonSerializer.SerializeToElement(root), rowWarnings));
+                }
+                while (reader.NextResult());
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"'{attachment.Name}' could not be read as a Great Bear booking form: {ex.GetBaseException().Message}");
+            }
+        }
+        if (orders.Count > 0) return new EmailIntakeParseResult(orders, warnings, null);
+        return recognised ? new EmailIntakeParseResult([], warnings, "Great Bear booking form could not be read; source evidence retained.") : null;
     }
 
     private static EmailIntakeParseResult? TryParseWaitroseBookingPdf(MailboxEmailIntakeRequest request)

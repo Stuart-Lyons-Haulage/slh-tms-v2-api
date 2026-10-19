@@ -602,7 +602,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private static bool LooksLikeNonOrderMessage(MailboxEmailIntakeRequest request) =>
         Regex.IsMatch(string.Join("\n", request.Subject, request.BodyText),
-            @"\b(?:available loads|mailshot|newsletter|out of office|automatic reply)\b", RegexOptions.IgnoreCase);
+            @"\b(?:available loads|mailshot|newsletter|out of office|automatic reply)\b", RegexOptions.IgnoreCase) ||
+        // Paperwork and forecasts, not work to plan: "POD Requests", Waitrose "Figures"
+        // (the weekly trunk estimates, e.g. "SLH wc 18th October 2026 Bracknell Mix.xlsx").
+        Regex.IsMatch(request.Subject ?? string.Empty,
+            @"^\s*(?:(?:RE|FW|FWD)\s*:\s*)*(?:POD\s+requests?|proof\s+of\s+delivery|figures|estimates)\b", RegexOptions.IgnoreCase) ||
+        (request.Attachments ?? []).Any(item => Regex.IsMatch(item.Name ?? string.Empty, @"\bwc\b.*\bMix\b", RegexOptions.IgnoreCase));
 
     private static bool IsSupportedOrderAttachment(string? name) =>
         Path.GetExtension(name ?? string.Empty).ToLowerInvariant() is ".xls" or ".xlsx" or ".xlsm" or ".csv" or ".pdf";

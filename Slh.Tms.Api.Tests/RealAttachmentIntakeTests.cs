@@ -146,6 +146,62 @@ public sealed class RealAttachmentIntakeTests : IClassFixture<CustomWebFactory>
         Assert.Equal("K&N facility", order.GetProperty("stallNumber").GetString());
     }
 
+    [Fact]
+    public async Task Barfoots_euro_pool_delivery_pdf_from_bedford_is_one_order()
+    {
+        var messageId = $"barfoots-ep-del-{Guid.NewGuid():N}";
+        var response = await Post(messageId, "Kamila.Biohn@barfoots.co.uk", "EUROPOOL Aldi trays collection 17.10, 228820092", "2026-10-15T11:49:00Z",
+            "<p>Please see attached.</p>", "Order confirmation 0228820092 17.10.2026.PDF", "application/pdf", "Barfoots Euro Pool Delivery 0228820092 17.10.2026.pdf");
+        Assert.True(response.IsSuccessStatusCode);
+        var order = Assert.Single(await OrdersFor(messageId), item => !item.Key.EndsWith(":mapping-exception", StringComparison.Ordinal)).Payload;
+        Assert.Equal(33, order.GetProperty("pallets").GetInt32());
+        Assert.Equal("Bedford", order.GetProperty("sellerName").GetString());
+        Assert.Equal("Barfoots Sefter", order.GetProperty("stallNumber").GetString());
+        Assert.Equal("2026-10-17", order.GetProperty("collectionDate").GetString());
+    }
+
+    [Fact]
+    public async Task Great_bear_waitrose_booking_form_is_an_order()
+    {
+        var messageId = $"greatbear-{Guid.NewGuid():N}";
+        var response = await Post(messageId, "christopher.lawton@greatbear.co.uk", "BOOKING IN FORM.xlsx", "2026-10-16T07:06:00Z",
+            "<p>Please see attached booking.</p>", "BOOKING IN FORM.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Great Bear BOOKING IN FORM 21.10.26.xlsx");
+        Assert.True(response.IsSuccessStatusCode);
+        var order = Assert.Single(await OrdersFor(messageId), item => !item.Key.EndsWith(":mapping-exception", StringComparison.Ordinal)).Payload;
+        Assert.Equal(15, order.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-10-21", order.GetProperty("collectionDate").GetString());
+        Assert.Equal("Great Bear Sheffield", order.GetProperty("sellerName").GetString());
+        Assert.Equal("Waitrose Milton Keynes", order.GetProperty("stallNumber").GetString());
+        Assert.Contains("590169", order.GetProperty("customerPo").GetString());
+    }
+
+    [Fact]
+    public async Task Barfoots_tosca_collection_with_delivery_note_pdf_reads_from_the_subject()
+    {
+        var messageId = $"tosca-{Guid.NewGuid():N}";
+        var response = await Post(messageId, "Kamila.Biohn@barfoots.co.uk",
+            "Tosca Shippers collection on 20.10 from Basingstoke to Jonny Kok, CS-261015012244, TOS510/379312", "2026-10-16T11:14:00Z",
+            "<p>Hi, please collect the Tosca shippers from Basingstoke and deliver to Jonny Kok on 20th.</p>",
+            "Delivery note combined.pdf", "application/pdf", "Tosca Delivery note combined 20.10.26.pdf");
+        Assert.True(response.IsSuccessStatusCode);
+        var order = Assert.Single(await OrdersFor(messageId), item => !item.Key.EndsWith(":mapping-exception", StringComparison.Ordinal)).Payload;
+        Assert.Equal("2026-10-20", order.GetProperty("collectionDate").GetString());
+        Assert.Equal("Basingstoke", order.GetProperty("sellerName").GetString());
+        Assert.Equal("Jonny Kok", order.GetProperty("stallNumber").GetString());
+        Assert.Equal("CS-261015012244", order.GetProperty("customerPo").GetString());
+    }
+
+    [Fact]
+    public async Task Waitrose_figures_estimates_are_not_an_order_card()
+    {
+        var messageId = $"figures-{Guid.NewGuid():N}";
+        var response = await Post(messageId, "diane.birt@waitrose.co.uk", "Figures", "2026-10-16T09:50:00Z",
+            "<p>Please see attached figures.</p>", "SLH wc 18th October 2026 Bracknell Mix.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Waitrose SLH wc 18th October 2026 Bracknell Mix.xlsx");
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Empty(await OrdersFor(messageId));
+    }
+
     private async Task<HttpResponseMessage> PostBody(string messageId, string sender, string subject, string receivedAt, string html)
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write,Tms.Approve");
