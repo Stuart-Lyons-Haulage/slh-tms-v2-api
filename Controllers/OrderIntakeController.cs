@@ -505,12 +505,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         EmailIntakeParseResult parsed,
         CancellationToken ct)
     {
-        if (!IsApprovedAutomaticSource(request) ||
-            IsInternalSender(request.SenderAddress) ||
+        // A known customer's order email that no reader recognises (a market order to
+        // Covent Garden, say) must still get a card, or it vanishes without trace.
+        if (IsInternalSender(request.SenderAddress) ||
             IsInternalPlannerSnapshot(request) ||
-            IsManualOnlySource(request) ||
             LooksLikeNonOrderMessage(request) ||
             !HasOrderEvidence(request))
+            return null;
+        var automatic = IsApprovedAutomaticSource(request) && !IsManualOnlySource(request);
+        if (!automatic && !await IsKnownCustomerSenderAsync(request.SenderAddress, ct))
             return null;
 
         var idempotencyKey = BuildOrderIdempotencyKey(request.MessageId, "mapping-exception");
@@ -582,6 +585,18 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
             string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
         return Regex.IsMatch(source, @"\b(?:CO[- ]?OP|NISA|COVENT\s+GARDEN|SPITALFIELDS|WHOLESALE\s+MARKET|SMALL\s+INDEPENDENT|INDEPENDENT\s+CUSTOMER)\b", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>The sender is a customer contact, or from a customer's email domain, in Master data.</summary>
+    private async Task<bool> IsKnownCustomerSenderAsync(string? senderAddress, CancellationToken ct)
+    {
+        var sender = senderAddress?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(sender) || !sender.Contains('@')) return false;
+        var domain = sender[(sender.LastIndexOf('@') + 1)..];
+        if (await db.CustomerContacts.AsNoTracking().AnyAsync(contact => contact.Email != null && contact.Email.ToLower() == sender, ct)) return true;
+        return await db.CustomerEmailRoutes.AsNoTracking().AnyAsync(route => route.Active &&
+            ((route.SenderEmail != null && route.SenderEmail.ToLower() == sender) ||
+             (route.SenderDomain != null && route.SenderDomain.ToLower().TrimStart('@') == domain)), ct);
     }
 
     private static bool LooksLikeNonOrderMessage(MailboxEmailIntakeRequest request) =>
@@ -914,7 +929,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         // Summer Berry (TSBC) weekly template, e.g. "TSBC - Reynolds": one block per
         // "Monday 19th October depot date" with PO, Total Pallets and Collection time.
-        var summerBerryDepotDate = EmailOrderIntakeService.LooksLikeSummerBerryDepotDateEmail(request);
+        var summerBerryDepotDate = EmailOrderIntakeService.LooksLikeSummerBerryDepotDateEmail(request) ||
+                                   EmailOrderIntakeService.LooksLikeSummerBerryCustomerDetails(request);
 
         // Routine Waitrose depot bookings sent in the email body. Each is tied to the
         // sender that uses that layout, so other mail mentioning Waitrose stays out.

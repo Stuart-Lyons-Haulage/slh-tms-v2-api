@@ -155,6 +155,32 @@ public sealed class SummerBerryDepotDateEmailTests
         Assert.DoesNotContain(result.Orders, order => order.SourceKey.StartsWith("summerberry-depot-", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void SpinneysCustomerDetailsEmail_CreatesOneOvernightOrder()
+    {
+        const string html = """
+            <p>Good morning,</p><p>Please see the details below:</p><p> </p>
+            <p>Customer : Spinneys/JHF order</p><p> </p>
+            <p>Depot Date: 20.10.2026</p>
+            <p>Collection : 19.10 - 17:00</p><p> </p>
+            <p>Pallets : 7</p><p> </p>
+            <p>Adress of delivery : K&amp;N facility</p>
+            <p>Building 1235, Eastern Perimeter Road, London Heathrow</p>
+            <p>Kind Regards</p><p>Antoni Hristov</p>
+            """;
+
+        var result = service.Parse(Request("20.10.2026 Spinneys/JHF delivery", "2026-10-19T07:44:22Z", html));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("SUMMERBERRY", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal(7, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-10-19", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-10-20", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("17:00", order.Payload.GetProperty("requestedTime").GetString());
+        Assert.StartsWith("K&N facility", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("Overnight", order.Payload.GetProperty("routeTiming").GetString());
+    }
+
     private static MailboxEmailIntakeRequest Request(string subject, string receivedAtUtc, string html, string sender = "Antoni.Hristov@summerberry.co.uk") =>
         new(
             $"message-{subject}-{receivedAtUtc}",
