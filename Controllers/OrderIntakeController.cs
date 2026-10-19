@@ -63,14 +63,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         await EnsureSourceEmailEvidence(request, ct);
 
         var parsed = await ParseEmail(request, ct);
-        var bookingOnly = parsed.Orders.Where(order => IsBookingOnly(order.Payload)).ToList();
-        if (bookingOnly.Count > 0)
-        {
-            var held = await HoldNwfBookingsAsync(request, bookingOnly, ct);
-            parsed = parsed with { Orders = parsed.Orders.Except(bookingOnly).ToList() };
-            if (parsed.Orders.Count == 0 && parsed.IgnoredReason is null)
-                return Ok(new { ignored = true, reason = $"{held.Bookings} NWF booking(s) without a Transport PO held in Booking & Capacity", staged = 0, existing = 0, superseded = held.Closed, linked = 0, warnings = parsed.Warnings, outlookCategory = (string?)null });
-        }
         if (parsed.IgnoredReason is not null)
         {
             var linked = 0;
@@ -78,12 +70,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             {
                 linked = await LinkOperationalUpdateToPendingOrders(request, ct);
             }
-
-            // A customer reply with no order content of its own (an ETA chase,
-            // "push back all collections", "send the delivery times") is recorded as a
-            // customer communication and attached to the orders in the same email
-            // thread, instead of becoming an empty review card.
-            linked += await RecordCustomerRequest(request, ct);
 
             // A verified automatic customer source must never disappear from the
             // planner's view merely because a workbook/PDF profile has drifted.
@@ -247,21 +233,16 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             });
         }
 
-        // A resent full booking is the whole booking: a depot that was in the earlier
-        // file but is missing (or zero) now has probably been taken off. Flag it.
-        var removedFromBooking = await FlagRowsMissingFromNewerBooking(parsed.Orders, request, ct);
-
-        if (staged > 0 || superseded > 0 || updatedExisting > 0 || removedFromBooking > 0)
+        if (staged > 0 || superseded > 0 || updatedExisting > 0)
             await db.SaveChangesAsync(ct);
-        var autoApproved = staged > 0 ? await IntakeAutoApproval.PromoteAsync(db, stagingService, createdByKey.Values, logger, ct) : 0;
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order");
 
         logger.LogInformation(
-            "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, removed from booking {Removed}, parser warnings {Warnings}.",
-            request.MessageId, staged, existing, superseded, removedFromBooking, parsed.Warnings.Count);
+            "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.",
+            request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
-        return Accepted(new { ignored = false, staged, existing, superseded, removedFromBooking, autoApproved, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+        return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
     }
 
     private async Task<bool> IsExactLiveOrderDuplicate(JsonElement payload, CancellationToken ct)
@@ -491,7 +472,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         if (staged > 0 || superseded > 0)
             await db.SaveChangesAsync(ct);
-        if (staged > 0) await IntakeAutoApproval.PromoteAsync(db, stagingService, createdByKey.Values, logger, ct);
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order_replay");
 
@@ -513,16 +493,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         EmailIntakeParseResult parsed,
         CancellationToken ct)
     {
-        // A known customer's order email that no reader recognises (a market order to
-        // Covent Garden, say) must still get a card, or it vanishes without trace.
-        if (IsInternalSender(request.SenderAddress) ||
+        if (!IsApprovedAutomaticSource(request) ||
+            IsInternalSender(request.SenderAddress) ||
             IsInternalPlannerSnapshot(request) ||
-            IsNwfTransportPurchaseOrder(request) ||
+            IsManualOnlySource(request) ||
             LooksLikeNonOrderMessage(request) ||
             !HasOrderEvidence(request))
-            return null;
-        var automatic = IsApprovedAutomaticSource(request) && !IsManualOnlySource(request);
-        if (!automatic && !await IsKnownCustomerSenderAsync(request.SenderAddress, ct))
             return null;
 
         var idempotencyKey = BuildOrderIdempotencyKey(request.MessageId, "mapping-exception");
@@ -565,19 +541,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return (item.Id, true, false, warning);
     }
 
-    // Quantities, an upper-case PO with a number ("PO 3175627", "PORD123"), or a booking /
-    // load plan. "PO" must be upper case and followed by a reference containing a digit,
-    // otherwise ordinary words such as "possible" or "post" read as a PO.
-    private static readonly Regex OrderEvidenceRegex = new(
-        @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:total\s+)?(?:pallets?|trolleys?)\s*[:=-]\s*\d{1,4}\b|\b(?-i:PO|PORD)(?:\s*(?:number|no\.?|ref)\b)?\s*[:#.-]?\s*(?=[A-Z0-9/-]*\d)[A-Z0-9/-]{3,}\b|\b(?:booking|load plan)\b",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    internal static bool HasOrderEvidence(MailboxEmailIntakeRequest request)
+    private static bool HasOrderEvidence(MailboxEmailIntakeRequest request)
     {
-        // Judge only what the sender wrote in this message. Replies quote the
-        // original order (PO, pallets, "booking"), so the whole thread would make
-        // every ETA chase or "push collections back" reply look like an order.
-        var source = string.Join("\n", MailboxOwnContent.EvidenceSubject(request.Subject), MailboxOwnContent.Body(request),
+        var source = string.Join("\n", request.Subject, request.BodyText, request.BodyHtml,
             string.Join("\n", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name)));
         var supportedAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true && IsSupportedOrderAttachment(item.Name));
         var trustedCustomerSender = (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
@@ -586,7 +552,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                                     (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
                                     (request.SenderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase);
         return supportedAttachment ||
-               (trustedCustomerSender && OrderEvidenceRegex.IsMatch(source));
+               (trustedCustomerSender && Regex.IsMatch(source, @"\b\d{1,6}\s*(?:pallets?|trolleys?|crates?|trays?)\b|\b(?:PO|PORD)\s*[:#-]?\s*[A-Z0-9/-]{3,}\b|\b(?:booking|load plan)\b", RegexOptions.IgnoreCase));
     }
 
     private static bool IsManualOnlySource(MailboxEmailIntakeRequest request)
@@ -596,75 +562,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return Regex.IsMatch(source, @"\b(?:CO[- ]?OP|NISA|COVENT\s+GARDEN|SPITALFIELDS|WHOLESALE\s+MARKET|SMALL\s+INDEPENDENT|INDEPENDENT\s+CUSTOMER)\b", RegexOptions.IgnoreCase);
     }
 
-    /// <summary>The sender is a customer contact, or from a customer's email domain, in Master data.</summary>
-    private async Task<bool> IsKnownCustomerSenderAsync(string? senderAddress, CancellationToken ct)
-    {
-        var sender = senderAddress?.Trim().ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(sender) || !sender.Contains('@')) return false;
-        var domain = sender[(sender.LastIndexOf('@') + 1)..];
-        if (await db.CustomerContacts.AsNoTracking().AnyAsync(contact => contact.Email != null && contact.Email.ToLower() == sender, ct)) return true;
-        return await db.CustomerEmailRoutes.AsNoTracking().AnyAsync(route => route.Active &&
-            ((route.SenderEmail != null && route.SenderEmail.ToLower() == sender) ||
-             (route.SenderDomain != null && route.SenderDomain.ToLower().TrimStart('@') == domain)), ct);
-    }
-
-    private static bool IsBookingOnly(JsonElement payload) =>
-        payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("bookingOnly", out var value) && value.ValueKind == JsonValueKind.True;
-
-    /// <summary>
-    /// NWF sheet rows with no Transport PO: kept as bookings (capacity held, status PreOrder)
-    /// rather than order cards. Any order card made earlier for the same row is closed.
-    /// </summary>
-    private async Task<(int Bookings, int Closed)> HoldNwfBookingsAsync(MailboxEmailIntakeRequest request, List<ParsedEmailOrder> rows, CancellationToken ct)
-    {
-        var evidenceKey = SourceEvidenceKeyBuilder.For(request.MessageId, request.InternetMessageId);
-        var evidence = await db.StagedImports.FirstOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
-        var bookings = 0;
-        if (evidence is not null)
-            foreach (var row in rows)
-            {
-                var node = JsonNode.Parse(row.Payload.GetRawText())?.AsObject();
-                if (node is null) continue;
-                node["bookingCustomer"] = node["customerCode"]?.ToString();
-                node["customerCode"] = "NWF";
-                if (await NwfBookingReservationSync.UpsertAsync(db, evidence, JsonSerializer.SerializeToElement(node), User.Identity?.Name, ct) is not null) bookings++;
-            }
-
-        static string Key(JsonElement payload, string name) =>
-            payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? (value.GetString() ?? string.Empty).Trim().ToUpperInvariant() : string.Empty;
-        var held = rows.Select(row => (Key(row.Payload, "cratePo"), Key(row.Payload, "collectionDate"), Key(row.Payload, "stallNumber"))).ToHashSet();
-        var cards = await db.StagedImports
-            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview && item.PayloadJson.Contains("NWF_CONFIRMED_ALDI_COLLECTION_WORKBOOK"))
-            .ToListAsync(ct);
-        var closed = 0;
-        foreach (var card in cards)
-        {
-            JsonElement payload;
-            try { using var document = JsonDocument.Parse(card.PayloadJson); payload = document.RootElement.Clone(); }
-            catch (JsonException) { continue; }
-            if (Key(payload, "transportPo").Length > 0) continue;
-            if (!held.Contains((Key(payload, "cratePo"), Key(payload, "collectionDate"), Key(payload, "stallNumber")))) continue;
-            var previous = card.Status;
-            card.Status = StagingStatus.Archived;
-            card.IdempotencyKey = $"archived-booking:{card.Id:N}";
-            card.ReviewedAtUtc = DateTimeOffset.UtcNow;
-            card.ReviewedBy = "NWF booking rule";
-            card.ReviewNote = "No NWF Transport PO yet: held as a booking in Booking & Capacity, not an order.";
-            db.StagedImportEvents.Add(StagingAudit.Create(card, "HeldAsBooking", previous, card.ReviewNote, card.ReviewedBy));
-            closed++;
-        }
-        await db.SaveChangesAsync(ct);
-        return (bookings, closed);
-    }
-
     private static bool LooksLikeNonOrderMessage(MailboxEmailIntakeRequest request) =>
         Regex.IsMatch(string.Join("\n", request.Subject, request.BodyText),
-            @"\b(?:available loads|mailshot|newsletter|out of office|automatic reply)\b", RegexOptions.IgnoreCase) ||
-        // Paperwork and forecasts, not work to plan: "POD Requests", Waitrose "Figures"
-        // (the weekly trunk estimates, e.g. "SLH wc 18th October 2026 Bracknell Mix.xlsx").
-        Regex.IsMatch(request.Subject ?? string.Empty,
-            @"^\s*(?:(?:RE|FW|FWD)\s*:\s*)*(?:POD\s+requests?|proof\s+of\s+delivery|figures|estimates)\b", RegexOptions.IgnoreCase) ||
-        (request.Attachments ?? []).Any(item => Regex.IsMatch(item.Name ?? string.Empty, @"\bwc\b.*\bMix\b", RegexOptions.IgnoreCase));
+            @"\b(?:available loads|mailshot|newsletter|out of office|automatic reply)\b", RegexOptions.IgnoreCase);
 
     private static bool IsSupportedOrderAttachment(string? name) =>
         Path.GetExtension(name ?? string.Empty).ToLowerInvariant() is ".xls" or ".xlsx" or ".xlsm" or ".csv" or ".pdf";
@@ -713,17 +613,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         CancellationToken ct,
         bool reuseMasterDataForReplay = false)
     {
-        // Compare with history only once the sites have been matched to the master list,
-        // so "Selsey" and "NWF-Selsey" are the same collection site.
-        var parsed = await ParseEmailCore(request, ct, reuseMasterDataForReplay);
-        return parsed.Orders.Count == 0 ? parsed : await IntakeAutoApproval.AnnotateAsync(db, parsed, ct);
-    }
-
-    private async Task<EmailIntakeParseResult> ParseEmailCore(
-        MailboxEmailIntakeRequest request,
-        CancellationToken ct,
-        bool reuseMasterDataForReplay = false)
-    {
         // Keep operational status messages out of the order-creation lane while still
         // allowing Intake() to link them to the existing staged order as evidence.
         // The generic parser is used here only for its explicit operational-message
@@ -736,12 +625,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 [],
                 [],
                 "Internal Lyons Collections/SB planner snapshot retained as source evidence; it was not converted into a transport order.");
-
-        if (IsNwfTransportPurchaseOrder(request))
-            return new EmailIntakeParseResult(
-                [],
-                [],
-                "NWF transport purchase order (what NWF will pay for haulage, for invoicing); not a collection order. Source evidence retained.");
 
         var nwfTransfer = IsNwfTransferSource(request);
         var operationalSignal = new EmailOrderIntakeService().Parse(request);
@@ -815,7 +698,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         parsed = ExcludeManualOnlyOrders(parsed);
         if (parsed.Orders.Count == 0)
             return parsed;
-        parsed = HandlingUnitClassifier.Apply(parsed);
 
         PlannerSourceMasterDataResolver? replayResolver = null;
         if (reuseMasterDataForReplay)
@@ -996,40 +878,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                               body.Contains("Total Pallets", StringComparison.OrdinalIgnoreCase) &&
                               body.Contains("Collect from", StringComparison.OrdinalIgnoreCase);
 
-        // Summer Berry (TSBC) weekly template, e.g. "TSBC - Reynolds": one block per
-        // "Monday 19th October depot date" with PO, Total Pallets and Collection time.
-        var summerBerryDepotDate = EmailOrderIntakeService.LooksLikeSummerBerryDepotDateEmail(request) ||
-                                   EmailOrderIntakeService.LooksLikeSummerBerryCustomerDetails(request);
-
-        // Routine Waitrose depot bookings sent in the email body. Each is tied to the
-        // sender that uses that layout, so other mail mentioning Waitrose stays out.
-        var fowlerWelchWaitrose = EmailOrderIntakeService.IsFowlerWelchSender(request) &&
-                                  subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) &&
-                                  body.Contains("PO NUMBER", StringComparison.OrdinalIgnoreCase) &&
-                                  body.Contains("PALLET COUNT", StringComparison.OrdinalIgnoreCase);
-
-        var hallHunterDirectDepot = sender.EndsWith("@primafruit.co.uk", StringComparison.OrdinalIgnoreCase) &&
-                                    subject.Contains("DIRECT DEPOT DELIVERY", StringComparison.OrdinalIgnoreCase);
-
-        var emeryWaitrose = EmailOrderIntakeService.IsEmerySender(request) &&
-                            subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase);
-
-        var doubleHWaitrose = sender.EndsWith("@doubleh.co.uk", StringComparison.OrdinalIgnoreCase) &&
-                              subject.Contains("Waitrose", StringComparison.OrdinalIgnoreCase);
-
-        var sainsburyGm = EmailOrderIntakeService.IsSainsburyGmCollections(request);
-
-        return barfootsWaitroseWave || summerBerryCoop || summerBerryDepotDate ||
-               fowlerWelchWaitrose || hallHunterDirectDepot || emeryWaitrose || doubleHWaitrose || sainsburyGm;
+        return barfootsWaitroseWave || summerBerryCoop;
     }
-
-    /// <summary>
-    /// "NWF SLH Outbound PO dd/MM": NWF's purchase order to Lyons for the transport it has
-    /// had (Runcton Leaf Transport Aldi, etc., with prices). Accounts paperwork, not work to plan.
-    /// </summary>
-    internal static bool IsNwfTransportPurchaseOrder(MailboxEmailIntakeRequest request) =>
-        (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) &&
-        Regex.IsMatch(request.Subject ?? string.Empty, @"\bOutbound\s+PO\b", RegexOptions.IgnoreCase);
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)
     {
@@ -1076,9 +926,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         // A Barfoots market workbook is explicitly outside the automatic lane even
         // though Barfoots Waitrose/Aldi inputs remain approved.
-        // Whole word only: Sainsbury's footer "Sainsbury's Supermarkets Ltd" (and any
-        // "marketing" signature) must not turn a routine booking into a market order.
-        if (!isVerifiedBarfootsWholesaleWorkbook && (Regex.IsMatch(source, @"\bMARKETS?\b") ||
+        if (!isVerifiedBarfootsWholesaleWorkbook && (source.Contains("MARKET", StringComparison.Ordinal) ||
             source.Contains("COVENT GARDEN", StringComparison.Ordinal) ||
             source.Contains("SPITALFIELDS", StringComparison.Ordinal) ||
             source.Contains("WHOLESALE MARKET", StringComparison.Ordinal)))
@@ -1088,12 +936,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // the body, which often only says that a booking form is attached.
         if (SainsburyHaulierPlanParser.IsSainsburyPlanEmail(request) ||
             IsLangmeadCoopBooking(request))
-            return true;
-
-        // Great Bear sends the Waitrose backhaul booking form; "Waitrose" is only inside the sheet.
-        if ((request.SenderAddress ?? string.Empty).EndsWith("@greatbear.co.uk", StringComparison.OrdinalIgnoreCase) &&
-            (request.Attachments ?? []).Any(item => item.IsInline != true &&
-                Path.GetExtension(item.Name ?? string.Empty).ToLowerInvariant() is ".xlsx" or ".xls" or ".xlsm"))
             return true;
 
         return source.Contains("WAITROSE", StringComparison.Ordinal)
@@ -1282,14 +1124,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var matchKeys = allOrders
             .SelectMany(order => ReadMatchKeys(order.Payload))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        // Rows of a resent full booking (e.g. Greenhouse "GHS Aldi Bookings" sent
-        // again by a colleague) replace the earlier pending row for the same depot.
-        var bookingRows = allOrders
-            .Select(order => BookingSnapshotIdentity.Row(order.Payload))
-            .Where(row => row is not null)
-            .Cast<string>()
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (naturalKeys.Count == 0 && matchKeys.Count == 0 && bookingRows.Count == 0) return 0;
+        if (naturalKeys.Count == 0 && matchKeys.Count == 0) return 0;
 
         var candidates = await db.StagedImports
             .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
@@ -1313,17 +1148,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                                      ReadText(root, "amendmentMatchKey") is { Length: > 0 } candidateAmendmentKey &&
                                      matchKeys.Contains(CanonicalMatchKey(candidateAmendmentKey));
                 var nwfBusinessMatch = missingOrders.Any(order => NwfBusinessIdentityMatches(root, order.Payload));
-                var bookingRowMatch = bookingRows.Count > 0 &&
-                                      BookingSnapshotIdentity.Row(root) is { } candidateRow &&
-                                      bookingRows.Contains(candidateRow);
-                if (!naturalMatch && !stableMatch && !amendmentMatch && !nwfBusinessMatch && !bookingRowMatch)
+                if (!naturalMatch && !stableMatch && !amendmentMatch && !nwfBusinessMatch)
                     continue;
 
                 var previous = candidate.Status;
                 candidate.Status = StagingStatus.Archived;
                 candidate.ReviewedAtUtc = now;
-                candidate.ReviewedBy = stableMatch || amendmentMatch || nwfBusinessMatch || bookingRowMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
-                candidate.ReviewNote = stableMatch || amendmentMatch || nwfBusinessMatch || bookingRowMatch
+                candidate.ReviewedBy = stableMatch || amendmentMatch || nwfBusinessMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
+                candidate.ReviewNote = stableMatch || amendmentMatch || nwfBusinessMatch
                     ? $"Superseded by a newer/amended Info mailbox message ({currentMessageId}). Original evidence retained."
                     : $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
                 db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
@@ -1605,275 +1437,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             OccurredAtUtc = now
         });
         await db.SaveChangesAsync(ct);
-    }
-
-    private static readonly JsonSerializerOptions CommunicationJson = new(JsonSerializerDefaults.Web);
-
-    /// <summary>
-    /// For a resent full booking (same customer, delivery date and sender company),
-    /// flags earlier rows whose depot is no longer in the newer file. Pending rows get a
-    /// review warning; approved rows get an audit event and one customer-communication
-    /// record listing them, so a planner can cancel or keep them. Nothing is cancelled
-    /// automatically. Returns the number of rows flagged.
-    /// </summary>
-    private async Task<int> FlagRowsMissingFromNewerBooking(
-        IReadOnlyCollection<ParsedEmailOrder> orders,
-        MailboxEmailIntakeRequest request,
-        CancellationToken ct)
-    {
-        var incoming = orders
-            .Select(order => (Booking: BookingSnapshotIdentity.Booking(order.Payload), Row: BookingSnapshotIdentity.Row(order.Payload), Collection: BookingSnapshotIdentity.CollectionKey(order.Payload)))
-            .Where(item => item.Booking is not null && item.Row is not null)
-            .ToList();
-        if (incoming.Count == 0) return 0;
-
-        var bookings = incoming.Select(item => item.Booking!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var rows = incoming.Select(item => item.Row!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var collections = incoming.Where(item => item.Collection is not null).Select(item => item.Collection!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var sender = request.SenderAddress ?? string.Empty;
-        var domain = sender.Contains('@') ? sender[(sender.LastIndexOf('@') + 1)..].Trim() : string.Empty;
-        if (domain.Length == 0) return 0;
-
-        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
-        var since = received.AddDays(-7);
-        var candidates = await db.StagedImports
-            .Where(item => item.EntityType == "order" &&
-                           item.ReceivedAtUtc >= since &&
-                           (item.Status == StagingStatus.PendingReview || item.Status == StagingStatus.Approved || item.Status == StagingStatus.Promoted) &&
-                           item.PayloadJson.Contains(domain))
-            .ToListAsync(ct);
-
-        var receivedLocal = TimeZoneInfo.ConvertTime(received, LondonTime()).ToString("dd/MM HH:mm");
-        var who = string.IsNullOrWhiteSpace(request.SenderName) ? request.SenderAddress : request.SenderName;
-        var actor = $"Booking resend {CompactKey(request.MessageId)}";
-        if (actor.Length > 200) actor = actor[..200];
-        var liveFlags = new List<object>();
-        var flagged = 0;
-
-        foreach (var candidate in candidates)
-        {
-            // Rows already replaced earlier in this request are tracked as Archived.
-            if (candidate.Status is not (StagingStatus.PendingReview or StagingStatus.Approved or StagingStatus.Promoted)) continue;
-            JsonNode? node;
-            try { node = JsonNode.Parse(candidate.PayloadJson); }
-            catch (JsonException) { continue; }
-            if (node is not JsonObject payload) continue;
-            var root = JsonSerializer.SerializeToElement(payload);
-
-            if (string.Equals(ReadText(root, "sourceMessageId"), request.MessageId, StringComparison.Ordinal)) continue;
-            if (BookingSnapshotIdentity.Booking(root) is not { } booking || !bookings.Contains(booking)) continue;
-            if (BookingSnapshotIdentity.Row(root) is not { } row || rows.Contains(row)) continue;
-            if (BookingSnapshotIdentity.CollectionKey(root) is not { } collection || !collections.Contains(collection)) continue;
-            var candidateReceived = DateTimeOffset.TryParse(ReadText(root, "sourceReceivedAtUtc") ?? ReadText(root, "sourceEmailReceivedAt"), out var parsedReceived)
-                ? parsedReceived
-                : candidate.ReceivedAtUtc;
-            if (candidateReceived >= received) continue;
-            if (await db.StagedImportEvents.AnyAsync(evt => evt.StagedImportId == candidate.Id && evt.Actor == actor, ct)) continue;
-
-            var destination = ReadText(root, "stallNumber") ?? ReadText(root, "destination") ?? "This depot";
-            var note = $"Not in the newer booking from {who} ({receivedLocal}): {destination} may have been taken off. Confirm with the customer before planning.";
-            if (candidate.Status == StagingStatus.PendingReview)
-            {
-                var warnings = payload["intakeWarnings"] as JsonArray ?? new JsonArray();
-                warnings.Add(note);
-                payload["intakeWarnings"] = warnings;
-                payload["missingFromNewerBooking"] = new JsonObject
-                {
-                    ["messageId"] = request.MessageId,
-                    ["receivedAtUtc"] = received.ToString("O"),
-                    ["sender"] = request.SenderAddress
-                };
-                candidate.PayloadJson = payload.ToJsonString();
-            }
-            else
-            {
-                liveFlags.Add(new { stagingId = candidate.Id, reference = ReadText(root, "poNumber"), destination, pallets = root.TryGetProperty("pallets", out var palletValue) && palletValue.ValueKind == JsonValueKind.Number ? palletValue.GetInt32() : (int?)null });
-            }
-
-            db.StagedImportEvents.Add(new StagedImportEvent
-            {
-                StagedImportId = candidate.Id,
-                EventType = "MissingFromNewerBooking",
-                PreviousStatus = candidate.Status,
-                NewStatus = candidate.Status,
-                PayloadJson = JsonSerializer.Serialize(new { request.MessageId, request.Subject, request.ReceivedAtUtc, request.SenderAddress }),
-                Note = note,
-                Actor = actor
-            });
-            flagged++;
-        }
-
-        if (liveFlags.Count > 0)
-        {
-            var key = $"communication:{request.MessageId}:booking-change";
-            if (key.Length > 200) key = key[..200];
-            if (!await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct))
-            {
-                var summary = $"Booking resent by {who} ({receivedLocal}) no longer includes {liveFlags.Count} approved order(s). Check whether they are cancelled.";
-                var communication = new StagedImport
-                {
-                    EntityType = "communication",
-                    IdempotencyKey = key,
-                    Source = $"Info mailbox booking change / {sender.Trim()}",
-                    ReceivedAtUtc = received,
-                    PayloadJson = JsonSerializer.Serialize(new
-                    {
-                        source = new { request.MessageId, request.InternetMessageId, request.Mailbox, request.SenderAddress, request.SenderName, request.Subject, request.ReceivedAtUtc, request.WebLink, request.ConversationId },
-                        ownText = summary,
-                        extraction = new { purpose = "BookingChange" },
-                        linkedOrders = liveFlags
-                    }, CommunicationJson)
-                };
-                db.StagedImports.Add(communication);
-                db.StagedImportEvents.Add(StagingAudit.Create(communication, "Received", null, summary, "Mailbox intake"));
-            }
-        }
-
-        return flagged;
-    }
-
-    /// <summary>
-    /// Records a customer email that carries no order of its own as a customer
-    /// communication, and links it to the orders from the same Outlook conversation.
-    /// Pending orders show it as a review warning; approved orders get an audit event.
-    /// Returns the number of orders linked.
-    /// </summary>
-    private async Task<int> RecordCustomerRequest(MailboxEmailIntakeRequest request, CancellationToken ct)
-    {
-        if (!IsApprovedAutomaticSource(request) ||
-            IsInternalSender(request.SenderAddress) ||
-            IsInternalPlannerSnapshot(request) ||
-            LooksLikeNonOrderMessage(request) ||
-            HasOrderEvidence(request))
-            return 0;
-
-        var ownText = MailboxOwnContent.Body(request);
-        if (string.IsNullOrWhiteSpace(ownText)) return 0;
-
-        var extraction = new CustomerCommunicationExtractionService().Extract(request);
-        var threadOrders = await FindConversationOrders(request, ct);
-        if (threadOrders.Count == 0 && extraction.Purpose is not ("Request" or "EtaUpdate" or "Exception"))
-            return 0;
-
-        var snippet = Regex.Replace(ownText, @"\s+", " ").Trim();
-        var signOff = Regex.Match(snippet, @"\b(?:kind|best|warm)?\s*regards\b|\bmany thanks\b|\bthank you\b|\bthanks\b", RegexOptions.IgnoreCase);
-        if (signOff.Success && signOff.Index > 20) snippet = snippet[..signOff.Index].Trim(' ', ',', '.', '!');
-        if (snippet.Length > 300) snippet = snippet[..300] + "…";
-        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
-        var receivedLocal = TimeZoneInfo.ConvertTime(received, LondonTime()).ToString("dd/MM HH:mm");
-        var who = string.IsNullOrWhiteSpace(request.SenderName) ? request.SenderAddress : request.SenderName;
-        var note = $"Customer request {receivedLocal} from {who}: {snippet}";
-
-        var key = $"communication:{request.MessageId}";
-        if (key.Length > 200) key = key[..200];
-        if (!await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct))
-        {
-            var payload = JsonSerializer.Serialize(new
-            {
-                source = new
-                {
-                    request.MessageId, request.InternetMessageId, request.Mailbox, request.SenderAddress, request.SenderName,
-                    request.Subject, request.ReceivedAtUtc, request.WebLink, request.ConversationId,
-                    attachments = (request.Attachments ?? []).Select(item => new { item.Name, item.ContentType, item.IsInline, item.Size })
-                },
-                ownText = ownText.Length <= 4000 ? ownText : ownText[..4000],
-                extraction,
-                linkedOrders = threadOrders.Select(order => new { stagingId = order.Item.Id, order.Reference, status = order.Item.Status.ToString() })
-            }, CommunicationJson);
-            var communication = new StagedImport
-            {
-                EntityType = "communication",
-                IdempotencyKey = key,
-                PayloadJson = payload,
-                Source = $"Info mailbox customer request / {(request.SenderAddress ?? "unknown sender").Trim()}",
-                ReceivedAtUtc = received
-            };
-            db.StagedImports.Add(communication);
-            db.StagedImportEvents.Add(StagingAudit.Create(communication, "Received", null, note, "Mailbox intake"));
-        }
-
-        var actor = $"Customer request {CompactKey(request.MessageId)}";
-        if (actor.Length > 200) actor = actor[..200];
-        var linked = 0;
-        foreach (var (item, _) in threadOrders)
-        {
-            if (await db.StagedImportEvents.AnyAsync(evt => evt.StagedImportId == item.Id && evt.Actor == actor, ct))
-                continue;
-
-            if (item.Status == StagingStatus.PendingReview)
-            {
-                var node = JsonNode.Parse(item.PayloadJson)?.AsObject() ?? new JsonObject();
-                var requests = node["customerRequests"] as JsonArray ?? new JsonArray();
-                requests.Add(new JsonObject
-                {
-                    ["receivedAtUtc"] = received.ToString("O"),
-                    ["sender"] = request.SenderAddress,
-                    ["subject"] = request.Subject,
-                    ["text"] = snippet,
-                    ["messageId"] = request.MessageId
-                });
-                node["customerRequests"] = requests;
-                var warnings = node["intakeWarnings"] as JsonArray ?? new JsonArray();
-                warnings.Add(note);
-                node["intakeWarnings"] = warnings;
-                item.PayloadJson = node.ToJsonString();
-            }
-
-            db.StagedImportEvents.Add(new StagedImportEvent
-            {
-                StagedImportId = item.Id,
-                EventType = "CustomerRequestLinked",
-                PreviousStatus = item.Status,
-                NewStatus = item.Status,
-                PayloadJson = JsonSerializer.Serialize(new { request.MessageId, request.Subject, request.ReceivedAtUtc, request.SenderAddress, text = snippet }),
-                Note = note.Length <= 1000 ? note : note[..1000],
-                Actor = actor
-            });
-            linked++;
-        }
-
-        await db.SaveChangesAsync(ct);
-        return linked;
-    }
-
-    /// <summary>Orders (pending, approved or live) whose source email is in the same
-    /// Outlook conversation as this message, excluding parser-review placeholders.</summary>
-    private async Task<List<(StagedImport Item, string? Reference)>> FindConversationOrders(MailboxEmailIntakeRequest request, CancellationToken ct)
-    {
-        var conversationId = request.ConversationId?.Trim();
-        if (string.IsNullOrWhiteSpace(conversationId)) return [];
-
-        var since = (request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).AddDays(-21);
-        var candidates = await db.StagedImports
-            .Where(item => item.EntityType == "order" &&
-                           item.ReceivedAtUtc >= since &&
-                           (item.Status == StagingStatus.PendingReview || item.Status == StagingStatus.Approved || item.Status == StagingStatus.Promoted) &&
-                           item.PayloadJson.Contains(conversationId))
-            .OrderByDescending(item => item.ReceivedAtUtc)
-            .Take(200)
-            .ToListAsync(ct);
-
-        var result = new List<(StagedImport, string?)>();
-        foreach (var candidate in candidates)
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(candidate.PayloadJson);
-                var root = document.RootElement;
-                if (!string.Equals(ReadText(root, "sourceConversationId"), conversationId, StringComparison.Ordinal)) continue;
-                if (string.Equals(ReadText(root, "sourceMessageId"), request.MessageId, StringComparison.Ordinal)) continue;
-                if (string.Equals(ReadText(root, "intakeStatus"), "MappingException", StringComparison.OrdinalIgnoreCase)) continue;
-                result.Add((candidate, ReadText(root, "poNumber") ?? ReadText(root, "customerPo")));
-            }
-            catch (JsonException) { }
-        }
-        return result;
-    }
-
-    private static TimeZoneInfo LondonTime()
-    {
-        try { return TimeZoneInfo.FindSystemTimeZoneById("Europe/London"); }
-        catch (TimeZoneNotFoundException) { return TimeZoneInfo.Utc; }
     }
 
     private async Task<int> LinkOperationalUpdateToPendingOrders(MailboxEmailIntakeRequest request, CancellationToken ct)
