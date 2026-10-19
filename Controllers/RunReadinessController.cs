@@ -42,7 +42,10 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
         var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.TryGetValue(id, out var vehicle) && IsVor(vehicle));
         var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.TryGetValue(id, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName));
         var stopsMissingCoordinates = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
-        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && stopsMissingCoordinates == 0 && pendingForDay == 0;
+        var stopsMissingAddresses = loads.Sum(x => x.Stops.Count(stop => string.IsNullOrWhiteSpace(stop.Address)));
+        // Samsara dispatch is address-based. Coordinates remain useful TMS
+        // enrichment, but they must not block a route with a valid address.
+        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && stopsMissingAddresses == 0 && pendingForDay == 0;
 
         PlanLockInfo? planLock = null;
         try { planLock = await PlanLockStore.GetAsync(db, day, ct); } catch { db.ChangeTracker.Clear(); }
@@ -63,6 +66,7 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
             vorConflicts,
             tachoConcerns,
             stopsMissingCoordinates,
+            stopsMissingAddresses,
             unreviewedOrders = pendingForDay,
             planLock
         });
