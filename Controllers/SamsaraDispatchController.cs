@@ -412,8 +412,8 @@ public sealed class SamsaraDispatchController(
                     candidate.Site.ExternalCode,
                     candidate.Site.DriverTextName ?? candidate.Site.Name,
                     candidate.Site.CollectionAddress!,
-                    (double)candidate.Site.Latitude!.Value,
-                    (double)candidate.Site.Longitude!.Value,
+                    null,
+                    null,
                     candidate.Site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters), ct);
                 await SaveMappingAsync("Site", candidate.Site.Id, result.AddressId ?? result.ExternalId, candidate.Site.Name, ct);
                 siteResults.Add(new { reference = candidate.Site.ExternalCode, status = result.Created ? "created" : "updated" });
