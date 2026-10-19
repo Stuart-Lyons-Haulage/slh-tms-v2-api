@@ -6,7 +6,7 @@ namespace Slh.Tms.Api.Middleware;
 
 public sealed class ApiLatencyMiddleware(RequestDelegate next)
 {
-    public async Task InvokeAsync(HttpContext context, TmsMetrics metrics)
+    public async Task InvokeAsync(HttpContext context, TmsMetrics metrics, RequestLatencyMonitor latency)
     {
         var started = Stopwatch.GetTimestamp();
         var failed = false;
@@ -29,6 +29,7 @@ public sealed class ApiLatencyMiddleware(RequestDelegate next)
                 ? StatusCodes.Status500InternalServerError
                 : context.Response.StatusCode;
             metrics.RecordApiEndpointLatency(elapsedMs, context.Request.Method, route, statusCode);
+            latency.Record(context.Request.Method, route, elapsedMs, statusCode);
 
             if (context.Request.Path.Equals("/api/v1/order-intake/email", StringComparison.OrdinalIgnoreCase))
                 metrics.RecordEmailOrderIntake(!failed && statusCode < 400);
