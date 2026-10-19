@@ -98,7 +98,7 @@ public static class HandlingUnitClassifier
                 return (count.Value, Text(payload, "unitCountType") ?? declaredUnit);
         }
         foreach (var (field, unit) in new[] { ("trays", "Trays"), ("crates", "Crates") })
-            if (Int(payload, field) is > 0 and var explicitCount) return (explicitCount.Value, unit);
+            if (Int(payload, field) is int explicitCount && explicitCount > 0) return (explicitCount, unit);
         var text = string.Join("\n", Text(payload, "driverInstructions"), Text(payload, "sourceBlockText"), Text(payload, "sourceBodyText"), Text(payload, "notes"));
         var match = ItemCountRegex.Match(text);
         if (!match.Success) return null;
