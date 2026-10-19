@@ -174,6 +174,7 @@ builder.Services.AddHostedService<DependencyTelemetrySampler>();
 builder.Services.AddHostedService<CustomerCommsScheduler>();
 builder.Services.AddHostedService<NightlyArchiveBackgroundService>();
 builder.Services.AddSingleton<InfoMailboxGraphPollingService>();
+builder.Services.AddSingleton<OutlookIntakeTags>();
 builder.Services.AddHostedService(services => services.GetRequiredService<InfoMailboxGraphPollingService>());
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
