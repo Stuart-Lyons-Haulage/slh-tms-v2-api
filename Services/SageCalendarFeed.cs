@@ -210,6 +210,15 @@ public sealed class SageCalendarFeed(IHttpClientFactory httpClientFactory, IData
     private static string TypeOf(CalendarEvent item, string? driverName)
     {
         var summary = item.Summary;
+        // "Ben Joshua Madge - Sick leave": the type is the side without the name (Sage may
+        // carry middle names Driver Master doesn't have).
+        var parts = Regex.Split(summary, @"\s+[-–:|]\s+");
+        if (parts.Length >= 2)
+        {
+            var nameTokens = driverName is null ? [] : Tokens(driverName);
+            var typePart = parts.FirstOrDefault(part => nameTokens.Count == 0 ? part != parts[0] : !Tokens(part).Any(nameTokens.Contains));
+            if (!string.IsNullOrWhiteSpace(typePart)) return typePart.Trim().Length > 40 ? typePart.Trim()[..40] : typePart.Trim();
+        }
         if (driverName is not null)
             foreach (var token in driverName.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 summary = Regex.Replace(summary, $@"\b{Regex.Escape(token)}\b", string.Empty, RegexOptions.IgnoreCase);
