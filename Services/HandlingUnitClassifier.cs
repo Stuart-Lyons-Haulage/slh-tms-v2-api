@@ -75,6 +75,46 @@ public static class HandlingUnitClassifier
         return null;
     }
 
+    // A count of the items themselves: "8,316 trays", "110 Potato Shipper", "600 IFCO crates".
+    // "26 pallets of trays" is a pallet count, not a tray count, so it does not match.
+    private static readonly Regex ItemCountRegex = new(
+        @"(?<![\d,.])(?<qty>\d{1,3}(?:,\d{3})+|\d{1,6})\s*(?:x\s*)?(?<unit>(?:(?:euro\s*pool|green|black|ifco|potato|rental|dirty|empty)\s+){0,2}(?:trays?|crates?|shippers?))\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// How many trays / crates / shippers the order is for, when known - kept apart from the
+    /// pallet (space) count, which customers often don't give for these jobs.
+    /// </summary>
+    public static (int Count, string Unit)? UnitCount(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return null;
+        var pallets = Int(payload, "pallets");
+        var declared = Text(payload, "handlingUnitType") ?? Text(payload, "unitType");
+        var declaredUnit = UnitName(declared);
+        foreach (var field in new[] { "unitCount", "handlingUnitQuantity" })
+        {
+            var count = Int(payload, field);
+            if (count is > 0 && declaredUnit is not null && !(field == "handlingUnitQuantity" && count == pallets))
+                return (count.Value, Text(payload, "unitCountType") ?? declaredUnit);
+        }
+        foreach (var (field, unit) in new[] { ("trays", "Trays"), ("crates", "Crates") })
+            if (Int(payload, field) is int explicitCount && explicitCount > 0) return (explicitCount, unit);
+        var text = string.Join("\n", Text(payload, "driverInstructions"), Text(payload, "sourceBlockText"), Text(payload, "sourceBodyText"), Text(payload, "notes"));
+        var match = ItemCountRegex.Match(text);
+        if (!match.Success) return null;
+        var qty = int.Parse(match.Groups["qty"].Value.Replace(",", string.Empty, StringComparison.Ordinal), CultureInfo.InvariantCulture);
+        return qty > 0 ? (qty, UnitName(match.Groups["unit"].Value) ?? "Units") : null;
+    }
+
+    private static string? UnitName(string? value)
+    {
+        var lower = (value ?? string.Empty).ToLowerInvariant();
+        if (lower.Contains("shipper")) return "Shippers";
+        if (lower.Contains("tray") || lower.Contains("euro pool") || lower.Contains("europool")) return "Trays";
+        if (lower.Contains("crate") || lower.Contains("ifco")) return "Crates";
+        return null;
+    }
+
     public static bool IsSouthboundCollectionUnit(string? unit) => unit is "Trays" or "Crates";
 
     /// <summary>Label every order in a parse result. Pallet orders are left as they are.</summary>
@@ -89,7 +129,7 @@ public static class HandlingUnitClassifier
     {
         var unit = UnitFromOrderDescription(order.Payload);
         var hasLines = order.Payload.TryGetProperty("sourceLines", out var lines) && lines.ValueKind == JsonValueKind.Array && lines.GetArrayLength() > 1;
-        if (unit is null && !hasLines) return order;
+        if (unit is null && !hasLines && UnitCount(order.Payload) is null) return order;
 
         var root = JsonNode.Parse(order.Payload.GetRawText())?.AsObject();
         if (root is null) return order;
@@ -101,6 +141,12 @@ public static class HandlingUnitClassifier
             root["handlingUnitType"] ??= unit;
             var quantity = Int(order.Payload, "handlingUnitQuantity") ?? Int(order.Payload, "pallets");
             if (unit == "Trolleys" && quantity is > 0) root["trolleys"] ??= quantity;
+        }
+
+        if (UnitCount(order.Payload) is { } items && Int(order.Payload, "unitCount") is null)
+        {
+            root["unitCount"] = items.Count;
+            root["unitCountType"] = items.Unit;
         }
 
         var southbound = IsSouthboundCollectionUnit(unit) ||

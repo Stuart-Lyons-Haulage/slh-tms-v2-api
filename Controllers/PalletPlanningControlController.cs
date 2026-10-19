@@ -127,6 +127,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 loadUnitType = handling.LoadUnitType,
                 palletColourKey = handling.ColourKey,
                 palletRuleSource = handling.RuleSource,
+                // Trays / crates / shippers as counted by the customer, separate from pallet spaces
+                // (which they often don't give). palletsStated false = space still to be worked out.
+                unitCount = detail?.UnitCount,
+                unitCountType = detail?.UnitCountType,
+                palletsStated = ordered > 0,
                 source = detail?.Source,
                 receivedAtUtc = detail?.UpdatedAtUtc ?? order.CreatedAtUtc,
                 lateAddition = late,
@@ -364,7 +369,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 var planningReason = Text(root, "planningWindowReason", "pmReason");
                 var runsOvernight = Bool(root, "runsOvernight", "overnightRoute");
                 var lineNote = BuildOrderReferenceNote(root, reference);
-                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight, lineNote);
+                var items = HandlingUnitClassifier.UnitCount(root);
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight, lineNote, items?.Count, items?.Unit);
             }
             catch (JsonException) { }
         }
@@ -800,7 +806,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight, string LineNote);
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight, string LineNote, int? UnitCount = null, string? UnitCountType = null);
     private async Task<Dictionary<Guid, List<OrderSourceLine>>> ReadCurrentSourceLines(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
     {
         var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
