@@ -111,6 +111,7 @@ public sealed class InfoMailboxGraphPollingService(
     IHttpClientFactory httpClientFactory,
     InfoMailboxGraphOptions options,
     InfoMailboxGraphHealthState health,
+    OutlookIntakeTags outlookTags,
     ILogger<InfoMailboxGraphPollingService> logger) : BackgroundService
 {
     private readonly SemaphoreSlim pollGate = new(1, 1);
@@ -352,10 +353,17 @@ public sealed class InfoMailboxGraphPollingService(
             }
             await MarkIntakeCompletedAsync(db, evidenceKey, ct);
             ingested++;
+            await outlookTags.TagAfterIntakeAsync(client, token.Token, options.Mailbox, db, message.Id, ct);
             }
             logger.LogInformation("Info mailbox Graph poll {PollId} completed chunk through message {MessageIndex} of {Total}.", pollId, messageIndex, seen);
         }
 
+        stage = "Outlook tags";
+        try { await outlookTags.SweepAsync(client, token.Token, options.Mailbox, db, ct); }
+        catch (Exception tagException) when (tagException is not OperationCanceledException)
+        {
+            logger.LogWarning(tagException, "Outlook tag sweep failed; intake is unaffected.");
+        }
         health.Success(seen, ingested);
         logger.LogInformation(
             "Info mailbox Graph poll {PollId} completed in {ElapsedMilliseconds} ms: {Seen} message(s) seen, {Ingested} newly ingested.",
