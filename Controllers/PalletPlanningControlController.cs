@@ -259,6 +259,24 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         await db.SaveChangesAsync(ct);
         db.ChangeTracker.Clear();
 
+        // Learn from a genuine new placement (not a quantity tweak): what the planner chose.
+        if (previousPallets == 0 && request.Pallets > 0)
+        {
+            try
+            {
+                await PlannerLearning.RecordAsync(db, new PlannerLearning.Decision(
+                    request.Date, order.Id, order.Reference, order.CustomerCode, Collection(detail, order), Destination(detail, order),
+                    PlanningGroup(detail, order), load.Id, load.Reference, PlannerLearning.RunPattern(load.Reference),
+                    request.Pallets, PlannerLearning.Weekday(request.Date), now, User.Identity?.Name), ct);
+                db.ChangeTracker.Clear();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Planner learning could not record an allocation decision; planning is unaffected.");
+                db.ChangeTracker.Clear();
+            }
+        }
+
         await EnsureOrderOnRun(load, order, detail, ct);
         var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
 
