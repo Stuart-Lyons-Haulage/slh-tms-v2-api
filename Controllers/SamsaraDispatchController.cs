@@ -875,6 +875,7 @@ public sealed class SamsaraDispatchController(
             // bounded so a route with many stops cannot spend the whole API request in
             // a serial GET -> POST/PATCH loop.
             var addressFallbackBySiteId = new HashSet<Guid>();
+            var samsaraAddressByStopId = new Dictionary<Guid, string>();
             if (samsara.AddressSyncEnabled)
             {
                 using var addressGate = new SemaphoreSlim(4, 4);
@@ -935,12 +936,68 @@ public sealed class SamsaraDispatchController(
                         addressFallbackBySiteId.Add(addressResult.SiteId);
                     }
                 }
+
+                // A route can contain a physical address that did not resolve to a
+                // Site Master record (or whose site address sync failed). Create a
+                // reusable Samsara Address for that stop so route creation remains
+                // address-based and does not depend on single-use coordinates.
+                var stopAddressesToSync = physicalStops
+                    .Where(item => !string.IsNullOrWhiteSpace(item.Representative.Address) &&
+                                   (item.Representative.SiteId is null ||
+                                    !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value)))
+                    .GroupBy(item => item.Representative.StopId)
+                    .Select(group => group.First())
+                    .ToList();
+
+                var stopAddressResults = await Task.WhenAll(stopAddressesToSync.Select(async item =>
+                {
+                    await addressGate.WaitAsync(ct);
+                    try
+                    {
+                        var representative = item.Representative;
+                        var result = await samsara.UpsertAddressAsync(
+                            new SamsaraAddressRequest(
+                                representative.StopId,
+                                $"STOP-{representative.StopId:N}",
+                                representative.Name,
+                                representative.Address!,
+                                null,
+                                null,
+                                samsara.StopRadiusMeters),
+                            ct);
+                        return new StopAddressSyncResult(representative.StopId, result.AddressId);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        logger.LogWarning(exception, "Samsara stop address sync failed for stop {StopId}.", item.Representative.StopId);
+                        return new StopAddressSyncResult(item.Representative.StopId, null);
+                    }
+                    finally
+                    {
+                        addressGate.Release();
+                    }
+                }));
+
+                foreach (var stopAddressResult in stopAddressResults)
+                {
+                    if (!string.IsNullOrWhiteSpace(stopAddressResult.AddressId))
+                    {
+                        samsaraAddressByStopId[stopAddressResult.StopId] = stopAddressResult.AddressId;
+                        await SaveMappingAsync(
+                            "LoadStop",
+                            stopAddressResult.StopId,
+                            stopAddressResult.AddressId,
+                            physicalStops.First(item => item.Representative.StopId == stopAddressResult.StopId).Representative.Name,
+                            ct);
+                    }
+                }
             }
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
             var missingLocations = new List<string>();
             var missingSchedule = new List<string>();
             var addressFallbacks = new List<string>();
+            var missingSamsaraLocations = new List<string>();
             var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
             var departLastStop = !string.Equals(options.RouteCompletionCondition, "arriveLastStop", StringComparison.OrdinalIgnoreCase);
 
@@ -973,6 +1030,16 @@ public sealed class SamsaraDispatchController(
                     samsaraAddressBySiteId.TryGetValue(siteId, out samsaraAddressId);
                     if (addressFallbackBySiteId.Contains(siteId))
                         addressFallbacks.Add(physicalStopName);
+                }
+                if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
+                    samsaraAddressByStopId.TryGetValue(representative.StopId, out var stopAddressId))
+                    samsaraAddressId = stopAddressId;
+
+                if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
+                    (representative.Latitude is null || representative.Longitude is null))
+                {
+                    missingSamsaraLocations.Add(physicalStopName);
+                    continue;
                 }
 
                 var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
@@ -1011,6 +1078,13 @@ public sealed class SamsaraDispatchController(
                 {
                     message = $"Samsara needs a physical address for every route stop. Complete the Site Master address for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
                     missingStops = missingLocations
+                });
+
+            if (missingSamsaraLocations.Count > 0)
+                return BadRequest(new
+                {
+                    message = $"Samsara could not obtain a reusable address or coordinates for: {string.Join(", ", missingSamsaraLocations.Distinct(StringComparer.OrdinalIgnoreCase))}. Run Master Data / Address synchronisation, then retry.",
+                    missingStops = missingSamsaraLocations
                 });
 
             if (!options.RecomputeScheduledTimes && missingSchedule.Count > 0)
@@ -1627,6 +1701,10 @@ public sealed class SamsaraDispatchController(
 
     private sealed record AddressSyncResult(
         Guid SiteId,
+        string? AddressId);
+
+    private sealed record StopAddressSyncResult(
+        Guid StopId,
         string? AddressId);
 
     private sealed record SiteAddressCandidate(Site Site);
