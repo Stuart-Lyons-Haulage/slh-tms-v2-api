@@ -173,7 +173,18 @@ public sealed class SummerBerryDepotDateEmailTests
         Assert.Equal(7, order.Payload.GetProperty("pallets").GetInt32());
         Assert.Equal("2026-10-19", order.Payload.GetProperty("collectionDate").GetString());
         Assert.Equal("2026-10-20", order.Payload.GetProperty("deliveryDate").GetString());
+        // "Collection : 19.10 - 17:00" is a time, not the collection site.
+        Assert.DoesNotContain("19.10", order.Payload.GetProperty("sellerName").GetString() ?? string.Empty);
     }
+
+    [Theory]
+    [InlineData("19.10 - 17:00", true)]
+    [InlineData("19/10/2026", true)]
+    [InlineData("17:00", true)]
+    [InlineData("Groves Farm", false)]
+    [InlineData("Unit 7, Bognor", false)]
+    public void Collection_values_that_are_dates_or_times_are_not_sites(string value, bool isDate) =>
+        Assert.Equal(isDate, EmailOrderIntakeService.LooksLikeDateOrTime(value));
 
     private static MailboxEmailIntakeRequest Request(string subject, string receivedAtUtc, string html, string sender = "Antoni.Hristov@summerberry.co.uk") =>
         new(
