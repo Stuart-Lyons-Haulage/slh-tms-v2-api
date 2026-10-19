@@ -664,8 +664,8 @@ public sealed class SamsaraDispatchController(
         {
             var stop = orderedStops[index];
             var resolved = ResolveLocation(stop, sites);
-            if (resolved.Latitude is null || resolved.Longitude is null)
-                return BadRequest(new { message = $"Samsara CSV needs coordinates for every route stop. Complete Site Master/geofence mapping for {stop.Name}." });
+            if (string.IsNullOrWhiteSpace(resolved.Address))
+                return BadRequest(new { message = $"Samsara CSV needs a physical address for every route stop. Complete the Site Master address for {stop.Name}." });
 
             orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
             var stopNotes = BuildStopNotes(stop, order, options.DefaultStopDwellMinutes);
@@ -696,8 +696,8 @@ public sealed class SamsaraDispatchController(
                 Csv(FormatCsvTime(departure)),
                 Csv(stopNotes),
                 Csv(addressName),
-                Csv(resolved.Latitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                Csv(resolved.Longitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                Csv(resolved.Latitude?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                Csv(resolved.Longitude?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 Csv(resolved.Address)
             }));
         }
@@ -964,7 +964,7 @@ public sealed class SamsaraDispatchController(
                     missingSchedule.Add(physicalStopName);
                     continue;
                 }
-                if (representative.Latitude is null || representative.Longitude is null)
+                if (string.IsNullOrWhiteSpace(representative.Address))
                 {
                     missingLocations.Add(physicalStopName);
                     continue;
@@ -999,8 +999,8 @@ public sealed class SamsaraDispatchController(
                     physicalStopName,
                     samsaraAddressId,
                     representative.Address ?? CleanStopName(stop.Name),
-                    representative.Latitude.Value,
-                    representative.Longitude.Value,
+                    representative.Latitude,
+                    representative.Longitude,
                     representativeSite is not null
                         ? representativeSite.GeofenceRadiusMetres ?? samsara.StopRadiusMeters
                         : samsara.StopRadiusMeters,
@@ -1012,7 +1012,7 @@ public sealed class SamsaraDispatchController(
             if (missingLocations.Count > 0)
                 return BadRequest(new
                 {
-                    message = $"Samsara needs coordinates for every route stop. Complete Site Master/geofence mapping for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    message = $"Samsara needs a physical address for every route stop. Complete the Site Master address for: {string.Join(", ", missingLocations.Distinct(StringComparer.OrdinalIgnoreCase))}.",
                     missingStops = missingLocations
                 });
 
