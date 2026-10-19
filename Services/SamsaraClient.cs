@@ -333,13 +333,17 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             }
             else
             {
-                payload["singleUseLocation"] = new
+                var singleUseLocation = new Dictionary<string, object?>
                 {
-                    address = stop.Address,
-                    latitude = stop.Latitude,
-                    longitude = stop.Longitude,
-                    radiusMeters = stop.RadiusMeters
+                    ["address"] = stop.Address,
+                    ["radiusMeters"] = stop.RadiusMeters
                 };
+                if (stop.Latitude is double latitude && stop.Longitude is double longitude)
+                {
+                    singleUseLocation["latitude"] = latitude;
+                    singleUseLocation["longitude"] = longitude;
+                }
+                payload["singleUseLocation"] = singleUseLocation;
             }
 
             if (stop.ScheduledArrivalTime is not null)
@@ -641,8 +645,8 @@ public sealed record SamsaraRouteStopRequest(
     string Name,
     string? AddressId,
     string Address,
-    double Latitude,
-    double Longitude,
+    double? Latitude,
+    double? Longitude,
     int RadiusMeters,
     DateTimeOffset? ScheduledArrivalTime,
     DateTimeOffset? ScheduledDepartureTime,
