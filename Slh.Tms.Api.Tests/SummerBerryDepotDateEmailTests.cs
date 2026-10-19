@@ -155,6 +155,26 @@ public sealed class SummerBerryDepotDateEmailTests
         Assert.DoesNotContain(result.Orders, order => order.SourceKey.StartsWith("summerberry-depot-", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void SpinneysCustomerDetailsEmail_IsLetThroughTheIntakeGate()
+    {
+        const string html = """
+            <p>Good morning,</p><p>Please see the details below:</p>
+            <p>Customer : Spinneys/JHF order</p>
+            <p>Depot Date: 20.10.2026</p>
+            <p>Collection : 19.10 - 17:00</p>
+            <p>Pallets : 7</p>
+            <p>Adress of delivery : K&amp;N facility</p>
+            <p>Kind Regards</p>
+            """;
+        var request = Request("20.10.2026 Spinneys/JHF delivery", "2026-10-19T07:44:22Z", html);
+        Assert.True(EmailOrderIntakeService.LooksLikeSummerBerryCustomerDetails(request));
+        var order = Assert.Single(service.Parse(request).Orders);
+        Assert.Equal(7, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-10-19", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-10-20", order.Payload.GetProperty("deliveryDate").GetString());
+    }
+
     private static MailboxEmailIntakeRequest Request(string subject, string receivedAtUtc, string html, string sender = "Antoni.Hristov@summerberry.co.uk") =>
         new(
             $"message-{subject}-{receivedAtUtc}",

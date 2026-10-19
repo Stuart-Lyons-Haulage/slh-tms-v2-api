@@ -358,6 +358,18 @@ public sealed class InfoMailboxGraphPollingService(
             logger.LogInformation("Info mailbox Graph poll {PollId} completed chunk through message {MessageIndex} of {Total}.", pollId, messageIndex, seen);
         }
 
+        stage = "duplicate review copies";
+        try
+        {
+            var duplicates = await PendingDuplicateSweep.RunAsync(db, ct);
+            if (duplicates > 0) logger.LogInformation("Closed {Count} review copies of orders that were already approved.", duplicates);
+        }
+        catch (Exception duplicateException) when (duplicateException is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(duplicateException, "Duplicate review check failed; intake is unaffected.");
+        }
+
         stage = "Outlook tags";
         try { await outlookTags.SweepAsync(client, token.Token, options.Mailbox, db, ct); }
         catch (Exception tagException) when (tagException is not OperationCanceledException)

@@ -366,6 +366,26 @@ public sealed class EmailOrderIntakeService
         return orders;
     }
 
+    private static readonly Regex SbDetailCustomer = new(@"^Customer\s*:\s*(?<v>.+)$", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailDepotDate = new(@"^Depot\s*Date\s*:\s*(?<d>\d{1,2})[./-](?<m>\d{1,2})[./-](?<y>\d{2,4})", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailCollection = new(@"^Collection\s*:\s*(?<d>\d{1,2})[./-](?<m>\d{1,2})(?:[./-](?<y>\d{2,4}))?\s*-?\s*(?<t>\d{1,2}[:.]\d{2})?", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailPallets = new(@"^Pallets\s*:\s*(?<n>\d{1,3})\b", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailAddress = new(@"^Ad+ress\s+of\s+delivery\s*:\s*(?<v>.+)$", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Summer Berry one-off customer details, e.g. "20.10.2026 Spinneys/JHF delivery"
+    /// (Customer : / Depot Date: / Pallets :). Read by the labelled-body parser; this lets
+    /// the email through the intake gate so it reaches it.
+    /// </summary>
+    internal static bool LooksLikeSummerBerryCustomerDetails(MailboxEmailIntakeRequest request)
+    {
+        if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk")) return false;
+        var lines = OrderContentLines(NormaliseBody(request.BodyText, request.BodyHtml));
+        return lines.Any(line => SbDetailCustomer.IsMatch(line)) &&
+               lines.Any(line => SbDetailDepotDate.IsMatch(line)) &&
+               lines.Any(line => SbDetailPallets.IsMatch(line));
+    }
+
     /// <summary>
     /// True when a Summer Berry email carries at least one "… depot date" order block
     /// with a pallet total in its own content (not only in quoted reply history).
