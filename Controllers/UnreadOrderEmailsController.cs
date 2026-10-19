@@ -32,17 +32,25 @@ public sealed class UnreadOrderEmailsController(
         var result = new List<UnreadEmail>();
         foreach (var item in placeholders)
         {
-            var payload = Read(item.PayloadJson);
-            var messageId = Text(payload, "sourceMessageId", "sourceEmailMessageId");
-            result.Add(new UnreadEmail(
-                item.Id,
-                Text(payload, "sourceSender") ?? item.Source?.Split(" / ").LastOrDefault(),
-                Text(payload, "sourceEmailSubject", "sourceSubject"),
-                DateTimeOffset.TryParse(Text(payload, "sourceEmailReceivedAt"), out var received) ? received : item.ReceivedAtUtc,
-                Text(payload, "intakeWarning"),
-                Text(payload, "customerCode"),
-                messageId is null ? 0 : await CapturedCountAsync(messageId, ct),
-                await EvidenceAsync(payload, ct) is not null));
+            // One odd card must never empty the whole list (the Orders screen hides the buttons then).
+            try
+            {
+                var payload = Read(item.PayloadJson);
+                var messageId = Text(payload, "sourceMessageId", "sourceEmailMessageId", "messageId");
+                result.Add(new UnreadEmail(
+                    item.Id,
+                    Text(payload, "sourceSender") ?? item.Source?.Split(" / ").LastOrDefault(),
+                    Text(payload, "sourceEmailSubject", "sourceSubject", "subject"),
+                    DateTimeOffset.TryParse(Text(payload, "sourceEmailReceivedAt", "sourceReceivedAtUtc"), out var received) ? received : item.ReceivedAtUtc,
+                    Text(payload, "intakeWarning"),
+                    Text(payload, "customerCode"),
+                    messageId is null ? 0 : await CapturedCountAsync(messageId, ct),
+                    await EvidenceAsync(payload, ct) is not null));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                intakeLogger.LogWarning(ex, "Unread-email card {Id} could not be summarised.", item.Id);
+            }
         }
         return Ok(result.OrderByDescending(item => item.ReceivedAtUtc));
     }
@@ -87,7 +95,7 @@ public sealed class UnreadOrderEmailsController(
     {
         var placeholder = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id && item.Status == StagingStatus.PendingReview, ct);
         if (placeholder is null) return NotFound(new { message = "That card has already been dealt with." });
-        var messageId = Text(Read(placeholder.PayloadJson), "sourceMessageId", "sourceEmailMessageId");
+        var messageId = Text(Read(placeholder.PayloadJson), "sourceMessageId", "sourceEmailMessageId", "messageId");
         var captured = messageId is null ? 0 : await CapturedCountAsync(messageId, ct);
         if (captured == 0) return BadRequest(new { message = "No orders from this email are in the TMS yet, so the card stays open." });
         await CloseAsync(id, $"Closed by {User.Identity?.Name}: {captured} order(s) from this email are already captured.", ct);
@@ -103,11 +111,12 @@ public sealed class UnreadOrderEmailsController(
     {
         var pending = await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
+            .Select(item => new StagedImport { Id = item.Id, Source = item.Source, IdempotencyKey = item.IdempotencyKey, PayloadJson = item.PayloadJson, ReceivedAtUtc = item.ReceivedAtUtc, EntityType = item.EntityType })
             .ToListAsync(ct);
         return pending.Where(item =>
         {
             var payload = Read(item.PayloadJson);
-            var fromEmail = Text(payload, "sourceMessageId", "sourceEmailMessageId") is not null;
+            var fromEmail = Text(payload, "sourceMessageId", "sourceEmailMessageId", "messageId") is not null;
             var placeholder = (item.Source?.StartsWith("Info mailbox mapping exception", StringComparison.Ordinal) ?? false) ||
                               item.IdempotencyKey.EndsWith(":mapping-exception", StringComparison.Ordinal);
             var undated = !IsDate(Text(payload, "collectionDate")) && !IsDate(Text(payload, "deliveryDate"));
@@ -142,10 +151,11 @@ public sealed class UnreadOrderEmailsController(
             var byKey = await db.StagedImports.AsNoTracking().FirstOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == key, ct);
             if (byKey is not null) return byKey;
         }
-        var messageId = Text(payload, "sourceMessageId", "sourceEmailMessageId");
+        var messageId = Text(payload, "sourceMessageId", "sourceEmailMessageId", "messageId");
         if (messageId is null) return null;
-        var fallback = SourceEvidenceKeyBuilder.For(messageId, Text(payload, "sourceInternetMessageId"));
-        return await db.StagedImports.AsNoTracking().FirstOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == fallback, ct);
+        var internetId = Text(payload, "sourceInternetMessageId", "internetMessageId");
+        var keys = new[] { SourceEvidenceKeyBuilder.For(messageId, internetId), SourceEvidenceKeyBuilder.Legacy(messageId) }.Distinct().ToList();
+        return await db.StagedImports.AsNoTracking().FirstOrDefaultAsync(item => item.EntityType == "email-evidence" && keys.Contains(item.IdempotencyKey), ct);
     }
 
     private async Task CloseAsync(Guid id, string note, CancellationToken ct)
