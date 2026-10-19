@@ -37,6 +37,31 @@ public sealed class VerifiedWorkbookIntakeParserTests
             order.Payload.GetProperty("temperatureRequirement").GetString() == "+3℃");
     }
 
+    [Fact]
+    public void BarfootsAldiWorkbook_StagesCardiffFromSefterAndLeythorneAcrossDaysEvenWithoutTheAldiPrefix()
+    {
+        // 46289 = 24/09/2026 (received 23/09); 46291 = 26/09/2026, three days out, previously dropped.
+        var rows = """
+            <row r="3">
+              <c r="B3" t="inlineStr"><is><t>Depot Description</t></is></c>
+              <c r="D3" t="inlineStr"><is><t>Collection Site</t></is></c>
+              <c r="E3" t="inlineStr"><is><t>Temp.</t></is></c>
+              <c r="F3" t="inlineStr"><is><t>Pallets</t></is></c>
+            </row>
+            <row r="4"><c r="A4"><v>46289</v></c><c r="B4" t="inlineStr"><is><t>ALDI CARDIFF</t></is></c><c r="D4" t="inlineStr"><is><t>Sefter North</t></is></c><c r="E4" t="inlineStr"><is><t>+3℃</t></is></c><c r="F4"><v>7</v></c></row>
+            <row r="5"><c r="A5"><v>46291</v></c><c r="B5" t="inlineStr"><is><t>Cardiff</t></is></c><c r="D5" t="inlineStr"><is><t>Leythorne</t></is></c><c r="E5" t="inlineStr"><is><t>+3℃</t></is></c><c r="F5"><v>9</v></c></row>
+            """;
+        var request = BarfootsRequest("barfoots-aldi-cardiff", BuildXlsx("Aldi", rows));
+
+        var result = new IntakeParser().TryParse(request);
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result!.Orders.Count);
+        Assert.All(result.Orders, order => Assert.Equal("Aldi Cardiff", order.Payload.GetProperty("stallNumber").GetString()));
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Sefter North" && order.Payload.GetProperty("collectionDate").GetString() == "2026-09-24");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Leythorne" && order.Payload.GetProperty("collectionDate").GetString() == "2026-09-26");
+    }
+
     [Theory]
     [InlineData("Aldi Confirmed Booking for delivery Thursday 24.09.2026")]
     [InlineData("Aldi Pumpkins Confirmed Booking for delivery Thursday 24.09.2026")]
