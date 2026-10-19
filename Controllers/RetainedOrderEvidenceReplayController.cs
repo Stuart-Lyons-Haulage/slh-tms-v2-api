@@ -429,7 +429,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         }
     }
 
-    private static MailboxEmailIntakeRequest Rehydrate(string payloadJson)
+    internal static MailboxEmailIntakeRequest Rehydrate(string payloadJson)
     {
         using var document = JsonDocument.Parse(payloadJson);
         var root = document.RootElement;
