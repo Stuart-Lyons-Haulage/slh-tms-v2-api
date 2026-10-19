@@ -514,6 +514,7 @@ public sealed class EmailOrderIntakeService
         var collectFrom = ExtractMatch(CollectFromRegex, body, "site");
         var explicitCollection = ExtractBodyCollectionPoint(body)
             ?? (!string.IsNullOrWhiteSpace(collectFrom) ? CleanSourceLine(collectFrom) : ExtractCollectionSiteFromLabel(collectionLabel));
+        if (explicitCollection is not null && LooksLikeDateOrTime(explicitCollection)) explicitCollection = null;
 
         // Summer Berry TSBC/CO-OP emails sometimes repeat the destination as
         // “Collect from” in the body. The sender/master-data mapping is authoritative:
@@ -530,7 +531,8 @@ public sealed class EmailOrderIntakeService
                 explicitCollection = senderCollectionSite;
             payload["stallNumber"] = "TSBC CO-OP";
         }
-        if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
+        // "Collection : 19.10 - 17:00" is when, not where.
+        if (explicitCollection is not null && LooksLikeDateOrTime(explicitCollection))
             explicitCollection = null;
         if (!string.IsNullOrWhiteSpace(explicitCollection) && !order.SourceKey.StartsWith("barfoots-waitrose-", StringComparison.OrdinalIgnoreCase))
         {
@@ -686,7 +688,8 @@ public sealed class EmailOrderIntakeService
         if (isSummerBerryTsbcCoop &&
             (string.IsNullOrWhiteSpace(explicitCollection) || IsGenericSummerBerryCollection(explicitCollection)))
             explicitCollection = senderCollectionSite;
-        if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
+        // "Collection : 19.10 - 17:00" is when, not where.
+        if (explicitCollection is not null && LooksLikeDateOrTime(explicitCollection))
             explicitCollection = null;
         var explicitDeliveryDate = ExtractLabelValue(body, "deliverydate", "depotdate", "deliver", "delivery");
         var deliveryAddress = ExtractLabelBlock(body, "addressofdelivery", "adressofdelivery", "deliveryaddress", "deliverto", "destination", "shipto");
@@ -1110,6 +1113,10 @@ public sealed class EmailOrderIntakeService
     private static string? FindNisaAttachmentName(MailboxEmailIntakeRequest request) =>
         (request.Attachments ?? []).FirstOrDefault(item => item.IsInline != true &&
             (item.Name ?? string.Empty).Contains("NISA", StringComparison.OrdinalIgnoreCase))?.Name;
+
+    /// <summary>"19.10 - 17:00", "19/10/2026", "17:00", "Mon 19th": a date or time, not a site.</summary>
+    internal static bool LooksLikeDateOrTime(string value) =>
+        Regex.IsMatch(value.Trim(), @"^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s+)?(?:\d{1,2}(?:st|nd|rd|th)?(?:[./-]\d{1,2}(?:[./-]\d{2,4})?)?|\d{1,2}[:.]\d{2})\b(?:\s*(?:-|@|at)?\s*\d{1,2}[:.]\d{2})?(?:\s*(?:am|pm|hrs))?\s*$", RegexOptions.IgnoreCase);
 
     private static string? ExtractBodyCollectionPoint(string body)
     {
