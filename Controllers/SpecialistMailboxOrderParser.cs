@@ -920,7 +920,8 @@ public sealed class SpecialistMailboxOrderParser
                 do
                 {
                     var rows = ReadRows(reader);
-                    if (!rows.Any(row => RowContains(row, "Transport Booking")) || !rows.Any(row => RowContains(row, "Waitrose P.O"))) continue;
+                    bool Has(string text) => rows.Any(row => row.Any(cell => NormaliseKey(CellText(cell)).Contains(NormaliseKey(text), StringComparison.Ordinal)));
+                    if (!Has("Transport Booking") || !Has("Waitrose P.O")) continue;
                     recognised = true;
                     object? Value(string label)
                     {
