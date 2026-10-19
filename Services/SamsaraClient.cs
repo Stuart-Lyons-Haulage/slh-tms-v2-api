@@ -333,17 +333,15 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             }
             else
             {
-                var singleUseLocation = new Dictionary<string, object?>
+                // Samsara accepts the physical address as the route stop location.
+                // Keep TMS coordinates for internal planning/geofencing, but do not
+                // send them in the provider payload: stale or incomplete coordinates
+                // can cause Samsara to reject an otherwise valid address.
+                payload["singleUseLocation"] = new Dictionary<string, object?>
                 {
                     ["address"] = stop.Address,
                     ["radiusMeters"] = stop.RadiusMeters
                 };
-                if (stop.Latitude is double latitude && stop.Longitude is double longitude)
-                {
-                    singleUseLocation["latitude"] = latitude;
-                    singleUseLocation["longitude"] = longitude;
-                }
-                payload["singleUseLocation"] = singleUseLocation;
             }
 
             if (stop.ScheduledArrivalTime is not null)
@@ -403,8 +401,9 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             }
         };
 
-        if (address.Latitude is not null) body["latitude"] = address.Latitude.Value;
-        if (address.Longitude is not null) body["longitude"] = address.Longitude.Value;
+        // Samsara resolves the physical address. TMS latitude/longitude remain
+        // internal planning data and are intentionally excluded from the provider
+        // request so address-based dispatch is accepted consistently.
         return body;
     }
 
