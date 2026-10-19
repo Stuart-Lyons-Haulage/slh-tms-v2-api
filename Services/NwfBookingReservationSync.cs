@@ -10,7 +10,10 @@ public static class NwfBookingReservationSync
 {
     public static async Task<Guid?> UpsertAsync(TmsDbContext db, StagedImport staged, JsonElement payload, string? actor, CancellationToken ct, Guid? sourceMovementId = null)
     {
-        if (!string.Equals(Text(payload, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase)) return null;
+        // NWF's crate sheet also lists ALDI tray rows (customer ALDI on the order); they are
+        // still NWF bookings.
+        if (!string.Equals(Text(payload, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(Text(payload, "intakeProfile"), "NWF_CONFIRMED_ALDI_COLLECTION_WORKBOOK", StringComparison.OrdinalIgnoreCase)) return null;
         var isEquipmentPayload = CrateTrayBookingRules.IsPayload(payload);
         if (!isEquipmentPayload && !IsCancellation(payload)) return null;
         var jobType = Text(payload, "jobType") ?? "NWF booking";

@@ -64,10 +64,40 @@ public sealed class RealAttachmentIntakeTests : IClassFixture<CustomWebFactory>
         Assert.Equal("Trays", ifco.GetProperty("loadUnitType").GetString());
         Assert.Equal("Southbound collections", ifco.GetProperty("planningGroup").GetString());
 
-        var aldi = orders.Where(item => item.GetProperty("customerCode").GetString() == "ALDI").ToList();
-        Assert.NotEmpty(aldi);
-        Assert.All(aldi, item => Assert.Equal("Euro Pool Bedford", item.GetProperty("sellerName").GetString()));
+        // Only rows with an NWF Transport PO are orders; the 19th has just the one (IFCO to Runcton).
+        Assert.All(orders, item => Assert.False(string.IsNullOrWhiteSpace(item.GetProperty("transportPo").GetString())));
+        Assert.Single(orders, item => item.GetProperty("collectionDate").GetString() == "2026-10-19");
+        Assert.DoesNotContain(orders, item => item.GetProperty("customerCode").GetString() == "ALDI");
         Assert.Contains(orders, item => item.GetProperty("loadUnitType").GetString() == "Crates");
+
+        // The ALDI rows without a PO are held as bookings (capacity), not orders.
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var bookings = await db.BookingReservations.AsNoTracking()
+            .Where(row => row.CollectionDate == new DateOnly(2026, 10, 19) && row.CratePurchaseOrder == "PO00508349")
+            .ToListAsync();
+        var booking = Assert.Single(bookings);
+        Assert.Equal(BookingReservationStatus.PreOrder, booking.Status);
+        Assert.Equal(33, booking.ReservedUnits);
+    }
+
+    [Fact]
+    public async Task Nwf_booking_without_a_transport_po_lapses_after_its_day()
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var booking = new BookingReservation
+        {
+            CustomerCode = "NWF", BookingType = "NWF confirmed ALDI tray collection", StableBookingKey = $"test-{Guid.NewGuid():N}",
+            CollectionDate = new DateOnly(2026, 10, 18), ReservedUnits = 33, CompositionJson = "{}", Status = BookingReservationStatus.PreOrder
+        };
+        db.BookingReservations.Add(booking);
+        await db.SaveChangesAsync();
+
+        await Slh.Tms.Api.Services.NwfBookingExpiry.RunAsync(db, new DateTimeOffset(2026, 10, 19, 12, 0, 0, TimeSpan.Zero), CancellationToken.None);
+
+        var after = await db.BookingReservations.AsNoTracking().SingleAsync(row => row.Id == booking.Id);
+        Assert.Equal(BookingReservationStatus.Expired, after.Status);
     }
 
     [Fact]

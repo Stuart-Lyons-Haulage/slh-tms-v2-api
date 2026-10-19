@@ -370,6 +370,18 @@ public sealed class InfoMailboxGraphPollingService(
             logger.LogWarning(duplicateException, "Duplicate review check failed; intake is unaffected.");
         }
 
+        stage = "lapsed NWF bookings";
+        try
+        {
+            var lapsed = await NwfBookingExpiry.RunAsync(db, DateTimeOffset.UtcNow, ct);
+            if (lapsed > 0) logger.LogInformation("{Count} NWF booking(s) lapsed: collection day passed without a Transport PO.", lapsed);
+        }
+        catch (Exception expiryException) when (expiryException is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(expiryException, "NWF booking expiry check failed; intake is unaffected.");
+        }
+
         stage = "Outlook tags";
         try { await outlookTags.SweepAsync(client, token.Token, options.Mailbox, db, ct); }
         catch (Exception tagException) when (tagException is not OperationCanceledException)
