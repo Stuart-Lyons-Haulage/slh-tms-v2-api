@@ -19,6 +19,16 @@ public sealed class InfoMailboxGraphPollingServiceTests
     }
 
     [Theory]
+    [InlineData("Agnieszka.Zawislan@barfoots.co.uk", true)]
+    [InlineData("planner@sub.barfoots.co.uk", true)]
+    [InlineData("orders@barfoots.co.uk.evil.example", false)]
+    [InlineData("orders@unknown.example", false)]
+    public void Verified_order_source_fallback_keeps_barfoots_visible_to_graph(string? sender, bool expected)
+    {
+        Assert.Equal(expected, InfoMailboxGraphPollingService.IsVerifiedOrderSourceDomain(sender));
+    }
+
+    [Theory]
     [InlineData("joe@lyonshaulage.com", true)]
     [InlineData("joe@ops.lyonshaulage.com", true)]
     [InlineData("joe@lyonshaulage.com.evil.example", false)]

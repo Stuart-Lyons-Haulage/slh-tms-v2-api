@@ -117,6 +117,15 @@ public sealed class InfoMailboxGraphPollingService(
     {
         ".xls", ".xlsx", ".xlsm", ".csv", ".pdf"
     };
+    // These domains have dedicated, review-first parsers in the API. Keep them
+    // in the Graph discovery safety net so a missing/stale SQL route cannot make
+    // a genuine customer email invisible before it reaches Order Review. SQL
+    // routes still govern customer mapping and automation after discovery.
+    private static readonly string[] VerifiedOrderSourceDomains =
+    [
+        "barfoots.co.uk",
+        "nwfltd.co.uk"
+    ];
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -252,8 +261,14 @@ public sealed class InfoMailboxGraphPollingService(
             .Select(route => route.SenderDomain!)
             .ToListAsync(ct);
         var customerDomains = mappedDomains.Select(NormalizeDomain).Where(item => item is not null).Select(item => item!)
+            .Concat(VerifiedOrderSourceDomains)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        logger.LogInformation(
+            "Info mailbox Graph poll {PollId} will scan {DomainCount} customer sender domains; verified parser fallbacks include {FallbackDomains}.",
+            pollId,
+            customerDomains.Count,
+            string.Join(", ", VerifiedOrderSourceDomains));
 
         stage = "Graph mailbox scan";
         var messages = await FetchMessagesAsync(client, token.Token, since, until, customerDomains, ct);
@@ -849,6 +864,9 @@ public sealed class InfoMailboxGraphPollingService(
         return domains.Any(root => senderDomain.Equals(root, StringComparison.OrdinalIgnoreCase) ||
             senderDomain.EndsWith("." + root, StringComparison.OrdinalIgnoreCase));
     }
+
+    internal static bool IsVerifiedOrderSourceDomain(string? senderAddress) =>
+        IsCustomerDomain(senderAddress, VerifiedOrderSourceDomains.ToHashSet(StringComparer.OrdinalIgnoreCase));
 
     private static string? NormalizeDomain(string? value)
     {
