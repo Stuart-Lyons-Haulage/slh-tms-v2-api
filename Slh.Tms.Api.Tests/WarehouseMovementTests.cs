@@ -134,6 +134,36 @@ public sealed class WarehouseMovementTests
         Assert.Equal("Brinklow", reload.To);
     }
 
+    [Fact]
+    public async Task Orders_to_slh_show_on_the_warehouse_whether_or_not_they_are_planned()
+    {
+        await using var db = CreateDb();
+        db.Sites.Add(new Site { ExternalCode = "SLH-FRV", Name = "SLH-Lyons Consolidation Centre FRV", Aliases = "Stuart Lyons Distribution" });
+        var date = new DateOnly(2026, 10, 20);
+        // Coming in, not planned yet (previously never shown).
+        var waiting = new TransportOrder { Reference = "VITA-IN", CustomerCode = "WAITROSE", CollectionDate = date, DeliveryDate = date, Pallets = 9, SellerName = "Vitacress Runcton", StallNumber = "Stuart Lyons Distribution" };
+        // Coming in on a run, but the allocation has no source line (older orders).
+        var planned = new TransportOrder { Reference = "NWF-IN", CustomerCode = "ALDI", CollectionDate = date, DeliveryDate = date, Pallets = 14, SellerName = "Natures Way Foods", StallNumber = "SLH-Lyons Consolidation Centre FRV" };
+        var load = new Load { Reference = "RUN 2 AM", PlanningDate = date };
+        db.AddRange(waiting, planned, load);
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = "planningpalletallocation", IdempotencyKey = Guid.NewGuid().ToString(), Status = StagingStatus.Promoted,
+            PayloadJson = JsonSerializer.Serialize(new { orderId = planned.Id, loadId = load.Id, pallets = 14, date = "2026-10-20", updatedAtUtc = DateTimeOffset.UtcNow })
+        });
+        await db.SaveChangesAsync();
+
+        var result = await new WarehouseMovementService(db).BuildDailyAsync(date, CancellationToken.None);
+
+        Assert.Equal(2, result.Inbound.Count);
+        var onRun = Assert.Single(result.Inbound, x => x.PoReference == "NWF-IN");
+        Assert.Equal("RUN 2 AM", onRun.RunReference);
+        Assert.Equal(14, onRun.PlannedPallets);
+        var notPlanned = Assert.Single(result.Inbound, x => x.PoReference == "VITA-IN");
+        Assert.Equal("Not on a run yet", notPlanned.RunReference);
+        Assert.Equal(23, result.Totals.InboundPallets);
+    }
+
     private static (Guid OrderId, Guid LineId) AddLine(TmsDbContext db, string from, string to, int pallets, string type, string loadReference)
     {
         var staged = new StagedImport { EntityType = "order", IdempotencyKey = Guid.NewGuid().ToString(), Status = StagingStatus.Promoted, PayloadJson = "{}" };
