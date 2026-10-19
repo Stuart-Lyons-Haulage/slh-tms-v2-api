@@ -222,6 +222,14 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<StagedImport>()
             .HasIndex(x => new { x.EntityType, x.Status, x.ReceivedAtUtc })
             .HasDatabaseName("IX_StagedImports_Entity_Status_ReceivedAtUtc");
+        // PERSISTED computed order collection date (migration 088), indexed so date-scoped
+        // pallet reads are an index seek rather than a PayloadJson LIKE scan. Read-only:
+        // the database maintains it from PayloadJson. Ignored by the in-memory test provider.
+        b.Entity<StagedImport>().Property(x => x.CollectionDate)
+            .HasComputedColumnSql("TRY_CONVERT(date, LEFT(JSON_VALUE(PayloadJson, '$.collectionDate'), 10), 23)", stored: true);
+        b.Entity<StagedImport>()
+            .HasIndex(x => new { x.EntityType, x.CollectionDate })
+            .HasDatabaseName("IX_StagedImports_EntityType_CollectionDate");
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
         b.Entity<StagedImportEvent>().HasIndex(x => new { x.StagedImportId, x.OccurredAtUtc });
         b.Entity<StagedImportEvent>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
