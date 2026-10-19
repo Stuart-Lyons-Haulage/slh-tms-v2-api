@@ -341,6 +341,7 @@ builder.Services.AddDataProtection();
 builder.Services.AddHttpClient("SageCalendar", client => { client.Timeout = TimeSpan.FromSeconds(30); });
 builder.Services.AddSingleton<SageCalendarFeed>();
 builder.Services.AddHostedService<SageCalendarSyncService>();
+builder.Services.AddHostedService<SamsaraReconciliationService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
