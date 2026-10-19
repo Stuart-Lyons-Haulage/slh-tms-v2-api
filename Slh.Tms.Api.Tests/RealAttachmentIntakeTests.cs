@@ -47,6 +47,29 @@ public sealed class RealAttachmentIntakeTests : IClassFixture<CustomWebFactory>
         Assert.Empty(await OrdersFor(messageId));
     }
 
+    [Fact]
+    public async Task Nwf_crate_collection_sheet_stages_southbound_tray_and_crate_collections()
+    {
+        var messageId = $"nwf-crates-{Guid.NewGuid():N}";
+        var response = await Post(messageId, "D_CrateControl@nwfltd.co.uk", "SLH collection sheet 19.10.26", "2026-10-19T06:00:00Z",
+            "<p>Please see attached.</p>", "SLH Collection Sheet 19.10.26.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "NWF SLH Collection Sheet 19.10.26.xlsx");
+        Assert.True(response.IsSuccessStatusCode);
+
+        var orders = (await OrdersFor(messageId)).Select(item => item.Payload).ToList();
+        var ifco = Assert.Single(orders, item => (item.GetProperty("customerPo").GetString() ?? string.Empty).StartsWith("PO00508879", StringComparison.Ordinal));
+        Assert.Equal(26, ifco.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-10-19", ifco.GetProperty("collectionDate").GetString());
+        Assert.Equal("Runcton", ifco.GetProperty("stallNumber").GetString());
+        Assert.Equal("Trays", ifco.GetProperty("loadUnitType").GetString());
+        Assert.Equal("Southbound collections", ifco.GetProperty("planningGroup").GetString());
+
+        var aldi = orders.Where(item => item.GetProperty("customerCode").GetString() == "ALDI").ToList();
+        Assert.NotEmpty(aldi);
+        Assert.All(aldi, item => Assert.Equal("Euro Pool Bedford", item.GetProperty("sellerName").GetString()));
+        Assert.Contains(orders, item => item.GetProperty("loadUnitType").GetString() == "Crates");
+    }
+
     private async Task<HttpResponseMessage> Post(string messageId, string sender, string subject, string receivedAt, string html, string name, string type, string fixture)
     {
         var bytes = await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixture));

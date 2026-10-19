@@ -148,9 +148,16 @@ public sealed class SpecialistMailboxOrderParser
     {
         var sender = request.SenderAddress ?? string.Empty;
         var subject = request.Subject ?? string.Empty;
-        if (!sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase) ||
-            !subject.Contains("confirm", StringComparison.OrdinalIgnoreCase))
+        if (!sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase))
+            return null;
+        // Either the "ALDI … confirmed" email for one date, or NWF's crate collection sheet
+        // ("SLH Collection Sheet dd.MM.yy.xlsx"), which lists every crate/tray movement
+        // into the NWF sites for the coming days.
+        var aldiConfirmation = subject.Contains("ALDI", StringComparison.OrdinalIgnoreCase) &&
+                               subject.Contains("confirm", StringComparison.OrdinalIgnoreCase);
+        var collectionSheet = (request.Attachments ?? []).Any(item => item.IsInline != true && IsExcel(item.Name) &&
+                                  Regex.IsMatch(item.Name ?? string.Empty, @"collection\s*sheet", RegexOptions.IgnoreCase));
+        if (!aldiConfirmation && !collectionSheet)
             return null;
 
         // Let the shared body parser route cancellations to review. An original
@@ -158,9 +165,12 @@ public sealed class SpecialistMailboxOrderParser
         if (CancellationInstructionRegex.IsMatch($"{subject}\n{request.BodyText}"))
             return null;
 
-        var planningDate = ExtractNwfConfirmedCollectionDate(request);
-        if (planningDate is null)
+        var planningDate = aldiConfirmation ? ExtractNwfConfirmedCollectionDate(request) : null;
+        if (aldiConfirmation && planningDate is null && !collectionSheet)
             return null;
+        var received = DateOnly.FromDateTime((request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).UtcDateTime);
+        var windowFrom = planningDate ?? received.AddDays(-1);
+        var windowTo = planningDate ?? received.AddDays(14);
 
         var attachments = (request.Attachments ?? [])
             .Where(item => item.IsInline != true &&
@@ -224,15 +234,23 @@ public sealed class SpecialistMailboxOrderParser
                     for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
                     {
                         var row = rows[rowIndex];
-                        if (!string.Equals(CellText(row, customerIndex), "ALDI", StringComparison.OrdinalIgnoreCase))
+                        var sheetCustomer = (CellText(row, customerIndex) ?? string.Empty).Trim();
+                        if (sheetCustomer.Length == 0)
+                            continue;
+                        var isAldi = sheetCustomer.Equals("ALDI", StringComparison.OrdinalIgnoreCase);
+                        // The ALDI confirmation email covers ALDI only; the collection sheet covers everyone.
+                        if (aldiConfirmation && !collectionSheet && !isAldi)
                             continue;
 
                         var collectionDate = CellDate(row, collectionDateIndex);
-                        if (collectionDate != planningDate)
+                        if (collectionDate is null || collectionDate < windowFrom || collectionDate > windowTo)
                             continue;
 
                         var deliveryDate = CellDate(row, deliveryDateIndex) ?? collectionDate.Value;
                         var collectionDepot = CellText(row, depotIndex);
+                        var depotAssumed = false;
+                        // ALDI trays come from Euro Pool Bedford; the sheet leaves the depot blank for them.
+                        if (string.IsNullOrWhiteSpace(collectionDepot) && isAldi) { collectionDepot = "Euro Pool Bedford"; depotAssumed = true; }
                         var sourceSite = CellText(row, siteIndex);
                         var totalPallets = CellInt(row, palletsIndex);
                         var transportPo = CellText(row, transportPoIndex)?.Trim();
@@ -264,15 +282,17 @@ public sealed class SpecialistMailboxOrderParser
                         foreach (var movement in movements)
                         {
                             var rowWarnings = new List<string>();
+                            if (depotAssumed) rowWarnings.Add("Collection depot is blank on the NWF sheet; Euro Pool Bedford assumed for ALDI trays.");
                             if (sites.Count > 1 && !splitIsReconciled)
                                 rowWarnings.Add($"Collection split '{sourceSite}' could not be reconciled to {totalPallets.Value} pallets from the workbook comments; review before approval.");
 
+                            var orderCustomer = isAldi ? "ALDI" : "NWF";
                             var referenceSource = transportPo ?? cratePo ?? StableEmailReference(request.MessageId);
                             var customerPo = $"{referenceSource}/{movement.Site}";
                             var reference = BuildReference(referenceSource, $"{collectionDepot}-{movement.Site}");
                             var naturalKey = WorkbookNaturalKey(
                                 request,
-                                "ALDI",
+                                orderCustomer,
                                 movement.Site,
                                 collectionDepot,
                                 collectionDate.Value,
@@ -281,7 +301,7 @@ public sealed class SpecialistMailboxOrderParser
                                 request,
                                 reference,
                                 customerPo,
-                                "ALDI",
+                                orderCustomer,
                                 collectionDate.Value,
                                 deliveryDate,
                                 movement.Pallets,
@@ -296,15 +316,22 @@ public sealed class SpecialistMailboxOrderParser
                                 rowIndex + 1,
                                 "NWF confirmed ALDI collection workbook",
                                 rowWarnings,
-                                "ALDI");
+                                orderCustomer);
 
                             var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
                             root["transportPo"] = transportPo;
                             root["cratePo"] = cratePo;
                             root["collectionReference"] = collectionReference;
-                            root["jobType"] = "NWF confirmed ALDI tray collection";
+                            root["jobType"] = isAldi ? "NWF confirmed ALDI tray collection" : $"NWF {sheetCustomer} crate/tray collection";
                             root["intakeNaturalKey"] = naturalKey;
                             root["intakeProfile"] = "NWF_CONFIRMED_ALDI_COLLECTION_WORKBOOK";
+                            // Crates and trays come back to the NWF sites: Southbound collections.
+                            root["loadUnitType"] = sheetCustomer.Equals("JS", StringComparison.OrdinalIgnoreCase) ? "Crates" : "Trays";
+                            root["palletType"] = root["loadUnitType"]!.GetValue<string>();
+                            root["crateCustomer"] = sheetCustomer;
+                            root["southboundCollection"] = true;
+                            root["routeLeg"] = "Southbound";
+                            root["planningGroup"] = "Southbound collections";
                             payload = JsonSerializer.SerializeToElement(root);
 
                             orders.Add(new ParsedEmailOrder(
