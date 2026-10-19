@@ -367,6 +367,23 @@ public sealed class SamsaraDispatchController(
         });
     }
 
+    /// <summary>Last TMS / Samsara comparison (drivers, vehicles, trailers both ways).</summary>
+    [HttpGet("reconcile")]
+    public async Task<IActionResult> Reconciliation(CancellationToken ct)
+    {
+        var result = await SamsaraReconciliation.ReadAsync(db, ct);
+        if (result is null) return Ok(new { checkedAtUtc = (DateTimeOffset?)null, configured = samsara.IsConfigured, assetSyncEnabled = options.EnableAssetSync });
+        return Ok(new { result.CheckedAtUtc, result.Drivers, result.Vehicles, result.Trailers, result.Problem, result.Gaps, configured = samsara.IsConfigured, assetSyncEnabled = options.EnableAssetSync });
+    }
+
+    [HttpPost("reconcile")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Reconcile(CancellationToken ct)
+    {
+        var result = await SamsaraReconciliation.RunAsync(db, samsara, User.Identity?.Name ?? "planner", ct);
+        return Ok(new { result.CheckedAtUtc, result.Drivers, result.Vehicles, result.Trailers, result.Problem, result.Gaps, assetSyncEnabled = options.EnableAssetSync });
+    }
+
     [HttpPost("master-data/sync")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SyncMasterData(CancellationToken ct)

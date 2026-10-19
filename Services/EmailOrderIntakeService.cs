@@ -4,6 +4,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
@@ -81,6 +82,29 @@ public sealed class EmailOrderIntakeService
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex ReFwRegex = new(@"^(?:(?:RE|FW|FWD)\s*:\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Summer Berry (TSBC) weekly template: one block per delivery, headed by a
+    // "Monday 19th October depot date" line, followed by PO / Total Pallets /
+    // Collection time lines. The date precedes the label, so the generic
+    // "label: value" parser cannot read it.
+    private static readonly Regex DepotDateBlockHeaderRegex = new(
+        @"^(?:(?<weekday>mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s+)?(?<day>0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+(?<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(?<year>20\d{2}))?\s+depot\s+date\s*[:.]?$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex DepotDateBlockPoRegex = new(
+        @"^PO(?:\s+(?:number|no\.?))?\s*[:#.-]?\s*(?<po>[A-Z0-9][A-Z0-9/-]{2,})\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex DepotDateBlockCollectionWindowRegex = new(
+        @"\bCollection\s+time\s*[:=-]?\s*(?<from>(?:[01]?\d|2[0-3])[:.]\d{2})(?:\s*[-–]\s*(?<to>(?:[01]?\d|2[0-3])[:.]\d{2}))?",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Lines that end the order content: a sign-off or the start of quoted reply
+    // history. Anything below (signatures, registered-office footers, earlier
+    // messages in the thread) must never be read as order data.
+    private static readonly Regex OrderContentEndRegex = new(
+        @"^(?:(?:kind|best|warm)\s+regards|regards|many\s+thanks|thanks|thank\s+you)\b[\s,!.]*$|^(?:from|sent)\s*:\s|^-{2,}\s*original\s+message",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly IReadOnlyDictionary<string, string> SenderDomainCollectionSites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["summerberry.co.uk"] = "Summer Berry",
@@ -189,8 +213,15 @@ public sealed class EmailOrderIntakeService
         if (orders.Count == 0)
             return new EmailIntakeParseResult([], globalWarnings, "No transport order could be identified from this email.");
 
+        // Block-based templates record the exact lines that produced each order.
+        // Apply body-level overrides to those lines only, so one block's details
+        // (or the email signature) cannot overwrite another order.
         orders = orders
-            .Select(order => ApplyPrecedenceOverrides(order, request, body, masterSiteNames ?? []))
+            .Select(order => ApplyPrecedenceOverrides(
+                order,
+                request,
+                PayloadText(order.Payload, "sourceBlockText") ?? body,
+                masterSiteNames ?? []))
             .ToList();
         return new EmailIntakeParseResult(orders, globalWarnings, null);
     }
@@ -243,6 +274,153 @@ public sealed class EmailOrderIntakeService
             }
         }
         return text.ToString().Trim();
+    }
+
+    private static List<ParsedEmailOrder> ParseSummerBerryDepotDateBlocks(
+        MailboxEmailIntakeRequest request,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk"))
+            return [];
+
+        var lines = OrderContentLines(body);
+        var headerIndexes = lines
+            .Select((line, index) => (line, index))
+            .Where(item => DepotDateBlockHeaderRegex.IsMatch(item.line))
+            .Select(item => item.index)
+            .ToList();
+        if (headerIndexes.Count == 0) return [];
+
+        var destination = lines
+            .Take(headerIndexes[0])
+            .Select(line => Regex.Match(line, @"^TSBC\s*[-–]?\s*(?<dest>[A-Za-z][A-Za-z0-9 &'./-]{1,60})$", RegexOptions.IgnoreCase))
+            .Where(match => match.Success)
+            .Select(match => match.Groups["dest"].Value.Trim())
+            .LastOrDefault()
+            ?? SummerBerrySubjectDestination(request.Subject);
+        if (string.IsNullOrWhiteSpace(destination)) return [];
+
+        // Confirmed by SLH planning: Reynolds is collected 08:00-09:00 and delivered
+        // on the depot date (same-day AM job). Other TSBC destinations using this
+        // template are not yet confirmed, so they go to review rather than assumed.
+        var sameDayConfirmed = Regex.IsMatch(destination, @"^Reynolds\b", RegexOptions.IgnoreCase);
+        var orders = new List<ParsedEmailOrder>();
+        for (var i = 0; i < headerIndexes.Count; i++)
+        {
+            var start = headerIndexes[i];
+            var end = i + 1 < headerIndexes.Count ? headerIndexes[i + 1] : lines.Count;
+            var blockLines = lines.Skip(start).Take(end - start).ToList();
+            var header = DepotDateBlockHeaderRegex.Match(blockLines[0]);
+            var depotDate = BuildDate(header.Groups["day"].Value, header.Groups["month"].Value, header.Groups["year"].Value, receivedAt);
+            if (depotDate is null) continue;
+            if (!header.Groups["year"].Success && depotDate.Value < LocalDate(receivedAt).AddDays(-60))
+                depotDate = depotDate.Value.AddYears(1);
+
+            var warnings = new List<string>();
+            if (header.Groups["weekday"].Success)
+            {
+                var statedDay = header.Groups["weekday"].Value[..3].ToUpperInvariant();
+                var actualDay = depotDate.Value.DayOfWeek.ToString()[..3].ToUpperInvariant();
+                if (statedDay != actualDay)
+                    warnings.Add($"Depot date line says '{blockLines[0]}' but {depotDate.Value:dd/MM/yyyy} is a {depotDate.Value.DayOfWeek}; confirm the correct date with Summer Berry before approval.");
+            }
+
+            var blockText = string.Join("\n", blockLines);
+            var po = blockLines
+                .Select(line => DepotDateBlockPoRegex.Match(line))
+                .FirstOrDefault(match => match.Success)?
+                .Groups["po"].Value.Trim().ToUpperInvariant();
+            var pallets = ExtractInt(TotalPalletsRegex, blockText, "qty") ?? ExtractInt(PalletQuantityRegex, blockText, "qty");
+            var window = DepotDateBlockCollectionWindowRegex.Match(blockText);
+            var collectionFrom = window.Success ? NormaliseTime(window.Groups["from"].Value) : null;
+            var collectionTo = window.Success && window.Groups["to"].Success ? NormaliseTime(window.Groups["to"].Value) : null;
+            var explicitCollection = ExtractBodyCollectionPoint(blockText);
+
+            if (string.IsNullOrWhiteSpace(po))
+                warnings.Add("No customer PO/reference was found for this depot date; a stable email reference was generated and should be checked before approval.");
+            if (pallets is null or <= 0)
+                warnings.Add("Total pallets were not stated for this depot date; enter the pallet quantity before approval.");
+            if (explicitCollection is null)
+                warnings.Add("Summer Berry farm was not stated for this order; confirm which Summer Berry site to collect from before planning.");
+            if (!sameDayConfirmed)
+                warnings.Add($"Collection assumed on the {destination} depot date; confirm whether this is a same-day or PM overnight job.");
+
+            var order = BuildStructuredOrder(
+                request,
+                $"summerberry-depot-{NormaliseKey(destination)}-{depotDate.Value:yyyyMMdd}-{NormaliseKey(po ?? (i + 1).ToString(CultureInfo.InvariantCulture))}",
+                "SUMMERBERRY", po, depotDate.Value, depotDate.Value, pallets ?? 0,
+                explicitCollection ?? "Summer Berry", destination, $"TSBC {destination} depot delivery", warnings, collectionFrom);
+            var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(order.Payload.GetRawText()) ?? [];
+            if (sameDayConfirmed)
+            {
+                payload["routeTiming"] = "SameDay";
+                payload["overnightRoute"] = false;
+            }
+            if (collectionFrom is not null && collectionTo is not null)
+                payload["collectionWindow"] = $"{collectionFrom}-{collectionTo}";
+            payload["sourceBlockText"] = blockText;
+            orders.Add(new ParsedEmailOrder(order.SourceKey, order.NaturalKey, JsonSerializer.SerializeToElement(payload), order.Warnings));
+        }
+
+        return orders;
+    }
+
+    private static readonly Regex SbDetailCustomer = new(@"^Customer\s*:\s*(?<v>.+)$", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailDepotDate = new(@"^Depot\s*Date\s*:\s*(?<d>\d{1,2})[./-](?<m>\d{1,2})[./-](?<y>\d{2,4})", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailCollection = new(@"^Collection\s*:\s*(?<d>\d{1,2})[./-](?<m>\d{1,2})(?:[./-](?<y>\d{2,4}))?\s*-?\s*(?<t>\d{1,2}[:.]\d{2})?", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailPallets = new(@"^Pallets\s*:\s*(?<n>\d{1,3})\b", RegexOptions.IgnoreCase);
+    private static readonly Regex SbDetailAddress = new(@"^Ad+ress\s+of\s+delivery\s*:\s*(?<v>.+)$", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Summer Berry one-off customer details, e.g. "20.10.2026 Spinneys/JHF delivery"
+    /// (Customer : / Depot Date: / Pallets :). Read by the labelled-body parser; this lets
+    /// the email through the intake gate so it reaches it.
+    /// </summary>
+    internal static bool LooksLikeSummerBerryCustomerDetails(MailboxEmailIntakeRequest request)
+    {
+        if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk")) return false;
+        var lines = OrderContentLines(NormaliseBody(request.BodyText, request.BodyHtml));
+        return lines.Any(line => SbDetailCustomer.IsMatch(line)) &&
+               lines.Any(line => SbDetailDepotDate.IsMatch(line)) &&
+               lines.Any(line => SbDetailPallets.IsMatch(line));
+    }
+
+    /// <summary>
+    /// True when a Summer Berry email carries at least one "… depot date" order block
+    /// with a pallet total in its own content (not only in quoted reply history).
+    /// Used by the intake gate so this verified body format reaches the parser.
+    /// </summary>
+    internal static bool LooksLikeSummerBerryDepotDateEmail(MailboxEmailIntakeRequest request)
+    {
+        if (!SenderAddressMatchesDomain(request.SenderAddress, "summerberry.co.uk"))
+            return false;
+        var lines = OrderContentLines(NormaliseBody(request.BodyText, request.BodyHtml));
+        return lines.Any(line => DepotDateBlockHeaderRegex.IsMatch(line)) &&
+               lines.Any(line => TotalPalletsRegex.IsMatch(line));
+    }
+
+    // Read only the order content: stop at the sign-off or quoted history so the
+    // signature's registered-office farms and earlier messages are never parsed.
+    private static List<string> OrderContentLines(string body)
+    {
+        var lines = new List<string>();
+        foreach (var raw in (body ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            var line = Regex.Replace(raw, @"\s+", " ").Trim();
+            if (OrderContentEndRegex.IsMatch(line)) break;
+            if (line.Length > 0) lines.Add(line);
+        }
+        return lines;
+    }
+
+    private static string? SummerBerrySubjectDestination(string? subject)
+    {
+        var clean = ReFwRegex.Replace((subject ?? string.Empty).Trim(), string.Empty);
+        var match = Regex.Match(clean, @"^TSBC\s*[-–]\s*(?<dest>.+)$", RegexOptions.IgnoreCase);
+        if (!match.Success) return null;
+        var destination = match.Groups["dest"].Value.Split(" - ", 2)[0].Trim();
+        return destination.Length == 0 ? null : destination;
     }
 
     private static List<ParsedEmailOrder> ParseBarfootsWaitroseWaveBody(
@@ -336,6 +514,7 @@ public sealed class EmailOrderIntakeService
         var collectFrom = ExtractMatch(CollectFromRegex, body, "site");
         var explicitCollection = ExtractBodyCollectionPoint(body)
             ?? (!string.IsNullOrWhiteSpace(collectFrom) ? CleanSourceLine(collectFrom) : ExtractCollectionSiteFromLabel(collectionLabel));
+        if (explicitCollection is not null && LooksLikeDateOrTime(explicitCollection)) explicitCollection = null;
 
         // Summer Berry TSBC/CO-OP emails sometimes repeat the destination as
         // “Collect from” in the body. The sender/master-data mapping is authoritative:
@@ -352,7 +531,8 @@ public sealed class EmailOrderIntakeService
                 explicitCollection = senderCollectionSite;
             payload["stallNumber"] = "TSBC CO-OP";
         }
-        if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
+        // "Collection : 19.10 - 17:00" is when, not where.
+        if (explicitCollection is not null && LooksLikeDateOrTime(explicitCollection))
             explicitCollection = null;
         if (!string.IsNullOrWhiteSpace(explicitCollection) && !order.SourceKey.StartsWith("barfoots-waitrose-", StringComparison.OrdinalIgnoreCase))
         {
@@ -443,6 +623,15 @@ public sealed class EmailOrderIntakeService
         string sourceText,
         DateTimeOffset receivedAt)
     {
+        var summerBerryDepotBlocks = ParseSummerBerryDepotDateBlocks(request, body, receivedAt);
+        if (summerBerryDepotBlocks.Count > 0) return summerBerryDepotBlocks;
+
+        var emery = ParseEmeryWaitroseBody(request, body, receivedAt);
+        if (emery.Count > 0) return emery;
+
+        var sainsburyGm = ParseSainsburyGmCollections(request, body, receivedAt);
+        if (sainsburyGm.Count > 0) return sainsburyGm;
+
         var hallHunter = ParseHallHunterDirectDepot(request, rawPo, body, sourceText, receivedAt);
         if (hallHunter.Count > 0) return hallHunter;
 
@@ -499,7 +688,8 @@ public sealed class EmailOrderIntakeService
         if (isSummerBerryTsbcCoop &&
             (string.IsNullOrWhiteSpace(explicitCollection) || IsGenericSummerBerryCollection(explicitCollection)))
             explicitCollection = senderCollectionSite;
-        if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
+        // "Collection : 19.10 - 17:00" is when, not where.
+        if (explicitCollection is not null && LooksLikeDateOrTime(explicitCollection))
             explicitCollection = null;
         var explicitDeliveryDate = ExtractLabelValue(body, "deliverydate", "depotdate", "deliver", "delivery");
         var deliveryAddress = ExtractLabelBlock(body, "addressofdelivery", "adressofdelivery", "deliveryaddress", "deliverto", "destination", "shipto");
@@ -652,7 +842,7 @@ public sealed class EmailOrderIntakeService
                 row.Trolleys,
                 "Double H",
                 row.Depot,
-                "Waitrose depot delivery",
+                "Waitrose depot delivery (trolleys)",
                 []))
             .ToList();
     }
@@ -923,6 +1113,10 @@ public sealed class EmailOrderIntakeService
     private static string? FindNisaAttachmentName(MailboxEmailIntakeRequest request) =>
         (request.Attachments ?? []).FirstOrDefault(item => item.IsInline != true &&
             (item.Name ?? string.Empty).Contains("NISA", StringComparison.OrdinalIgnoreCase))?.Name;
+
+    /// <summary>"19.10 - 17:00", "19/10/2026", "17:00", "Mon 19th": a date or time, not a site.</summary>
+    internal static bool LooksLikeDateOrTime(string value) =>
+        Regex.IsMatch(value.Trim(), @"^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s+)?(?:\d{1,2}(?:st|nd|rd|th)?(?:[./-]\d{1,2}(?:[./-]\d{2,4})?)?|\d{1,2}[:.]\d{2})\b(?:\s*(?:-|@|at)?\s*\d{1,2}[:.]\d{2})?(?:\s*(?:am|pm|hrs))?\s*$", RegexOptions.IgnoreCase);
 
     private static string? ExtractBodyCollectionPoint(string body)
     {
@@ -1643,6 +1837,23 @@ public sealed class EmailOrderIntakeService
             ["intakeWarnings"] = warnings
         };
 
+        // "10 pallets + 4 trolleys" is one order with two lines, each with its own count,
+        // so trolleys are never added into the pallet figure.
+        var unitQuantities = HandlingUnitClassifier.UnitQuantities(string.Join("\n", OrderContentLines(body)));
+        if (unitQuantities.Count > 1)
+        {
+            payload["sourceLines"] = unitQuantities.Select(item => new Dictionary<string, object?>
+            {
+                ["sourceRowKey"] = $"unit-{item.Unit.ToLowerInvariant()}",
+                ["palletType"] = item.Unit,
+                ["pallets"] = item.Quantity
+            }).ToList();
+            payload["pallets"] = unitQuantities.Sum(item => item.Quantity);
+            foreach (var item in unitQuantities) payload[item.Unit.ToLowerInvariant()] = item.Quantity;
+            payload["unitType"] = "Mixed";
+            payload["handlingUnitType"] = "Mixed";
+        }
+
         return new ParsedEmailOrder("body-1", naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
 
@@ -1749,6 +1960,147 @@ public sealed class EmailOrderIntakeService
         return $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{NormaliseKey(customer)}|{NormaliseKey(customerPo)}|{collectionDate}|{deliveryDate}|{NormaliseKey(PayloadText(payload, "sellerName"))}|{NormaliseKey(PayloadText(payload, "stallNumber"))}";
     }
 
+    internal static bool IsFowlerWelchSender(MailboxEmailIntakeRequest request) =>
+        (request.SenderAddress ?? string.Empty).Trim().EndsWith("@fowlerwelch.co.uk", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsEmerySender(MailboxEmailIntakeRequest request) =>
+        string.Equals((request.SenderAddress ?? string.Empty).Trim(), "emerypacking@aol.com", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsSainsburyGmCollections(MailboxEmailIntakeRequest request) =>
+        (request.SenderAddress ?? string.Empty).Trim().EndsWith("@sainsburys.co.uk", StringComparison.OrdinalIgnoreCase) &&
+        (request.Subject ?? string.Empty).Contains("GM Collections", StringComparison.OrdinalIgnoreCase);
+
+    private static readonly Regex EmeryDeliveryDateRegex = new(
+        @"\bfor\s+delivery\b[^0-9\r\n]{0,30}(?<day>\d{1,2})[./-](?<month>\d{1,2})[./-](?<year>20\d{2}|\d{2})\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex EmeryDepotRowRegex = new(
+        @"(?im)\b(?<qty>\d{1,3})\s*pallets?\s*[-\u2013:]?\s*(?<depot>Aylesford|Bracknell|Brinklow|Leyland)\b",
+        RegexOptions.Compiled);
+
+    // Emery Soft Fruits (Maggie Thorne, emerypacking@aol.com):
+    //   "For delivery Sunday 18/10/2026 / 3 pallets - Brinklow depot / 1 pallet - Leyland depot /
+    //    These will be delivered to you site today pm"
+    // Emery bring the pallets to the SLH site, so the movement is SLH -> Waitrose depot.
+    private static List<ParsedEmailOrder> ParseEmeryWaitroseBody(
+        MailboxEmailIntakeRequest request,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        if (!IsEmerySender(request) && !body.Contains("Emery Soft Fruits", StringComparison.OrdinalIgnoreCase))
+            return [];
+        var own = string.Join("\n", OrderContentLines(body));
+        var dateMatch = EmeryDeliveryDateRegex.Match(own);
+        if (!dateMatch.Success) return [];
+        var year = int.Parse(dateMatch.Groups["year"].Value, CultureInfo.InvariantCulture);
+        if (year < 100) year += 2000;
+        DateOnly deliveryDate;
+        try
+        {
+            deliveryDate = new DateOnly(year,
+                int.Parse(dateMatch.Groups["month"].Value, CultureInfo.InvariantCulture),
+                int.Parse(dateMatch.Groups["day"].Value, CultureInfo.InvariantCulture));
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return [];
+        }
+
+        var droppedAtSlh = Regex.IsMatch(own, @"deliver(?:ed)?\s+to\s+(?:you|your)\s+site", RegexOptions.IgnoreCase);
+        var received = LocalDate(receivedAt);
+        var collectionDate = received < deliveryDate ? received : deliveryDate;
+        var warnings = droppedAtSlh
+            ? new List<string> { "Emery deliver these pallets to the SLH site; the run starts from our yard." }
+            : new List<string> { "Emery did not say where the pallets will be; confirm the collection point." };
+
+        // The drop-off is warehouse-only: it is booked in at SLH (and audited there) but is
+        // not a job for the planners. The planners see the reload from SLH to the depot.
+        var dropOff = droppedAtSlh
+            ? new Dictionary<string, object?>
+            {
+                ["from"] = "Emery Soft Fruits",
+                ["date"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                ["expected"] = Regex.IsMatch(own, @"\b(?:pm|afternoon)\b", RegexOptions.IgnoreCase) ? "PM" : Regex.IsMatch(own, @"\b(?:am|morning)\b", RegexOptions.IgnoreCase) ? "AM" : null
+            }
+            : null;
+
+        return EmeryDepotRowRegex.Matches(own)
+            .Cast<Match>()
+            .Select(match => (
+                Depot: CultureInfo.InvariantCulture.TextInfo.ToTitleCase(match.Groups["depot"].Value.ToLowerInvariant()),
+                Pallets: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture)))
+            .Where(row => row.Pallets > 0)
+            .GroupBy(row => row.Depot, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .Select((row, index) => BuildStructuredOrder(
+                request,
+                $"emery-waitrose-{NormaliseKey(row.Depot)}-{index + 1}",
+                "WAITROSE",
+                null,
+                collectionDate,
+                deliveryDate,
+                row.Pallets,
+                droppedAtSlh ? SlhWarehouseSiteName : "Emery Soft Fruits",
+                row.Depot,
+                "Emery Waitrose depot pallets",
+                warnings))
+            .Select(order => dropOff is null ? order : WithWarehouseDropOff(order, dropOff))
+            .ToList();
+    }
+
+    public const string SlhWarehouseSiteName = "Stuart Lyons Distribution";
+
+    private static ParsedEmailOrder WithWarehouseDropOff(ParsedEmailOrder order, Dictionary<string, object?> dropOff)
+    {
+        var payload = JsonNode.Parse(order.Payload.GetRawText())!.AsObject();
+        payload["warehouseDropOff"] = JsonSerializer.SerializeToNode(dropOff);
+        return order with { Payload = JsonSerializer.SerializeToElement(payload) };
+    }
+
+    private static readonly Regex SainsburyGmRowRegex = new(
+        @"(?im)(?<date>\d{1,2}/\d{1,2}/\d{4})\s*[|\t\n]\s*Stuart\s+Lyons\s*[|\t\n]\s*(?<site>[^|\t\n]+?)\s*[|\t\n]\s*(?<destination>[^|\t\n]+?)\s*[|\t\n]\s*(?<time>\d{1,2}[:.]\d{2})\b",
+        RegexOptions.Compiled);
+
+    // Sainsbury's "Stuart Lyons GM Collections dd/MM/yyyy": a table of Collection Date |
+    // Collecting Depot / Haulier | Collection Site | Destination | Collection Time. No
+    // pallet count is given, so each row is staged for review with the count to confirm.
+    private static List<ParsedEmailOrder> ParseSainsburyGmCollections(
+        MailboxEmailIntakeRequest request,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        if (!IsSainsburyGmCollections(request)) return [];
+        var orders = new List<ParsedEmailOrder>();
+        foreach (Match match in SainsburyGmRowRegex.Matches(body))
+        {
+            if (!DateOnly.TryParseExact(match.Groups["date"].Value, ["d/M/yyyy", "dd/MM/yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+                continue;
+            var site = CleanSourceLine(match.Groups["site"].Value);
+            var destination = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(CleanSourceLine(match.Groups["destination"].Value).ToLowerInvariant());
+            if (string.IsNullOrWhiteSpace(site) || string.IsNullOrWhiteSpace(destination)) continue;
+            var time = match.Groups["time"].Value.Replace('.', ':');
+            var order = BuildIncompleteStructuredOrder(
+                request,
+                $"sainsbury-gm-{NormaliseKey(site)}-{NormaliseKey(destination)}-{orders.Count + 1}",
+                "SAINSBURY",
+                null,
+                date,
+                date,
+                null,
+                site,
+                destination,
+                "Sainsbury GM collection",
+                [$"Sainsbury GM collection at {time}; the email gives no pallet count, confirm it before approval."]);
+            var payload = JsonNode.Parse(order.Payload.GetRawText())!.AsObject();
+            payload["requestedTime"] = time;
+            // Overrides read only this row: the header cell "Collection Time" sits
+            // above the date and would otherwise read "18/10" as an 18:00 collection.
+            payload["sourceBlockText"] = Regex.Replace(match.Value, @"\s*[|\t\n]\s*", " | ");
+            orders.Add(order with { Payload = JsonSerializer.SerializeToElement(payload) });
+        }
+        return orders;
+    }
+
     private static List<ParsedEmailOrder> ParseHallHunterDirectDepot(
         MailboxEmailIntakeRequest request,
         string? rawPo,
@@ -1814,7 +2166,7 @@ public sealed class EmailOrderIntakeService
         var collection = sourceText.Contains("Hill Brothers", StringComparison.OrdinalIgnoreCase) ||
                          sourceText.Contains("Hills", StringComparison.OrdinalIgnoreCase)
             ? "Hill Brothers"
-            : null;
+            : IsFowlerWelchSender(request) ? "Fowler Welch Hilsea" : null;
         var rows = Regex.Matches(sourceText, @"(?im)\b(?<depot>AYLESFORD|BRACKNELL|BRINKLOW|LEYLAND)\b\s*\|?\s*(?<po>[A-Z]\d{5}(?:\s*\+\s*[A-Z]\d{5})*)\s*\|?\s*(?<qty>\d{1,3})\b")
             .Cast<Match>()
             .Select(match => (
@@ -2405,6 +2757,14 @@ public sealed class EmailOrderIntakeService
 
     private static string? InferHandlingUnitType(string sourceText)
     {
+        // Go by what a quantity is stated in ("12 trolleys"), not by whichever unit word
+        // appears first anywhere in the email; a signature mentioning trays must not
+        // turn a pallet booking into a tray collection.
+        var quantified = HandlingUnitClassifier.UnitQuantities(sourceText);
+        if (quantified.Count > 0)
+            return quantified[0].Unit == "Trays" && Regex.IsMatch(sourceText, @"\beuro\s*pool\s+trays?\b", RegexOptions.IgnoreCase)
+                ? "Euro Pool Trays"
+                : quantified[0].Unit;
         if (Regex.IsMatch(sourceText, @"\beuro\s+pool\s+trays?\b", RegexOptions.IgnoreCase)) return "Euro Pool Trays";
         if (Regex.IsMatch(sourceText, @"\btrays?\b", RegexOptions.IgnoreCase)) return "Trays";
         if (Regex.IsMatch(sourceText, @"\bcrates?\b", RegexOptions.IgnoreCase)) return "Crates";

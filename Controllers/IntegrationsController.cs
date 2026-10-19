@@ -14,7 +14,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, SamsaraOptions samsara, SamsaraClient samsaraClient, InfoMailboxGraphOptions infoMailboxGraph, InfoMailboxGraphHealthState infoMailboxGraphHealth, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, SamsaraOptions samsara, SamsaraClient samsaraClient, InfoMailboxGraphOptions infoMailboxGraph, InfoMailboxGraphHealthState infoMailboxGraphHealth, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, OutlookIntakeTags outlookTags, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -54,7 +54,9 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                 lastFailureStage = infoMailboxGraphHealth.LastFailureStage,
                 inProgress = infoMailboxGraphHealth.InProgress,
                 lastMessagesSeen = infoMailboxGraphHealth.LastMessagesSeen,
-                lastMessagesIngested = infoMailboxGraphHealth.LastMessagesIngested
+                lastMessagesIngested = infoMailboxGraphHealth.LastMessagesIngested,
+                outlookTagging = outlookTags.Problem,
+                outlookLastTaggedUtc = outlookTags.LastTaggedUtc
             },
             emailIntake = new { configured = latestEmailIntake is not null, lastReceivedUtc = latestEmailIntake },
             assistant = new { configured = assistant.IsConfigured, model = assistant.Model, safeRulesAvailable = true },

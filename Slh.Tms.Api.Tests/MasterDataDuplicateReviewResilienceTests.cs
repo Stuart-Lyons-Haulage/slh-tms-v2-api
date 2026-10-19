@@ -138,7 +138,7 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
             x.Canonical.Name.Contains(suffix, StringComparison.OrdinalIgnoreCase) &&
             x.Duplicates.Any(row => row.Name.Contains(suffix, StringComparison.OrdinalIgnoreCase))));
         Assert.False(candidate.CanAutoMerge);
-        Assert.Contains("Member/Tacho DB numbers differ", candidate.Reason, StringComparison.Ordinal);
+        Assert.Contains("two TachoMaster member records", candidate.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

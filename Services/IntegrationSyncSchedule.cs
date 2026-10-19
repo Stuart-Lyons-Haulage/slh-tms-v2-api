@@ -50,6 +50,7 @@ public sealed class IntegrationSyncSchedulerBackgroundService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try { await StartupGrace.WaitAsync(stoppingToken); } catch (OperationCanceledException) { return; }
         logger.LogInformation("Automatic integration sync schedules enabled: TachoMaster every 20 minutes; Fleetio hourly; Sage HR daily at 05:00 and 14:00 Europe/London.");
         await Task.WhenAll(RunTachoMasterScheduleAsync(stoppingToken), RunFleetioScheduleAsync(stoppingToken), RunSageScheduleAsync(stoppingToken));
     }

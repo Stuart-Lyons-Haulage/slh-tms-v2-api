@@ -4,10 +4,10 @@
 
 name: Build and deploy ASP.Net Core app to Azure Web App - slh-tms-api-prod
 
+# Manual fallback only. "Deploy SLH TMS API" (deploy.yml) is the release pipeline: it runs
+# the tests and verifies the deployed revision. Running both on every push deployed each
+# change twice, restarting the API twice and racing an untested build against the tested one.
 on:
-  push:
-    branches:
-      - 'main'
   workflow_dispatch:
 
 jobs:

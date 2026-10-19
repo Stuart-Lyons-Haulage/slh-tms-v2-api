@@ -35,7 +35,26 @@ public sealed class IntegrationSyncCoordinator(
 
         try
         {
+            // Force sync must refresh the provider snapshot first. GetDriverProfilesAsync
+            // is intentionally cache-only so ordinary readers do not create duplicate
+            // upstream requests; calling it alone here can produce a false 0-match success.
+            var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(
+                DateTimeOffset.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+            var refreshed = await tachoMaster.RefreshSnapshotAsync(today.AddDays(-28), today.AddDays(2), ct);
+            if (!refreshed && !await tachoMaster.LoadSharedSnapshotAsync(ct))
+            {
+                return new("TachoMaster", false, DateTimeOffset.UtcNow,
+                    "TachoMaster could not refresh or load a shared driver snapshot; no driver records were changed.");
+            }
+
             var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
+            if (profiles.Count == 0)
+            {
+                return new("TachoMaster", false, DateTimeOffset.UtcNow,
+                    "TachoMaster returned no driver profiles after refresh; no driver records were changed.");
+            }
+
             var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
             var persistedMemberOwners = drivers
                 .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
@@ -146,12 +165,25 @@ public sealed class IntegrationSyncCoordinator(
             }
 
             await db.SaveChangesAsync(ct);
+            // Archive drivers with no tacho activity for over 28 days (and bring back any who start again).
+            var activityNote = string.Empty;
+            try
+            {
+                var activityOutcome = await DriverTachoActivity.ApplyAsync(db, tachoMaster.GetRecentActivity(), actor, DateTimeOffset.UtcNow, ct);
+                activityNote = $" {activityOutcome.Message}";
+                if (activityOutcome.Archived > 0 || activityOutcome.Restored > 0) logger.LogInformation("{ActivityMessage}", activityOutcome.Message);
+            }
+            catch (Exception activityException) when (activityException is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(activityException, "Driver tacho activity check failed; Driver Master was left as it was.");
+            }
             var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
             var conflictNote = identityConflicts == 0
                 ? string.Empty
                 : $" {identityConflicts} conflicting member assignment(s) were skipped safely because another Driver Master row already owns that identity.";
             return new("TachoMaster", true, DateTimeOffset.UtcNow,
-                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched.{conflictNote} Identity order: member code, tacho card, employee number, name.", matched);
+                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched.{conflictNote} Identity order: member code, tacho card, employee number, name.{activityNote}", matched);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

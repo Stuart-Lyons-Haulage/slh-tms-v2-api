@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Azure.Monitor.OpenTelemetry.Exporter;
+using OpenTelemetry;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -48,22 +49,40 @@ var openTelemetry = builder.Services.AddOpenTelemetry()
         serviceName: "slh-tms-api",
         serviceVersion: deploymentRevision));
 
+// Application Insights is billed by volume. Background jobs run every 30-60 seconds all
+// day, so full tracing (every SQL statement and outbound call) and Information-level logs
+// were the bulk of the Azure bill. Defaults now: 5% of requests traced, no per-SQL spans,
+// health/stream noise excluded, and only warnings and errors exported as logs.
+// Each can be raised temporarily with app settings (Telemetry__TraceSampleRatio,
+// Telemetry__SqlDependencies, Telemetry__ExportLogLevel) while investigating an issue.
+var telemetrySettings = builder.Configuration.GetSection("Telemetry");
+var traceSampleRatio = Math.Clamp(telemetrySettings.GetValue<double?>("TraceSampleRatio") ?? 0.05, 0d, 1d);
+var traceSqlDependencies = telemetrySettings.GetValue<bool?>("SqlDependencies") ?? false;
+var exportLogLevel = Enum.TryParse<LogLevel>(telemetrySettings["ExportLogLevel"], true, out var parsedLogLevel) ? parsedLogLevel : LogLevel.Warning;
+
+static bool IsTelemetryNoise(PathString path) =>
+    path.StartsWithSegments("/api/v1/health") ||
+    path.StartsWithSegments("/api/v1/planning-events") ||
+    path.StartsWithSegments("/hubs") ||
+    path.StartsWithSegments("/swagger");
+
 openTelemetry.WithTracing(tracing =>
 {
     tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddSqlClientInstrumentation();
+        .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(traceSampleRatio)))
+        .AddAspNetCoreInstrumentation(options => options.Filter = context => !IsTelemetryNoise(context.Request.Path))
+        .AddHttpClientInstrumentation();
+    if (traceSqlDependencies) tracing.AddSqlClientInstrumentation();
     if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
         tracing.AddAzureMonitorTraceExporter(options => options.ConnectionString = applicationInsightsConnectionString);
 });
 
 openTelemetry.WithMetrics(metrics =>
 {
+    // Pre-aggregated metrics are cheap; per-call HTTP client metrics are dropped.
     metrics
         .AddMeter(TmsMetrics.MeterName)
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation();
+        .AddAspNetCoreInstrumentation();
     if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
         metrics.AddAzureMonitorMetricExporter(options => options.ConnectionString = applicationInsightsConnectionString);
 });
@@ -71,10 +90,12 @@ openTelemetry.WithMetrics(metrics =>
 builder.Logging.AddOpenTelemetry(logging =>
 {
     logging.IncludeFormattedMessage = true;
-    logging.IncludeScopes = true;
+    logging.IncludeScopes = false;
     if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
         logging.AddAzureMonitorLogExporter(options => options.ConnectionString = applicationInsightsConnectionString);
 });
+// Only warnings and errors leave the server; Information stays in the local log stream.
+builder.Logging.AddFilter<OpenTelemetryLoggerProvider>(null, exportLogLevel);
 
 builder.Services.AddControllers().AddJsonOptions(options =>
 {
@@ -143,20 +164,24 @@ var allowedOrigins = (configuredOrigins is { Length: > 0 }
     .Append("https://tms.lyonshaulage.com")
     .Distinct(StringComparer.OrdinalIgnoreCase)
     .ToArray();
-builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
+builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().WithExposedHeaders("X-SLH-Degraded", "X-SLH-Trace", "Content-Disposition")));
 builder.Services.AddSingleton(TmsMetrics.Shared);
 builder.Services.AddSingleton<SqlLatencyInterceptor>();
 builder.Services.AddSingleton<PlanningChangeNotifier>();
 builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
+builder.Services.AddHostedService<CustomerCommsScheduler>();
 builder.Services.AddHostedService<NightlyArchiveBackgroundService>();
 builder.Services.AddSingleton<InfoMailboxGraphPollingService>();
+builder.Services.AddSingleton<OutlookIntakeTags>();
 builder.Services.AddHostedService(services => services.GetRequiredService<InfoMailboxGraphPollingService>());
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
 builder.Services.AddScoped<StagingService>();
+builder.Services.AddSingleton<BulkApprovalJobs>();
+builder.Services.AddSingleton<ReplayJobs>();
 builder.Services.AddScoped<SharePointOrderArchiveService>();
 builder.Services.AddScoped<MasterDataService>();
 builder.Services.AddScoped<SiteAddressPropagationService>();
@@ -312,6 +337,12 @@ builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
+builder.Services.AddDataProtection();
+builder.Services.AddHttpClient("SageCalendar", client => { client.Timeout = TimeSpan.FromSeconds(30); })
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = true, MaxAutomaticRedirections = 5, AutomaticDecompression = System.Net.DecompressionMethods.All });
+builder.Services.AddSingleton<SageCalendarFeed>();
+builder.Services.AddHostedService<SageCalendarSyncService>();
+builder.Services.AddHostedService<SamsaraReconciliationService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
@@ -376,6 +407,10 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TmsReadMaster", policy => policy
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsMasterRolePolicy.CanReadMaster(context.User, allowedTmsDomains)));
+    var tmsOwners = (builder.Configuration["Tms:Owners"] ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    options.AddPolicy("TmsOwner", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsOwnerPolicy.IsOwner(context.User, allowedTmsDomains, tmsOwners)));
     options.AddPolicy("TmsAdmin", policy => policy
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsMasterRolePolicy.IsAdmin(context.User, allowedTmsDomains)));
@@ -400,6 +435,7 @@ static bool ReadBool(IConfiguration configuration, bool fallback, params string[
     bool.TryParse(ReadSetting(configuration, fallback.ToString(), keys), out var value) ? value : fallback;
 
 var app = builder.Build();
+if (app.Environment.IsEnvironment("Testing")) StartupGrace.Configure(TimeSpan.Zero);
 
 var expectedDatabaseName = builder.Configuration["Database:ExpectedDatabaseName"]?.Trim();
 if (!string.IsNullOrWhiteSpace(expectedDatabaseName))
@@ -424,28 +460,21 @@ if (!app.Environment.IsEnvironment("Testing") && applySchemaChangesOnStartup)
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaMigration");
     await SchemaMigrationRunner.ApplyAsync(db, logger, applyDeferredSchemaMigrations, CancellationToken.None);
-    try
+    await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);
+    await CustomerNotificationStore.EnsureSchemaAsync(db, CancellationToken.None);
+    // Data tidy-ups (placeholder vehicles, trailer aliases, geofence links, register links)
+    // run once the API is answering, so a restart doesn't keep pages waiting on them. A
+    // migration-only run still does them before exiting.
+    if (migrationOnly) await RunStartupMaintenanceAsync(app.Services, logger, CancellationToken.None);
+    else app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
     {
-        await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);
-        await CustomerNotificationStore.EnsureSchemaAsync(db, CancellationToken.None);
-        var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
-        if (quarantinedFleetioPlaceholders > 0)
-            logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
-        var trailerMerge = await MasterDetailStore.MergeSlhTrailerAliasesAsync(db, CancellationToken.None);
-        if (trailerMerge.Renamed > 0 || trailerMerge.Merged > 0)
-            logger.LogWarning(
-                "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
-                trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
-        var repairedGeofenceLinks = await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, CancellationToken.None);
-        if (repairedGeofenceLinks > 0)
-            logger.LogWarning("Repaired {GeofenceLinkCount} legacy active Site/geofence assignments; ambiguous geofences remain active but unlinked for review.", repairedGeofenceLinks);
-        var register = scope.ServiceProvider.GetRequiredService<StagingService>();
-        await register.LinkRegistered(25, CancellationToken.None);
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Post-migration startup maintenance failed; required schema migrations completed successfully, so application startup will continue.");
-    }
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), app.Lifetime.ApplicationStopping);
+            await RunStartupMaintenanceAsync(app.Services, logger, app.Lifetime.ApplicationStopping);
+        }
+        catch (OperationCanceledException) { }
+    }));
 }
 
 if (migrationOnly)
@@ -490,6 +519,50 @@ app.MapHub<DispatchHub>("/dispatch-hub").WithMetadata(new DisableRequestTimeoutA
 app.MapHub<EtaHub>("/eta-hub").WithMetadata(new DisableRequestTimeoutAttribute());
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
+// Once after start-up: re-check "Unusual" warnings on orders waiting for review so that
+// improvements to site-name matching also clear cards that arrived earlier.
+app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
+{
+    try
+    {
+        await Task.Delay(TimeSpan.FromMinutes(2), app.Lifetime.ApplicationStopping);
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var rechecked = await IntakeAutoApproval.RecheckPendingAsync(db, app.Lifetime.ApplicationStopping);
+        app.Logger.LogInformation("Re-checked unusual warnings on {Count} waiting orders after start-up.", rechecked);
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        app.Logger.LogWarning(ex, "Start-up re-check of unusual warnings failed; it can be run from Order intake.");
+    }
+}));
+
 app.Run();
+
+static async Task RunStartupMaintenanceAsync(IServiceProvider services, ILogger logger, CancellationToken ct)
+{
+    try
+    {
+        await using var scope = services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, ct);
+        if (quarantinedFleetioPlaceholders > 0)
+            logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
+        var trailerMerge = await MasterDetailStore.MergeSlhTrailerAliasesAsync(db, ct);
+        if (trailerMerge.Renamed > 0 || trailerMerge.Merged > 0)
+            logger.LogWarning(
+                "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
+                trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
+        var repairedGeofenceLinks = await SiteGeofenceMasterSync.RepairDuplicateActiveLinksAsync(db, ct);
+        if (repairedGeofenceLinks > 0)
+            logger.LogWarning("Repaired {GeofenceLinkCount} legacy active Site/geofence assignments; ambiguous geofences remain active but unlinked for review.", repairedGeofenceLinks);
+        var register = scope.ServiceProvider.GetRequiredService<StagingService>();
+        await register.LinkRegistered(25, ct);
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        logger.LogError(ex, "Post-migration startup maintenance failed; required schema migrations completed successfully, so the API keeps serving.");
+    }
+}
 
 public partial class Program { }

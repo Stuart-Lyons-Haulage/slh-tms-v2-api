@@ -25,11 +25,7 @@ public static class PlanningAllocationStore
             .ToList();
         if (grouped.Count == 0) return 0;
 
-        var stored = await db.StagedImports.AsNoTracking()
-            .Where(row => row.EntityType == EntityType && row.Status == StagingStatus.Promoted)
-            .OrderByDescending(row => row.ReceivedAtUtc)
-            .Take(20000)
-            .ToListAsync(ct);
+        var stored = await ForDatesAsync(db, [date], ct);
 
         var changed = 0;
         foreach (var allocation in grouped)
@@ -49,11 +45,7 @@ public static class PlanningAllocationStore
         var candidate = await CandidateAsync(db, load, ct);
         if (candidate is null) return false;
 
-        var latest = await db.StagedImports.AsNoTracking()
-            .Where(row => row.EntityType == EntityType && row.Status == StagingStatus.Promoted)
-            .OrderByDescending(row => row.ReceivedAtUtc)
-            .Take(5000)
-            .ToListAsync(ct);
+        var latest = await ForDatesAsync(db, [load.PlanningDate], ct);
         var current = LatestFor(latest, candidate.Value.OrderId, load.Id, load.PlanningDate);
         if (current?.Pallets == candidate.Value.Pallets) return false;
 
@@ -66,11 +58,7 @@ public static class PlanningAllocationStore
         var rows = loads.ToList();
         if (rows.Count == 0) return 0;
 
-        var stored = await db.StagedImports.AsNoTracking()
-            .Where(row => row.EntityType == EntityType && row.Status == StagingStatus.Promoted)
-            .OrderByDescending(row => row.ReceivedAtUtc)
-            .Take(5000)
-            .ToListAsync(ct);
+        var stored = await ForDatesAsync(db, rows.Select(load => load.PlanningDate).Distinct().ToList(), ct);
         var changed = 0;
 
         foreach (var load in rows)
@@ -122,6 +110,23 @@ public static class PlanningAllocationStore
         }
 
         return orderIds.Count == 1 ? (orderIds[0], decimal.ToInt32(load.PalletSpacesUsed.Value)) : null;
+    }
+
+    /// <summary>Allocations for the given planning dates only (newest first).</summary>
+    private static async Task<List<StagedImport>> ForDatesAsync(TmsDbContext db, IReadOnlyCollection<DateOnly> dates, CancellationToken ct)
+    {
+        var result = new List<StagedImport>();
+        foreach (var date in dates)
+        {
+            var dateText = date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            var windowStart = new DateTimeOffset(date.AddDays(-60).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            result.AddRange(await db.StagedImports.AsNoTracking()
+                .Where(row => row.EntityType == EntityType && row.Status == StagingStatus.Promoted && row.ReceivedAtUtc >= windowStart && row.PayloadJson.Contains(dateText))
+                .OrderByDescending(row => row.ReceivedAtUtc)
+                .Take(20000)
+                .ToListAsync(ct));
+        }
+        return result.OrderByDescending(row => row.ReceivedAtUtc).ToList();
     }
 
     private static AllocationState? LatestFor(IEnumerable<StagedImport> rows, Guid orderId, Guid loadId, DateOnly date)

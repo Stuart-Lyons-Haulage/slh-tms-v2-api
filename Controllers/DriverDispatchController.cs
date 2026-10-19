@@ -20,6 +20,33 @@ public sealed class DriverDispatchController(
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
     private static readonly LoadStatus[] ExecutedStatuses = [LoadStatus.Dispatched, LoadStatus.InProgress, LoadStatus.Completed];
 
+    [HttpGet("health")]
+    public async Task<IActionResult> Health(CancellationToken ct)
+    {
+        var activeDrivers = await db.Drivers.AsNoTracking().CountAsync(driver => driver.Active, ct);
+        var tachoLinkedDrivers = await db.Drivers.AsNoTracking().CountAsync(driver =>
+            driver.Active && driver.TachoMasterDriverId != null && driver.TachoMasterDriverId != "", ct);
+        var latestSyncUtc = await db.StagedImports.AsNoTracking()
+            .Where(item => item.Status == StagingStatus.Promoted &&
+                           (item.EntityType == "tachodrivermastersync" ||
+                            item.EntityType == "tachodrivermasterorchestration" ||
+                            item.EntityType == TachoDriverMasterSyncJobService.EntityType))
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .Select(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .FirstOrDefaultAsync(ct);
+
+        return Ok(new
+        {
+            healthy = activeDrivers > 0,
+            activeDrivers,
+            tachoLinkedDrivers,
+            latestTachoSyncUtc = latestSyncUtc == default ? (DateTimeOffset?)null : latestSyncUtc,
+            message = activeDrivers > 0
+                ? "Driver Master contains an active roster."
+                : "Driver Master contains no active drivers; Dispatch cannot calculate availability."
+        });
+    }
+
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
@@ -82,7 +109,7 @@ public sealed class DriverDispatchController(
             ? new List<Load>()
             : await db.Loads.AsNoTracking()
                 .Include(load => load.Stops)
-                .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-7) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
+                .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-14) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
                 .OrderByDescending(load => load.PlanningDate)
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .ToListAsync(ct);
@@ -171,6 +198,9 @@ public sealed class DriverDispatchController(
         var tachoDays = await tachoDayTask;
 
         var rows = new List<DriverDispatchDriver>();
+        // Fair share of long work: how much far-away work each driver has had in the last
+        // fortnight, so the furthest runs are not always given to the same people.
+        var recentWork = DriverWorkloadFairness.Summarise(history, planningDate);
         foreach (var driver in selectedDrivers)
         {
             var allocated = loads.Where(load => load.DriverId == driver.Id).OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue).ToList();
@@ -267,7 +297,13 @@ public sealed class DriverDispatchController(
                 assistantScore,
                 suggestion,
                 rosterEntry?.FromDate,
-                rosterEntry?.ThroughDate));
+                rosterEntry?.ThroughDate)
+            {
+                WorkingStyle = DriverWorkloadFairness.WorkingStyle(driver.DriverType, driver.DriverGroup),
+                RecentRuns = recentWork.GetValueOrDefault(driver.Id)?.Runs ?? 0,
+                RecentLongRuns = recentWork.GetValueOrDefault(driver.Id)?.LongRuns ?? 0,
+                RecentFurthestMiles = recentWork.GetValueOrDefault(driver.Id)?.FurthestMilesTotal ?? 0
+            });
         }
 
         var snapshot = new
@@ -691,4 +727,11 @@ public sealed record DriverDispatchDriver(
     int? AssistantScore,
     string? Suggestion,
     DateOnly? AgencyBookedFrom,
-    DateOnly? AgencyBookedThrough);
+    DateOnly? AgencyBookedThrough)
+{
+    /// <summary>Tramper (nights out allowed), Day or Night driver, from Driver Master group/type.</summary>
+    public string? WorkingStyle { get; init; }
+    public int RecentRuns { get; init; }
+    public int RecentLongRuns { get; init; }
+    public int RecentFurthestMiles { get; init; }
+}

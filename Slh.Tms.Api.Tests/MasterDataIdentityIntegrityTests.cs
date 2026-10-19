@@ -77,7 +77,7 @@ public sealed class MasterDataIdentityIntegrityTests
             CancellationToken.None);
 
         Assert.Equal(0, result.Merged);
-        Assert.Contains(result.Messages, message => message.Contains("more than one TachoMaster member identity", StringComparison.Ordinal));
+        Assert.Contains(result.Messages, message => message.Contains("different TachoMaster members", StringComparison.Ordinal));
         Assert.True(canonical.Active);
         Assert.True(duplicate.Active);
     }

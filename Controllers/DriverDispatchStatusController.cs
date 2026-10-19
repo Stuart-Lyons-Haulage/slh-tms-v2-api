@@ -118,6 +118,7 @@ public sealed class DriverDispatchStatusController(
             }
         }
         IReadOnlyList<TachoDriverDutyStatus> duties = dutyBuffer;
+        var workPatterns = await DriverWorkPatterns.LatestAsync(db, ct);
 
         var result = drivers.Select(driver =>
         {
@@ -178,6 +179,19 @@ public sealed class DriverDispatchStatusController(
             var workAvailableWeekMinutes = latestDuty?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
             var earliest = EarliestPlanningStart(planningDate, today, latestDuty);
             var availability = Availability(weekly, driveAvailablePlanningDayMinutes, workAvailableWeekMinutes, planningDate, today, tachoMaster.IsConfigured, projectedDayNumber);
+            // SLH pattern: 6 on / 1 off then 5 on / 2 off. After a reduced (24h) weekly rest the
+            // next block is 5 days and must end in a full 45h rest, so Day 6 is not legal.
+            var cycleLength = CycleLength(weekly.LastWeeklyRestType);
+            if (cycleLength == 5 && projectedDayNumber is >= 6 && availability.Status != "Unavailable")
+                availability = new("Unavailable", $"Day {projectedDayNumber} after a reduced weekly rest last week: a full 45-hour weekly rest is needed before driving again.");
+
+            // Sage HR work pattern says which day of the block this should be; Tacho says what
+            // has actually been worked and stays the authority on what is legal.
+            var pattern = workPatterns.GetValueOrDefault(driver.Id);
+            var plan = pattern is null ? null : DriverWorkPatterns.Evaluate(pattern, planningDate);
+            var fit = WorkPatternFit.Resolve(plan, pattern?.Name, matchedDuties.Count > 0 ? projectedDayNumber : null, cycleLength, weekly.LastWeeklyRestType);
+            if (fit.RestDay && availability.Status == "Available")
+                availability = new("Unverified", $"Rest day on {pattern!.Name} (Sage HR). Only use if the driver has agreed to work it.");
 
             var liveWorking = load is not null && HasLiveWorkingEvidence(
                 load,
@@ -215,13 +229,37 @@ public sealed class DriverDispatchStatusController(
                 availability.Message,
                 driveAvailablePlanningDayMinutes,
                 workAvailableWeekMinutes,
-                projectedDayNumber,
+                fit.DisplayDay ?? projectedDayNumber,
                 earliest.StartUtc,
                 earliest.Source,
-                earliest.IsAssumption);
+                earliest.IsAssumption)
+            {
+                CycleLength = fit.BlockLength ?? cycleLength,
+                LastWeeklyRestType = weekly.LastWeeklyRestType,
+                CycleNote = fit.Note ?? CycleNote(projectedDayNumber, cycleLength),
+                WorkPatternName = pattern?.Name,
+                WorkPatternSource = pattern is not null ? pattern.Source : matchedDuties.Count > 0 ? "Tacho" : null,
+                PatternRestDay = fit.RestDay,
+                TachoDayNumber = projectedDayNumber
+            };
         }).ToList();
 
         return Ok(new { planningDate, drivers = result });
+    }
+
+    internal static int? CycleLength(string? lastWeeklyRestType) => lastWeeklyRestType switch
+    {
+        "Reduced24" => 5,
+        "Regular45" => 6,
+        _ => null
+    };
+
+    internal static string? CycleNote(int? day, int? cycleLength)
+    {
+        if (day is null || cycleLength is null) return null;
+        if (day > cycleLength) return cycleLength == 5 ? "Must take a full 45h weekly rest" : "Weekly rest due";
+        if (day == cycleLength) return cycleLength == 5 ? "Last day — then a full 45h rest" : "Last day — then weekly rest (24h allowed)";
+        return null;
     }
 
     internal static int ReconcileProjectedDay(
@@ -416,4 +454,15 @@ public sealed record DriverDispatchStatusRow(
     int? ProjectedDayNumber,
     DateTimeOffset? EarliestStartUtc,
     string? EarliestStartSource,
-    bool EarliestStartIsAssumption);
+    bool EarliestStartIsAssumption)
+{
+    /// <summary>Days in the current block: 6 after a full 45h weekly rest, 5 after a reduced one.</summary>
+    public int? CycleLength { get; init; }
+    public string? LastWeeklyRestType { get; init; }
+    public string? CycleNote { get; init; }
+    public string? WorkPatternName { get; init; }
+    /// <summary>"Sage HR", "Sage HR (entered)" or "Tacho" when there is no Sage pattern.</summary>
+    public string? WorkPatternSource { get; init; }
+    public bool PatternRestDay { get; init; }
+    public int? TachoDayNumber { get; init; }
+}

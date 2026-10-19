@@ -17,6 +17,15 @@ public sealed class RetainedOrderEvidenceReplayController(
     StagingService stagingService,
     ILogger<OrderIntakeController> intakeLogger) : ControllerBase
 {
+    /// <summary>Start a re-parse on the server and return at once; poll the job for progress.</summary>
+    [HttpPost("replay-jobs"), Authorize(Policy = "TmsApprove")]
+    public IActionResult StartJob([FromBody] RetainedOrderEvidenceReplayRequest request, [FromServices] ReplayJobs jobs) =>
+        Accepted(jobs.Start(request, User).Snapshot());
+
+    [HttpGet("replay-jobs/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public IActionResult JobStatus(Guid id, [FromServices] ReplayJobs jobs) =>
+        jobs.Get(id) is { } job ? Ok(job.Snapshot()) : NotFound(new { message = "Re-parse job not found; the API may have restarted. Press Re-parse again." });
+
     [HttpPost("replay-retained-evidence"), Authorize(Policy = "TmsApprove")]
     [DisableRequestTimeout]
     public async Task<IActionResult> Replay(
@@ -420,7 +429,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         }
     }
 
-    private static MailboxEmailIntakeRequest Rehydrate(string payloadJson)
+    internal static MailboxEmailIntakeRequest Rehydrate(string payloadJson)
     {
         using var document = JsonDocument.Parse(payloadJson);
         var root = document.RootElement;

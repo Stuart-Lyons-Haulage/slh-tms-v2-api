@@ -24,7 +24,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
         var orders = await ReadOrders(date, ct);
         var loads = await ReadLoads(date, ct);
-        var details = await ReadOrderDetails(date, ct);
+        var details = await ReadOrderDetails(date, orders, ct);
         var explicitAllocations = await ReadLatestAllocations(date, ct);
         var sourceLines = await ReadCurrentSourceLines(orders, ct);
         var loadById = loads.ToDictionary(x => x.Id);
@@ -48,8 +48,10 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             if (ordered <= 0) continue;
 
             var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
+            // A cancelled run no longer holds its pallets: they go back to "To plan".
             var allocations = explicitAllocations.Values
-                .Where(x => x.OrderId == order.Id && x.Pallets > 0)
+                .Where(x => x.OrderId == order.Id && x.Pallets > 0 &&
+                            !(loadById.TryGetValue(x.LoadId, out var allocatedLoad) && allocatedLoad.Status == LoadStatus.Cancelled))
                 .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
                 .ToList();
 
@@ -125,6 +127,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 loadUnitType = handling.LoadUnitType,
                 palletColourKey = handling.ColourKey,
                 palletRuleSource = handling.RuleSource,
+                // Trays / crates / shippers as counted by the customer, separate from pallet spaces
+                // (which they often don't give). palletsStated false = space still to be worked out.
+                unitCount = detail?.UnitCount,
+                unitCountType = detail?.UnitCountType,
+                palletsStated = ordered > 0,
                 source = detail?.Source,
                 receivedAtUtc = detail?.UpdatedAtUtc ?? order.CreatedAtUtc,
                 lateAddition = late,
@@ -221,7 +228,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         var latest = await ReadLatestAllocations(request.Date, ct);
         latest.TryGetValue((request.OrderId, request.LoadId, request.SourceLineId), out var previous);
         var previousPallets = previous?.Pallets ?? 0;
-        var detailMap = await ReadOrderDetails(request.Date, ct);
+        var detailMap = await ReadOrderDetails(request.Date, [order], ct);
         detailMap.TryGetValue(Normalise(order.Reference), out var detail);
         var sourceLineMap = await ReadCurrentSourceLines([order], ct);
         sourceLineMap.TryGetValue(order.Id, out var sourceLines);
@@ -251,6 +258,24 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         });
         await db.SaveChangesAsync(ct);
         db.ChangeTracker.Clear();
+
+        // Learn from a genuine new placement (not a quantity tweak): what the planner chose.
+        if (previousPallets == 0 && request.Pallets > 0)
+        {
+            try
+            {
+                await PlannerLearning.RecordAsync(db, new PlannerLearning.Decision(
+                    request.Date, order.Id, order.Reference, order.CustomerCode, Collection(detail, order), Destination(detail, order),
+                    PlanningGroup(detail, order), load.Id, load.Reference, PlannerLearning.RunPattern(load.Reference),
+                    request.Pallets, PlannerLearning.Weekday(request.Date), now, User.Identity?.Name), ct);
+                db.ChangeTracker.Clear();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Planner learning could not record an allocation decision; planning is unaffected.");
+                db.ChangeTracker.Clear();
+            }
+        }
 
         await EnsureOrderOnRun(load, order, detail, ct);
         var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
@@ -315,13 +340,32 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         return loads;
     }
 
-    private async Task<Dictionary<string, OrderDetail>> ReadOrderDetails(DateOnly date, CancellationToken ct)
+    private async Task<Dictionary<string, OrderDetail>> ReadOrderDetails(DateOnly date, IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
     {
         var result = new Dictionary<string, OrderDetail>(StringComparer.OrdinalIgnoreCase);
-        var rows = await db.StagedImports.AsNoTracking()
+        // Read only the staged records behind this day's orders: those the orders point at,
+        // plus recent records that mention this date (amendments, register orders). This
+        // used to load the latest 8,000 order records, email text included, on every refresh.
+        var dateText = date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var windowStart = new DateTimeOffset(date.AddDays(-45).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        var sourceIds = orders.Where(x => x.SourceStagedImportId != null).Select(x => x.SourceStagedImportId!.Value).Distinct().ToList();
+        var byDate = await db.StagedImports.AsNoTracking()
             .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") &&
-                (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted))
-            .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).ThenByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
+                (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted) &&
+                x.ReceivedAtUtc >= windowStart && x.PayloadJson.Contains(dateText))
+            .Select(x => new DetailRow(x.Id, x.PayloadJson, x.Source, x.ReviewNote, x.ReviewedAtUtc, x.ReceivedAtUtc))
+            .Take(4000)
+            .ToListAsync(ct);
+        var missingIds = sourceIds.Except(byDate.Select(x => x.Id)).ToList();
+        var bySource = new List<DetailRow>();
+        foreach (var chunk in missingIds.Chunk(500))
+            bySource.AddRange(await db.StagedImports.AsNoTracking()
+                .Where(x => chunk.Contains(x.Id))
+                .Select(x => new DetailRow(x.Id, x.PayloadJson, x.Source, x.ReviewNote, x.ReviewedAtUtc, x.ReceivedAtUtc))
+                .ToListAsync(ct));
+        var rows = byDate.Concat(bySource)
+            .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).ThenByDescending(x => x.ReceivedAtUtc)
+            .ToList();
         foreach (var row in rows)
         {
             try
@@ -343,7 +387,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 var planningReason = Text(root, "planningWindowReason", "pmReason");
                 var runsOvernight = Bool(root, "runsOvernight", "overnightRoute");
                 var lineNote = BuildOrderReferenceNote(root, reference);
-                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight, lineNote);
+                var items = HandlingUnitClassifier.UnitCount(root);
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight, lineNote, items?.Count, items?.Unit);
             }
             catch (JsonException) { }
         }
@@ -352,14 +397,22 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
 
     private async Task<Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>> ReadLatestAllocations(DateOnly date, CancellationToken ct)
     {
-        var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == AllocationType && x.Status == StagingStatus.Promoted)
-            .OrderByDescending(x => x.ReceivedAtUtc).Take(20000).ToListAsync(ct);
+        // Only this day's allocations: each one stores its planning date and is written in
+        // the weeks around it. This used to read the latest 20,000 allocations of all time.
+        var dateText = date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var windowStart = new DateTimeOffset(date.AddDays(-60).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(x => x.EntityType == AllocationType && x.Status == StagingStatus.Promoted && x.ReceivedAtUtc >= windowStart && x.PayloadJson.Contains(dateText))
+            .OrderByDescending(x => x.ReceivedAtUtc)
+            .Select(x => x.PayloadJson)
+            .Take(20000)
+            .ToListAsync(ct);
         var result = new Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>();
-        foreach (var row in rows)
+        foreach (var json in rows)
         {
             try
             {
-                var state = JsonSerializer.Deserialize<AllocationState>(row.PayloadJson, JsonOptions);
+                var state = JsonSerializer.Deserialize<AllocationState>(json, JsonOptions);
                 if (state is null || state.Date != date) continue;
                 var key = (state.OrderId, state.LoadId, state.SourceLineId);
                 if (!result.ContainsKey(key)) result[key] = state;
@@ -410,7 +463,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         if (target is null) return null;
         var latest = await ReadLatestAllocations(date, ct);
         var orders = await ReadOrders(date, ct);
-        var details = await ReadOrderDetails(date, ct);
+        var details = await ReadOrderDetails(date, orders, ct);
         var sourceLines = await ReadCurrentSourceLines(orders, ct);
         decimal standard = 0;
         decimal euro = 0;
@@ -771,7 +824,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight, string LineNote);
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight, string LineNote, int? UnitCount = null, string? UnitCountType = null);
     private async Task<Dictionary<Guid, List<OrderSourceLine>>> ReadCurrentSourceLines(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
     {
         var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
@@ -795,6 +848,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         }
     }
 
+    private sealed record DetailRow(Guid Id, string PayloadJson, string? Source, string? ReviewNote, DateTimeOffset? ReviewedAtUtc, DateTimeOffset ReceivedAtUtc);
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
     public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note, Guid? SourceLineId = null);
 

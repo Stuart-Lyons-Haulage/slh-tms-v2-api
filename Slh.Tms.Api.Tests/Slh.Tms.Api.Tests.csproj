@@ -21,5 +21,13 @@
   </ItemGroup>
   <ItemGroup>
     <None Update="Fixtures\29.09.2026.xlsm" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Vitacress Collections WAITROSE 19.10.26.xls" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\NWF SLH Outbound PO 19.10.26.pdf" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\NWF SLH Collection Sheet 19.10.26.xlsx" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Barfoots Euro Pool Return 0332403646 20.10.2026.pdf" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Barfoots Euro Pool Delivery 0228820092 17.10.2026.pdf" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Great Bear BOOKING IN FORM 21.10.26.xlsx" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Tosca Delivery note combined 20.10.26.pdf" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\Waitrose SLH wc 18th October 2026 Bracknell Mix.xlsx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

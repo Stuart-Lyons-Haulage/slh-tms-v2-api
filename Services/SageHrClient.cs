@@ -120,3 +120,4 @@ public sealed record SageHrLeavePolicy(string? Name);
 public sealed record SageHrOutOfOfficePage(List<SageHrOutOfOffice> Data);
 
 internal static class SageHrJson { internal static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true }; }
+

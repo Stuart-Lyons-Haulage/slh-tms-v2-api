@@ -36,6 +36,11 @@ public sealed class InfoMailboxGraphOptions
     // persisted in StagedImports, so older messages remain replayable there.
     public int OverlapMinutes { get; set; } = 15;
     public int MaxMessagesPerPoll { get; set; } = 250;
+    // Every RetrySweepMinutes the poll reaches back RetrySweepHours so a message whose
+    // intake did not finish (timeout, attachment download, error) is picked up again
+    // without anyone pressing "poll now". Finished messages are skipped cheaply.
+    public int RetrySweepHours { get; set; } = 36;
+    public int RetrySweepMinutes { get; set; } = 15;
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
 
     public bool IsConfigured =>
@@ -106,9 +111,11 @@ public sealed class InfoMailboxGraphPollingService(
     IHttpClientFactory httpClientFactory,
     InfoMailboxGraphOptions options,
     InfoMailboxGraphHealthState health,
+    OutlookIntakeTags outlookTags,
     ILogger<InfoMailboxGraphPollingService> logger) : BackgroundService
 {
     private readonly SemaphoreSlim pollGate = new(1, 1);
+    private DateTimeOffset lastRetrySweepUtc = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim manualPollSignal = new(0);
     private readonly object manualPollGate = new();
     private readonly Queue<DateOnly> queuedManualReceivedDates = new();
@@ -150,9 +157,9 @@ public sealed class InfoMailboxGraphPollingService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            DateOnly? manualReceivedDate = null;
             try
             {
-                DateOnly? manualReceivedDate;
                 lock (manualPollGate)
                 {
                     manualReceivedDate = queuedManualReceivedDates.Count > 0
@@ -178,7 +185,21 @@ public sealed class InfoMailboxGraphPollingService(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Info mailbox Graph polling failed. The next scheduled poll will retry.");
+                if (manualReceivedDate is { } retryDate && !stoppingToken.IsCancellationRequested)
+                {
+                    // A manual day scan can exceed the poll time budget. Keep its date
+                    // queued so the next pass resumes idempotently; staged evidence is
+                    // keyed by Graph message ID and already completed messages are skipped.
+                    lock (manualPollGate) queuedManualReceivedDates.Enqueue(retryDate);
+                    logger.LogWarning(
+                        ex,
+                        "Info mailbox Graph poll for {ReceivedDate} failed and was re-queued for retry after the normal poll interval.",
+                        retryDate);
+                }
+                else
+                {
+                    logger.LogError(ex, "Info mailbox Graph polling failed. The next scheduled poll will retry.");
+                }
             }
 
             try
@@ -255,6 +276,13 @@ public sealed class InfoMailboxGraphPollingService(
                 : lastEvidenceUtc.Value.AddMinutes(-Math.Clamp(options.OverlapMinutes, 10, 1440))
             : MailboxDayWindow(manualReceivedDate.Value).StartUtc;
         var until = manualReceivedDate is null ? (DateTimeOffset?)null : MailboxDayWindow(manualReceivedDate.Value).EndUtc;
+        if (manualReceivedDate is null && options.RetrySweepHours > 0 &&
+            DateTimeOffset.UtcNow - lastRetrySweepUtc >= TimeSpan.FromMinutes(Math.Clamp(options.RetrySweepMinutes, 5, 1440)))
+        {
+            var sweepFrom = DateTimeOffset.UtcNow.AddHours(-Math.Clamp(options.RetrySweepHours, 1, 168));
+            if (sweepFrom < since) since = sweepFrom;
+            lastRetrySweepUtc = DateTimeOffset.UtcNow;
+        }
 
         var mappedDomains = await db.CustomerEmailRoutes.AsNoTracking()
             .Where(route => route.Active && route.SenderDomain != null)
@@ -299,23 +327,25 @@ public sealed class InfoMailboxGraphPollingService(
             stage = $"attachment download and order intake ({messageIndex} of {seen})";
             ct.ThrowIfCancellationRequested();
             using var messageTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            messageTimeout.CancelAfter(TimeSpan.FromSeconds(45));
+            messageTimeout.CancelAfter(TimeSpan.FromSeconds(90));
             var messageCt = messageTimeout.Token;
 
             var evidenceKey = SourceEvidenceKeyBuilder.For(message.Id, message.InternetMessageId);
             var linkedUrls = ExtractSupportedDocumentLinks(message.BodyHtml, message.BodyPreview);
-            var existingEvidence = linkedUrls.Count == 0
-                ? null
-                : await db.StagedImports.AsNoTracking()
-                    .Where(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey)
-                    .Select(item => item.PayloadJson)
-                    .FirstOrDefaultAsync(messageCt);
-            if (existingEvidence is not null && linkedUrls.All(url =>
+            var existingEvidence = await db.StagedImports.AsNoTracking()
+                .Where(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey)
+                .Select(item => item.PayloadJson)
+                .FirstOrDefaultAsync(messageCt);
+            // Already retained: skip only when nothing is missing. A message whose order
+            // attachment did not download (timeout, Graph error, poll cut short) is
+            // fetched and run through intake again until its file is held, instead of
+            // being skipped for good the moment its evidence row exists.
+            if (existingEvidence is not null &&
+                EvidenceIntakeCompleted(existingEvidence) &&
+                !EvidenceNeedsAttachmentRetry(existingEvidence, message.HasAttachments) &&
+                linkedUrls.All(url =>
                     existingEvidence.Contains(url, StringComparison.Ordinal) &&
                     !existingEvidence.Contains("retrievalError", StringComparison.Ordinal)))
-                continue;
-            if (existingEvidence is null && linkedUrls.Count == 0 && await db.StagedImports.AsNoTracking()
-                .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, messageCt))
                 continue;
 
             var attachments = message.HasAttachments
@@ -342,14 +372,55 @@ public sealed class InfoMailboxGraphPollingService(
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && messageCt.IsCancellationRequested)
             {
-                logger.LogWarning("Graph message {MessageId} exceeded the 45-second intake budget; retaining it for replay/manual review and continuing.", message.Id);
+                logger.LogWarning("Graph message {MessageId} exceeded the 90-second intake budget; it will be tried again on the next poll.", message.Id);
+                db.ChangeTracker.Clear();
                 continue;
             }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // One failing message must not stop the rest of the mailbox. It has no
+                // completion mark, so the next poll runs it through intake again.
+                logger.LogError(ex, "Graph message {MessageId} failed in intake; it will be tried again on the next poll.", message.Id);
+                db.ChangeTracker.Clear();
+                continue;
+            }
+            await MarkIntakeCompletedAsync(db, evidenceKey, ct);
             ingested++;
+            await outlookTags.TagAfterIntakeAsync(client, token.Token, options.Mailbox, db, message.Id, ct);
             }
             logger.LogInformation("Info mailbox Graph poll {PollId} completed chunk through message {MessageIndex} of {Total}.", pollId, messageIndex, seen);
         }
 
+        stage = "duplicate review copies";
+        try
+        {
+            var duplicates = await PendingDuplicateSweep.RunAsync(db, ct);
+            if (duplicates > 0) logger.LogInformation("Closed {Count} review copies of orders that were already approved.", duplicates);
+        }
+        catch (Exception duplicateException) when (duplicateException is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(duplicateException, "Duplicate review check failed; intake is unaffected.");
+        }
+
+        stage = "lapsed NWF bookings";
+        try
+        {
+            var lapsed = await NwfBookingExpiry.RunAsync(db, DateTimeOffset.UtcNow, ct);
+            if (lapsed > 0) logger.LogInformation("{Count} NWF booking(s) lapsed: collection day passed without a Transport PO.", lapsed);
+        }
+        catch (Exception expiryException) when (expiryException is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(expiryException, "NWF booking expiry check failed; intake is unaffected.");
+        }
+
+        stage = "Outlook tags";
+        try { await outlookTags.SweepAsync(client, token.Token, options.Mailbox, db, ct); }
+        catch (Exception tagException) when (tagException is not OperationCanceledException)
+        {
+            logger.LogWarning(tagException, "Outlook tag sweep failed; intake is unaffected.");
+        }
         health.Success(seen, ingested);
         logger.LogInformation(
             "Info mailbox Graph poll {PollId} completed in {ElapsedMilliseconds} ms: {Seen} message(s) seen, {Ingested} newly ingested.",
@@ -516,7 +587,12 @@ public sealed class InfoMailboxGraphPollingService(
 
             var size = Long(item, "size");
             if (size is > 0 && size > options.MaxAttachmentBytes)
-                throw new InvalidOperationException($"Supported order attachment '{name}' is {size:N0} bytes and exceeds the configured Graph intake limit.");
+            {
+                // One oversized file must not cost the message its other attachments.
+                result.Add(new MailboxAttachmentRequest(name, Text(item, "contentType"), null, false, null, size, null, null,
+                    $"Attachment is {size:N0} bytes and exceeds the configured Graph intake limit."));
+                continue;
+            }
 
             var attachmentId = Text(item, "id");
             if (string.IsNullOrWhiteSpace(attachmentId))
@@ -796,7 +872,7 @@ public sealed class InfoMailboxGraphPollingService(
             message.SenderName,
             message.Subject,
             message.ReceivedAtUtc,
-            message.BodyPreview,
+            FullBodyText(message),
             message.BodyHtml,
             message.WebLink,
             attachments,
@@ -806,6 +882,97 @@ public sealed class InfoMailboxGraphPollingService(
             "html",
             message.Importance,
             $"graph:{Guid.NewGuid():N}");
+
+    // Graph's bodyPreview is cut at 255 characters, so parsers that read the plain
+    // body (dates, pallet lines, depot tables) only saw the first lines of the email.
+    internal static string? FullBodyText(GraphMailboxMessage message)
+    {
+        if (string.IsNullOrWhiteSpace(message.BodyHtml)) return message.BodyPreview;
+        var text = MailboxBodyNormalizer.Normalize(message.BodyPreview, message.BodyHtml);
+        return string.IsNullOrWhiteSpace(text) ? message.BodyPreview : text;
+    }
+
+    // Set once a message has been through intake end to end. Evidence is written at the
+    // start of intake, so without this mark a message whose intake timed out or failed
+    // part-way was treated as done and never looked at again.
+    internal const string IntakeCompletedMarker = "intakeCompletedAtUtc";
+
+    internal static bool EvidenceIntakeCompleted(string evidencePayload) =>
+        evidencePayload.Contains($"\"{IntakeCompletedMarker}\"", StringComparison.Ordinal);
+
+    private async Task MarkIntakeCompletedAsync(TmsDbContext db, string evidenceKey, CancellationToken ct)
+    {
+        try
+        {
+            var evidence = await db.StagedImports
+                .SingleOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
+            if (evidence is null) return;
+            var root = System.Text.Json.Nodes.JsonNode.Parse(evidence.PayloadJson)?.AsObject();
+            if (root is null) return;
+            root[IntakeCompletedMarker] = DateTimeOffset.UtcNow.ToString("O");
+            evidence.PayloadJson = root.ToJsonString();
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Could not mark Graph evidence {EvidenceKey} as processed; it will be checked again next poll.", evidenceKey);
+            db.ChangeTracker.Clear();
+        }
+    }
+
+    internal static bool EvidenceNeedsAttachmentRetry(string evidencePayload, bool messageHasAttachments)
+    {
+        if (!messageHasAttachments) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(evidencePayload);
+            if (!document.RootElement.TryGetProperty("attachments", out var attachments) ||
+                attachments.ValueKind != JsonValueKind.Array)
+                return true;
+            // Evidence rows are serialised with PascalCase attachment fields (Name,
+            // IsInline, RetrievalError) and camelCase contentBase64; read either.
+            static string? Field(JsonElement item, string name)
+            {
+                foreach (var property in item.EnumerateObject())
+                    if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                        return property.Value.ValueKind switch
+                        {
+                            JsonValueKind.String => property.Value.GetString(),
+                            JsonValueKind.True => "true",
+                            JsonValueKind.False => "false",
+                            _ => null
+                        };
+                return null;
+            }
+
+            var listFailed = false;
+            var heldFile = false;
+            foreach (var attachment in attachments.EnumerateArray())
+            {
+                if (attachment.ValueKind != JsonValueKind.Object) continue;
+                var name = Field(attachment, "name") ?? string.Empty;
+                if (string.Equals(name, "outlook-attachment-unavailable", StringComparison.OrdinalIgnoreCase))
+                {
+                    listFailed = true;
+                    continue;
+                }
+                if (Field(attachment, "isInline") == "true" || !SupportedExtensions.Contains(Path.GetExtension(name))) continue;
+                if (!string.IsNullOrWhiteSpace(Field(attachment, "contentBase64")))
+                {
+                    heldFile = true;
+                    continue;
+                }
+                var oversized = (Field(attachment, "retrievalError") ?? string.Empty).Contains("exceeds the configured", StringComparison.OrdinalIgnoreCase);
+                if (!oversized) return true;
+            }
+            // The attachment list itself failed and no file has been held since.
+            return listFailed && !heldFile;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
+    }
 
     private static JsonElement? CloneArray(JsonElement item, string propertyName) =>
         item.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Array

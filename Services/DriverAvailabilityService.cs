@@ -127,6 +127,8 @@ public static class DriverAvailabilityService
         var details = await ReadDetailsAsync(db, drivers, ct);
         var sageRoster = await ReadSageRosterAsync(db, ct);
         var sageLeave = await ReadSageLeaveAsync(sageHr, planningDate, logger, ct);
+        var workPatterns = await DriverWorkPatterns.LatestAsync(db, ct);
+        var sageCalendar = await SageCalendarFeed.DayAsync(db, planningDate, ct);
 
         var items = drivers
             .Where(driver => DriverPopulationRules.IsDriver(driver) || IsRecognisedEmploymentType(driver))
@@ -137,7 +139,9 @@ public static class DriverAvailabilityService
                 allocations.GetValueOrDefault(driver.Id) ?? [],
                 details.GetValueOrDefault(driver.Id) ?? DriverAvailabilityDetail.Empty,
                 sageRoster,
-                sageLeave))
+                sageLeave,
+                workPatterns.TryGetValue(driver.Id, out var pattern) ? DriverWorkPatterns.Evaluate(pattern, planningDate) : null,
+                sageCalendar.GetValueOrDefault(driver.Id)))
             .OrderBy(item => GroupOrder(item.Group))
             .ThenBy(item => item.DisplayName)
             .ToList();
@@ -185,7 +189,9 @@ public static class DriverAvailabilityService
         IReadOnlyList<Load> allocations,
         DriverAvailabilityDetail detail,
         SageRosterEvidence sageRoster,
-        IReadOnlySet<string>? sageLeave = null)
+        IReadOnlySet<string>? sageLeave = null,
+        DriverWorkPatterns.DayPlan? workPattern = null,
+        SageCalendarFeed.DriverDay? sageCalendarDay = null)
     {
         var employmentType = CanonicalEmploymentType(detail.EmploymentType ?? driver.DriverType, driver.DriverGroup);
         var employeeNumber = Normalise(driver.EmployeeNumber);
@@ -214,7 +220,13 @@ public static class DriverAvailabilityService
 
         if (employmentType == "Unknown") blockReasons.Add("Employment type is Unknown in Master Data.");
         if (detail.HolidayDates.Contains(planningDate) || sageLeave?.Contains(employeeNumber) == true) blockReasons.Add("Leave");
-        if (employmentType == "Employed" && detail.ContractedDays.Count > 0 && !detail.ContractedDays.Contains(planningDate.DayOfWeek))
+        // Sage HR "Who's off" calendar: leave (holiday, sickness...) or a non-working day.
+        if (sageCalendarDay is { Kind: "Leave" } && !blockReasons.Contains("Leave")) blockReasons.Add($"Leave (Sage: {sageCalendarDay.Type})");
+        else if (sageCalendarDay is { Kind: "NonWorking" } && workPattern is not { Working: false }) blockReasons.Add("Non-working day (Sage calendar)");
+        // Sage HR work pattern first; the older contracted-days list only when there is none.
+        if (employmentType == "Employed" && workPattern is { Working: false })
+            blockReasons.Add("Rest day on Sage work pattern");
+        else if (employmentType == "Employed" && workPattern is null && detail.ContractedDays.Count > 0 && !detail.ContractedDays.Contains(planningDate.DayOfWeek))
             blockReasons.Add("Outside known working pattern");
         if (driver.LicenceExpiry is DateOnly licence && licence < planningDate) blockReasons.Add("Driving licence expired");
         if (driver.CPCExpiry is DateOnly cpc && cpc < planningDate) blockReasons.Add("Driver CPC expired");
