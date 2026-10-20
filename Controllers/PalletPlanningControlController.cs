@@ -349,15 +349,10 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         var dateText = date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var windowStart = new DateTimeOffset(date.AddDays(-45).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
         var sourceIds = orders.Where(x => x.SourceStagedImportId != null).Select(x => x.SourceStagedImportId!.Value).Distinct().ToList();
-        // Fast path: the indexed, PERSISTED computed CollectionDate (migration 088) gives an
-        // exact index seek. Fallback (rows with no computed date - e.g. the in-memory test
-        // provider, or a payload without collectionDate) keeps the original received-window +
-        // JSON match so behaviour is unchanged where the computed column is absent.
         var byDate = await db.StagedImports.AsNoTracking()
             .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") &&
                 (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted) &&
-                (x.CollectionDate == date ||
-                 (x.CollectionDate == null && x.ReceivedAtUtc >= windowStart && x.PayloadJson.Contains(dateText))))
+                x.ReceivedAtUtc >= windowStart && x.PayloadJson.Contains(dateText))
             .Select(x => new DetailRow(x.Id, x.PayloadJson, x.Source, x.ReviewNote, x.ReviewedAtUtc, x.ReceivedAtUtc))
             .Take(4000)
             .ToListAsync(ct);
