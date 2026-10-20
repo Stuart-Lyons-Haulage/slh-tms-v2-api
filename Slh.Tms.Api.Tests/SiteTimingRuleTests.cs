@@ -34,6 +34,30 @@ public sealed class SiteTimingRuleTests
     }
 
     [Fact]
+    public void Dispatch_route_timing_uses_master_collection_start_and_final_delivery_cutoff()
+    {
+        var collection = new Site { ExternalCode = "NWF-Mer", Name = "NWF - Merston", DriverTextName = "NWF - Merston" };
+        var delivery = new Site { ExternalCode = "MOR-LAT", Name = "Morrisons-Lattimer", DriverTextName = "Morrisons-Lattimer" };
+        var load = new Load
+        {
+            Reference = "MERSTON-LATTIMER",
+            PlanningDate = new DateOnly(2026, 10, 20),
+            Stops =
+            [
+                new LoadStop { Sequence = 1, Name = "Collect · NWF - Merston" },
+                new LoadStop { Sequence = 2, Name = "Deliver · Morrisons-Lattimer" }
+            ]
+        };
+        var rule = new SiteTimingRule("NWF-Mer-Morrisons-Lattimer", "Std", "07:00", "06:00", "07:00", "18:00");
+
+        var collectionTime = DispatchRouteTiming.PlannedCollectionTimeUtc(load, load.Stops[0], [rule], [collection, delivery]);
+        var deliveryCutoff = DispatchRouteTiming.FinalDeliveryCutoffTimeUtc(load, load.Stops[1], [rule], [collection, delivery]);
+
+        Assert.Equal(new DateTimeOffset(2026, 10, 20, 5, 0, 0, TimeSpan.Zero), collectionTime);
+        Assert.Equal(new DateTimeOffset(2026, 10, 20, 17, 0, 0, TimeSpan.Zero), deliveryCutoff);
+    }
+
+    [Fact]
     public void Previous_run_finish_uses_the_later_of_planned_finish_and_master_deadline()
     {
         var collection = new Site { ExternalCode = "NWF-Mer", Name = "NWF - Merston" };
