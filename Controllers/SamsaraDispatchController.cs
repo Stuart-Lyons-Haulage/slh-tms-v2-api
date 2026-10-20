@@ -339,7 +339,7 @@ public sealed class SamsaraDispatchController(
                     new SamsaraAddressRequest(
                         candidate.Site.Id,
                         candidate.Site.ExternalCode,
-                        candidate.Site.DriverTextName ?? candidate.Site.Name,
+                        candidate.Site.Name,
                         candidate.Site.CollectionAddress!,
                         null,
                         null,
@@ -893,24 +893,9 @@ public sealed class SamsaraDispatchController(
                 .GroupBy(item => item.TmsEntityId)
                 .ToDictionary(group => group.Key, group => group.First().ExternalKey);
 
-            // Address creation is the only genuinely per-site first-export work. Reuse
-            // the local mapping on later exports, and keep first-time provider calls
-            // bounded so a route with many stops cannot spend the whole API request in
-            // a serial GET -> POST/PATCH loop.
-            var addressFallbackBySiteId = new HashSet<Guid>();
-            var stopIds = physicalStops.Select(item => item.Representative.StopId).Distinct().ToList();
-            var existingStopMappings = stopIds.Count == 0
-                ? []
-                : await db.IntegrationMappings.AsNoTracking()
-                    .Where(item => item.Active &&
-                                   item.Provider == "Samsara" &&
-                                   item.TmsEntityType == "LoadStop" &&
-                                   stopIds.Contains(item.TmsEntityId))
-                    .OrderByDescending(item => item.UpdatedAtUtc)
-                    .ToListAsync(ct);
-            var samsaraAddressByStopId = existingStopMappings
-                .GroupBy(item => item.TmsEntityId)
-                .ToDictionary(group => group.Key, group => group.First().ExternalKey);
+            // Only reusable addresses linked to a matched Master Site may be used.
+            // First-time address upserts are bounded so routes with many stops do not
+            // spend the whole API request in a serial GET -> POST/PATCH loop.
             if (samsara.AddressSyncEnabled)
             {
                 using var addressGate = new SemaphoreSlim(4, 4);
@@ -945,7 +930,7 @@ public sealed class SamsaraDispatchController(
                     {
                         logger.LogWarning(
                             exception,
-                            "Samsara reusable address sync failed for site {SiteId}; route stop will use a single-use location.",
+                            "Samsara reusable address sync failed for site {SiteId}; route export will be blocked until it succeeds.",
                             site.Id);
                         return new AddressSyncResult(site.Id, null);
                     }
@@ -967,21 +952,17 @@ public sealed class SamsaraDispatchController(
                             sites.Single(item => item.Id == addressResult.SiteId).Name,
                             ct);
                     }
-                    else
-                    {
-                        addressFallbackBySiteId.Add(addressResult.SiteId);
-                    }
+
                 }
 
-                // Reusable addresses must come from matched Site Master records. Unmatched
-                // stops use a single-use route location or are blocked by the location preflight.
+                // Every route stop must resolve to a reusable Samsara Address for its Master Site.
 
             }
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
             var missingLocations = new List<string>();
             var missingSchedule = new List<string>();
-            var addressFallbacks = new List<string>();
+
             var missingSamsaraLocations = new List<string>();
             var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
             var departLastStop = !string.Equals(options.RouteCompletionCondition, "arriveLastStop", StringComparison.OrdinalIgnoreCase);
@@ -1013,15 +994,12 @@ public sealed class SamsaraDispatchController(
                 if (samsara.AddressSyncEnabled && representative.SiteId is Guid siteId)
                 {
                     samsaraAddressBySiteId.TryGetValue(siteId, out samsaraAddressId);
-                    if (addressFallbackBySiteId.Contains(siteId))
-                        addressFallbacks.Add(physicalStopName);
                 }
-                if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
-                    samsaraAddressByStopId.TryGetValue(representative.StopId, out var stopAddressId))
-                    samsaraAddressId = stopAddressId;
 
-                if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
-                    !SamsaraLocationRules.HasUsableCoordinates(representative.Latitude, representative.Longitude))
+                // Recurring SLH stops must always reference a saved, reusable Samsara
+                // Address. Do not create a one-off location from the order text or its
+                // coordinates when the stop cannot be matched and synchronised.
+                if (string.IsNullOrWhiteSpace(samsaraAddressId))
                 {
                     missingSamsaraLocations.Add(physicalStopName);
                     continue;
@@ -1075,7 +1053,7 @@ public sealed class SamsaraDispatchController(
             if (missingSamsaraLocations.Count > 0)
                 return BadRequest(new
                 {
-                    message = $"Samsara needs a reusable address or valid coordinates for: {string.Join(", ", missingSamsaraLocations.Distinct(StringComparer.OrdinalIgnoreCase))}. Check Site Master latitude/longitude; 0,0 and out-of-range values are invalid. Then run Master Data / Address synchronisation and retry.",
+                    message = $"Samsara export requires a saved reusable Address linked to the matching Master Site for: {string.Join(", ", missingSamsaraLocations.Distinct(StringComparer.OrdinalIgnoreCase))}. Check the Site Master name and aliases, ensure it has a physical address, then run Master Data / Address synchronisation and retry.",
                     missingStops = missingSamsaraLocations
                 });
 
@@ -1198,8 +1176,7 @@ public sealed class SamsaraDispatchController(
                 allocatedTrailer = trailer?.TrailerNumber,
                 stopCount = samsaraStops.Count,
                 reusableAddressStops = samsaraStops.Count(stop => !string.IsNullOrWhiteSpace(stop.AddressId)),
-                singleUseFallbackStops = samsaraStops.Count(stop => string.IsNullOrWhiteSpace(stop.AddressId)),
-                addressFallbacks,
+
                 message = result.Created
                     ? (string.IsNullOrWhiteSpace(samsaraDriverId) && string.IsNullOrWhiteSpace(samsaraVehicleId)
                         ? $"{load.Reference} was created in Samsara as an unallocated route from the SLH TMS plan."
