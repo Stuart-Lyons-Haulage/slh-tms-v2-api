@@ -91,6 +91,43 @@ public sealed class OrderIntakeAutomaticSourceGateTests
         Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsManualInputOrder(document.RootElement));
     }
 
+    [Fact]
+    public void IowTomatoesAmazonDeliveryIsApproved()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "iow-amazon", null, "info@lyonshaulage.com", "Liana.taylor@iowtomatoes.co.uk", "Liana Taylor",
+            "Amazon Delivery Wednesday 21st October", DateTimeOffset.Parse("2026-10-19T13:16:52Z"),
+            "Booking Ref: 22495947793\nCollection: Tuesday 20th October from 16:00:\nAPS Produce\nDelivery Wednesday 21st October:\nAmazon ALT2 - MILTON KEYNES\n3 pallets TOTAL WEIGHT 1081kgs",
+            null, null, null);
+
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+    }
+
+    [Fact]
+    public void IowTomatoesCoventGardenDeliveryIsApproved()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "iow-covent", null, "info@lyonshaulage.com", "Kevin.Nicholls@iowtomatoes.co.uk", "Kevin Nicholls",
+            "Covent Garden Deliveries Tues 20th October/Wed 21st October", DateTimeOffset.Parse("2026-10-19T13:16:38Z"),
+            "Collection: Tuesday 20th October from 16:00:\nAPS Produce\nDelivery Wednesday 21st October:\nPrimeur - 1 pallet, 203kg",
+            null, null, null);
+
+        Assert.True(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+    }
+
+    [Fact]
+    public void MarketDeliveryFromAnotherSenderStillStaysOutsideAutomaticLane()
+    {
+        // The IoW/APS carve-out is sender-locked: an ad-hoc wholesale-market booking from any
+        // other sender must still be excluded even when it mentions collection/delivery/pallets.
+        var request = new MailboxEmailIntakeRequest(
+            "other-market", null, "info@lyonshaulage.com", "sales@somewholesaler.example", "Sales",
+            "Covent Garden market booking", DateTimeOffset.Parse("2026-10-19T09:00:00Z"),
+            "Collection tomorrow, Delivery to Covent Garden Market, 5 pallets", null, null, null);
+
+        Assert.False(Slh.Tms.Api.Controllers.OrderIntakeController.IsApprovedAutomaticSource(request));
+    }
+
     private static MailboxEmailIntakeRequest Request(string subject, string body) => new(
         "source-gate-test", null, "info@lyonshaulage.com", "planner@example.test", "Planner",
         subject, DateTimeOffset.Parse("2026-10-05T07:00:00Z"), body, null, null, null);

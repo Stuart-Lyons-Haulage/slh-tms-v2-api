@@ -1074,6 +1074,22 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             (request.Attachments ?? []).Any(item => item.IsInline != true &&
                 (item.Name ?? string.Empty).Contains("Wholesale Booking Spreadsheet", StringComparison.OrdinalIgnoreCase));
 
+        // Isle of Wight Tomatoes / APS Produce send recurring Amazon and Covent Garden market
+        // deliveries in a fixed "Collection: <date> ... Delivery <date> ... <n> pallets" format
+        // the specialist parser already reads into one order per drop. Approve these from the
+        // verified sender despite the generic market exclusion below (which exists to keep
+        // ad-hoc wholesale-market workbooks out of the automatic lane), so they stop being
+        // retained as evidence only and actually reach the TMS.
+        var senderAddress = request.SenderAddress ?? string.Empty;
+        var isIowApsScheduledDelivery =
+            (senderAddress.EndsWith("@iowtomatoes.co.uk", StringComparison.OrdinalIgnoreCase) ||
+             senderAddress.EndsWith("@apsgroup.uk.com", StringComparison.OrdinalIgnoreCase)) &&
+            Regex.IsMatch(source, @"\bCOLLECTION\b") &&
+            Regex.IsMatch(source, @"\bDELIVERY\b") &&
+            Regex.IsMatch(source, @"\b\d+\s+PALLETS?\b");
+        if (isIowApsScheduledDelivery)
+            return true;
+
         // A Barfoots market workbook is explicitly outside the automatic lane even
         // though Barfoots Waitrose/Aldi inputs remain approved.
         // Whole word only: Sainsbury's footer "Sainsbury's Supermarkets Ltd" (and any
