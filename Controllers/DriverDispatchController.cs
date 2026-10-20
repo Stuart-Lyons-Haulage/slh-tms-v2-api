@@ -153,15 +153,14 @@ public sealed class DriverDispatchController(
 
         var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
 
-        // Keep the workforce roster available even when the selected date has no
-        // runs.  Using Active alone here loses drivers after a master refresh when
-        // Active is stale but the driver has positive role/Tacho/agency evidence.
-        // Use the same guarded population rules as the populated-day path, so
-        // office/non-driver records are still excluded.
+        // Show only live Driver Master records in the planning roster. Keep an
+        // inactive identity only when it already owns a run on this date, so a
+        // stale/deactivated driver cannot disappear from an existing allocation.
+        // Positive historical driver or employment evidence alone is not enough
+        // to treat an inactive record as part of the live workforce.
         var selectedDrivers = driverCandidates.Where(driver =>
                 currentDayDriverIds.Contains(driver.Id) ||
-                DriverPopulationRules.IsDriver(driver) ||
-                DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown").ToList();
+                (driver.Active && DriverPopulationRules.IsDriver(driver))).ToList();
 
         if (loads.Count > 0)
             await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);

@@ -65,7 +65,7 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
     }
 
     [Fact]
-    public async Task Driver_with_positive_role_evidence_remains_visible_on_an_empty_planning_day()
+    public async Task Inactive_driver_with_historic_role_evidence_is_hidden_on_an_empty_planning_day()
     {
         var name = $"Empty day driver {Guid.NewGuid():N}";
         using (var scope = factory.Services.CreateScope())
@@ -86,7 +86,7 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
         var response = await client.GetAsync("/api/v1/driver-dispatch?date=2027-02-05");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Contains(payload.GetProperty("drivers").EnumerateArray(), item => item.GetProperty("displayName").GetString() == name);
+        Assert.DoesNotContain(payload.GetProperty("drivers").EnumerateArray(), item => item.GetProperty("displayName").GetString() == name);
     }
 
     [Fact]
