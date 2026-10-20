@@ -405,6 +405,8 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
     {
         var reference = Required(payload, "poNumber"); var customerCode = Required(payload, "customerCode"); var collectionDateText = Required(payload, "collectionDate");
         if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
+        // Indexed date for fast pallet reads (migration 088). Harmless if item is detached.
+        item.CollectionDate = collectionDate;
         var (movement, plannerReady) = await RecordOrderRevision(item, payload, reference, customerCode, ct);
         await NwfBookingReservationSync.UpsertAsync(db, item, payload, null, ct, movement.Id);
         await CustomerEmailRouteService.LearnFromApprovedOrderAsync(db, payload, customerCode, ct);
