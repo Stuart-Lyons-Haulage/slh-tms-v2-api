@@ -229,6 +229,7 @@ public sealed class SamsaraDispatchController(
                     routeId = item.ExternalKey,
                     deliveryRouteId = delivery?.ExternalKey,
                     exportedAtUtc = group.Max(value => value.UpdatedAtUtc),
+                    requiresResend = load?.UpdatedAtUtc is { } loadUpdatedAtUtc && loadUpdatedAtUtc > group.Max(value => value.UpdatedAtUtc),
                     executionState = latest?.Envelope.Progress?.State,
                     executionOperation = latest?.Envelope.Progress?.Operation,
                     executionUpdatedAtUtc = latest?.Envelope.Progress?.OccurredAtUtc ?? latest?.Envelope.UpdatedAtUtc,
