@@ -882,17 +882,18 @@ public sealed class SamsaraDispatchController(
             // a serial GET -> POST/PATCH loop.
             var addressFallbackBySiteId = new HashSet<Guid>();
             var stopIds = physicalStops.Select(item => item.Representative.StopId).Distinct().ToList();
-            var samsaraAddressByStopId = stopIds.Count == 0
-                ? new Dictionary<Guid, string>()
+            var existingStopMappings = stopIds.Count == 0
+                ? []
                 : await db.IntegrationMappings.AsNoTracking()
                     .Where(item => item.Active &&
                                    item.Provider == "Samsara" &&
                                    item.TmsEntityType == "LoadStop" &&
                                    stopIds.Contains(item.TmsEntityId))
                     .OrderByDescending(item => item.UpdatedAtUtc)
-                    .GroupBy(item => item.TmsEntityId)
-                    .Select(group => group.First())
-                    .ToDictionaryAsync(item => item.TmsEntityId, item => item.ExternalKey, ct);
+                    .ToListAsync(ct);
+            var samsaraAddressByStopId = existingStopMappings
+                .GroupBy(item => item.TmsEntityId)
+                .ToDictionary(group => group.Key, group => group.First().ExternalKey);
             if (samsara.AddressSyncEnabled)
             {
                 using var addressGate = new SemaphoreSlim(4, 4);
