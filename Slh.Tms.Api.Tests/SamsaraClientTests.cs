@@ -109,6 +109,38 @@ public sealed class SamsaraClientTests
     }
 
     [Fact]
+    public async Task Route_payload_omits_zero_zero_placeholder_coordinates()
+    {
+        string? postedBody = null;
+        var handler = new StubHandler(async request =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            postedBody = await request.Content!.ReadAsStringAsync();
+            return JsonResponse("""
+            { "data": { "id": "route-1", "stops": [] } }
+            """);
+        });
+
+        var client = Client(handler);
+        await client.UpsertRouteAsync(
+            new SamsaraRouteRequest(Guid.NewGuid(), "SLH route", "plan", null, null,
+            [
+                new SamsaraRouteStopRequest(Guid.NewGuid(), 1, "Site A", null, "Site A address", 0, 0, 250, null, DateTimeOffset.UtcNow, null),
+                new SamsaraRouteStopRequest(Guid.NewGuid(), 2, "Site B", null, "Site B address", 50.8, -0.1, 250, DateTimeOffset.UtcNow.AddHours(1), null, null)
+            ]),
+            CancellationToken.None);
+
+        Assert.NotNull(postedBody);
+        using var document = JsonDocument.Parse(postedBody!);
+        var stops = document.RootElement.GetProperty("stops");
+        var placeholderLocation = stops[0].GetProperty("singleUseLocation");
+        Assert.False(placeholderLocation.TryGetProperty("latitude", out _));
+        Assert.False(placeholderLocation.TryGetProperty("longitude", out _));
+        Assert.Equal(50.8, stops[1].GetProperty("singleUseLocation").GetProperty("latitude").GetDouble());
+    }
+
+    [Fact]
     public async Task Route_create_retries_without_stop_external_ids_when_samsara_rejects_duplicate_arrivals()
     {
         var postedBodies = new List<string>();
