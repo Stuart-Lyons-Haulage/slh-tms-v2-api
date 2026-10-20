@@ -100,6 +100,21 @@ public sealed class SamsaraDispatchController(
         }
 
         var ids = byId.Keys.ToList();
+        var registerKeys = ids.Select(id => $"planningload:{id:N}").ToList();
+        var registerUpdates = registerKeys.Count == 0
+            ? []
+            : await db.StagedImports.AsNoTracking()
+                .Where(row => row.EntityType == "planningload" &&
+                              row.Status == StagingStatus.Promoted &&
+                              registerKeys.Contains(row.IdempotencyKey) &&
+                              row.ReviewedAtUtc != null)
+                .Select(row => new { row.IdempotencyKey, UpdatedAtUtc = row.ReviewedAtUtc!.Value })
+                .ToListAsync(ct);
+        var registerUpdatedAtByLoad = registerUpdates
+            .Where(row => Guid.TryParseExact(row.IdempotencyKey["planningload:".Length..], "N", out _))
+            .ToDictionary(
+                row => Guid.ParseExact(row.IdempotencyKey["planningload:".Length..], "N"),
+                row => row.UpdatedAtUtc);
         var mappings = ids.Count == 0
             ? []
             : await db.IntegrationMappings.AsNoTracking()
@@ -229,6 +244,8 @@ public sealed class SamsaraDispatchController(
                     routeId = item.ExternalKey,
                     deliveryRouteId = delivery?.ExternalKey,
                     exportedAtUtc = group.Max(value => value.UpdatedAtUtc),
+                    requiresResend = registerUpdatedAtByLoad.TryGetValue(item.TmsEntityId, out var loadUpdatedAtUtc) &&
+                                     loadUpdatedAtUtc > group.Max(value => value.UpdatedAtUtc),
                     executionState = latest?.Envelope.Progress?.State,
                     executionOperation = latest?.Envelope.Progress?.Operation,
                     executionUpdatedAtUtc = latest?.Envelope.Progress?.OccurredAtUtc ?? latest?.Envelope.UpdatedAtUtc,
