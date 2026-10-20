@@ -25,6 +25,27 @@ public sealed class SamsaraPhysicalStopGroupingTests
         Assert.Same(site, matched);
     }
 
+    [Theory]
+    [InlineData("Collect · Greenhouse")]
+    [InlineData("Collect • Greenhouse")]
+    [InlineData("Collect Greenhouse")]
+    public void Collection_label_prefix_does_not_prevent_site_master_matching(string stopName)
+    {
+        var site = new Site
+        {
+            ExternalCode = "SITE-GREENHOUSE",
+            Name = "Greenhouse",
+            DriverTextName = "Greenhouse",
+            CollectionAddress = "Greenhouse Lane, Chichester, PO20 7XX",
+            Aliases = "Greenhouse North"
+        };
+        var stop = new LoadStop { Name = stopName, Address = "1000001350953" };
+
+        var matched = SamsaraStopSiteMatcher.FindSite(stop, [site]);
+
+        Assert.Same(site, matched);
+    }
+
     [Fact]
     public void Groups_adjacent_jobs_at_same_physical_site_but_preserves_collection_and_delivery_phases()
     {

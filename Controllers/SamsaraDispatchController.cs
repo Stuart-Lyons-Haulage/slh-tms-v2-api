@@ -881,13 +881,26 @@ public sealed class SamsaraDispatchController(
             // bounded so a route with many stops cannot spend the whole API request in
             // a serial GET -> POST/PATCH loop.
             var addressFallbackBySiteId = new HashSet<Guid>();
-            var samsaraAddressByStopId = new Dictionary<Guid, string>();
+            var stopIds = physicalStops.Select(item => item.Representative.StopId).Distinct().ToList();
+            var existingStopMappings = stopIds.Count == 0
+                ? []
+                : await db.IntegrationMappings.AsNoTracking()
+                    .Where(item => item.Active &&
+                                   item.Provider == "Samsara" &&
+                                   item.TmsEntityType == "LoadStop" &&
+                                   stopIds.Contains(item.TmsEntityId))
+                    .OrderByDescending(item => item.UpdatedAtUtc)
+                    .ToListAsync(ct);
+            var samsaraAddressByStopId = existingStopMappings
+                .GroupBy(item => item.TmsEntityId)
+                .ToDictionary(group => group.Key, group => group.First().ExternalKey);
             if (samsara.AddressSyncEnabled)
             {
                 using var addressGate = new SemaphoreSlim(4, 4);
                 var sitesToSync = physicalStops
                     .Where(item => item.Representative.SiteId is not null &&
-                                   !string.IsNullOrWhiteSpace(item.Representative.Address) &&
+                                   sites.Any(site => site.Id == item.Representative.SiteId.Value &&
+                                                     SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress)) &&
                                    !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
                     .GroupBy(item => item.Representative.SiteId!.Value)
                     .Select(group => group.First())
@@ -904,7 +917,7 @@ public sealed class SamsaraDispatchController(
                                 site.Id,
                                 site.ExternalCode,
                                 site.DriverTextName ?? site.Name,
-                                item.Representative.Address!,
+                                site.CollectionAddress!,
                                 null,
                                 null,
                                 site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
@@ -943,60 +956,9 @@ public sealed class SamsaraDispatchController(
                     }
                 }
 
-                // A route can contain a physical address that did not resolve to a
-                // Site Master record (or whose site address sync failed). Create a
-                // reusable Samsara Address for that stop so route creation remains
-                // address-based and does not depend on single-use coordinates.
-                var stopAddressesToSync = physicalStops
-                    .Where(item => !string.IsNullOrWhiteSpace(item.Representative.Address) &&
-                                   (item.Representative.SiteId is null ||
-                                    !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value)))
-                    .GroupBy(item => item.Representative.StopId)
-                    .Select(group => group.First())
-                    .ToList();
+                // Reusable addresses must come from matched Site Master records. Unmatched
+                // stops use a single-use route location or are blocked by the location preflight.
 
-                var stopAddressResults = await Task.WhenAll(stopAddressesToSync.Select(async item =>
-                {
-                    await addressGate.WaitAsync(ct);
-                    try
-                    {
-                        var representative = item.Representative;
-                        var result = await samsara.UpsertAddressAsync(
-                            new SamsaraAddressRequest(
-                                representative.StopId,
-                                $"STOP-{representative.StopId:N}",
-                                representative.Name,
-                                representative.Address!,
-                                null,
-                                null,
-                                samsara.StopRadiusMeters),
-                            ct);
-                        return new StopAddressSyncResult(representative.StopId, result.AddressId);
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        logger.LogWarning(exception, "Samsara stop address sync failed for stop {StopId}.", item.Representative.StopId);
-                        return new StopAddressSyncResult(item.Representative.StopId, null);
-                    }
-                    finally
-                    {
-                        addressGate.Release();
-                    }
-                }));
-
-                foreach (var stopAddressResult in stopAddressResults)
-                {
-                    if (!string.IsNullOrWhiteSpace(stopAddressResult.AddressId))
-                    {
-                        samsaraAddressByStopId[stopAddressResult.StopId] = stopAddressResult.AddressId;
-                        await SaveMappingAsync(
-                            "LoadStop",
-                            stopAddressResult.StopId,
-                            stopAddressResult.AddressId,
-                            physicalStops.First(item => item.Representative.StopId == stopAddressResult.StopId).Representative.Name,
-                            ct);
-                    }
-                }
             }
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
@@ -1756,7 +1718,11 @@ public sealed class SamsaraDispatchController(
     }
 
     private static string CleanStopName(string value) =>
-        System.Text.RegularExpressions.Regex.Replace(value, @"^(?:Collect|Deliver)\s*[·:\-]\s*", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+        System.Text.RegularExpressions.Regex.Replace(
+            value,
+            @"^(?:Collect|Deliver)\b\s*(?:[·•:–—-]\s*)?",
+            string.Empty,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
 
     private static string Normalise(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
@@ -1774,10 +1740,6 @@ public sealed class SamsaraDispatchController(
 
     private sealed record AddressSyncResult(
         Guid SiteId,
-        string? AddressId);
-
-    private sealed record StopAddressSyncResult(
-        Guid StopId,
         string? AddressId);
 
     private sealed record SiteAddressCandidate(Site Site);
