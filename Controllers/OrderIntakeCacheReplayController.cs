@@ -148,8 +148,17 @@ public sealed class OrderIntakeCacheReplayController(TmsDbContext db, ILogger<Or
             };
         }
 
+        // Bounded to a window around the evidence's own received date rather than scanning
+        // every "order" row ever staged: an unconditional PayloadJson.Contains() over the
+        // whole table timed out (SQL error 258) once order volume grew, and a batch replay
+        // call hits this once per cached email, so an unbounded scan here compounds fast.
+        var evidenceReceivedUtc = evidence.ReceivedAtUtc ?? evidenceRow.ReceivedAtUtc;
+        var existingSearchFrom = evidenceReceivedUtc.AddDays(-90);
+        var existingSearchTo = evidenceReceivedUtc.AddDays(90);
         var existing = await db.StagedImports.AsNoTracking()
-            .Where(item => item.EntityType == "order" && item.PayloadJson.Contains(evidence.MessageId))
+            .Where(item => item.EntityType == "order"
+                && item.ReceivedAtUtc >= existingSearchFrom && item.ReceivedAtUtc < existingSearchTo
+                && item.PayloadJson.Contains(evidence.MessageId))
             .Select(item => new { item.Id, item.Status })
             .ToListAsync(ct);
         if (existing.Count > 0)
@@ -303,19 +312,18 @@ public sealed class OrderIntakeCacheReplayController(TmsDbContext db, ILogger<Or
 
     private async Task<Dictionary<string, int>> ExistingOrderCountsByMessageId(IReadOnlyCollection<string> messageIds, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
     {
-        var orders = await db.StagedImports.AsNoTracking()
-            .Where(item => item.EntityType == "order" && item.ReceivedAtUtc >= from && item.ReceivedAtUtc < to)
-            .Select(item => item.PayloadJson)
-            .ToListAsync(ct);
-
-        var counts = messageIds.ToDictionary(item => item, _ => 0, StringComparer.Ordinal);
-        foreach (var payload in orders)
+        // One bounded COUNT per message id, rather than pulling every "order" payload in the
+        // window into app memory and substring-matching each one against every evidence row.
+        // That nested-loop pattern is what timed out (SQL error 258 / HTTP 504 on this screen)
+        // once order volume grew: it both scanned and transferred every payload regardless of
+        // whether it matched any of the message ids being checked.
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var messageId in messageIds)
         {
-            foreach (var messageId in messageIds)
-            {
-                if (payload.Contains(messageId, StringComparison.Ordinal))
-                    counts[messageId]++;
-            }
+            counts[messageId] = await db.StagedImports.AsNoTracking()
+                .Where(item => item.EntityType == "order" && item.ReceivedAtUtc >= from && item.ReceivedAtUtc < to
+                    && item.PayloadJson.Contains(messageId))
+                .CountAsync(ct);
         }
 
         return counts;
