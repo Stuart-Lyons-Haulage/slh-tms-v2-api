@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 21597)
+Total output lines: 1724
+
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authorization;
@@ -767,10 +770,6 @@ public sealed class SamsaraDispatchController(
             ? null
             : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
 
-        // Maps each Samsara address id back to its SLH site name so a geocoding failure
-        // (ZERO_RESULTS) can name the site to fix rather than an opaque address id.
-        var stopSitesByAddressId = new Dictionary<string, string>(StringComparer.Ordinal);
-
         try
         {
             var dispatchState = await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct);
@@ -821,116 +820,7 @@ public sealed class SamsaraDispatchController(
             var orderIds = orderedStops
                 .Where(stop => stop.OrderId is not null)
                 .Select(stop => stop.OrderId!.Value)
-                .Distinct()
-                .ToList();
-            var orders = orderIds.Count == 0
-                ? new Dictionary<Guid, TransportOrder>()
-                : await db.TransportOrders.AsNoTracking()
-                    .Where(order => orderIds.Contains(order.Id))
-                    .ToDictionaryAsync(order => order.Id, ct);
-
-            var sites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
-            try
-            {
-                await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogWarning(exception, "Site Master coordinate enrichment was unavailable during Samsara dispatch.");
-            }
-
-            var resolvedStops = orderedStops
-                .Select((stop, index) => new ResolvedDispatchStop(
-                    stop,
-                    index,
-                    ResolveLocation(stop, sites)))
-                .ToList();
-            var physicalStops = SamsaraPhysicalStopGrouping.GroupCollectionFirst(resolvedStops.Select(item =>
-                new SamsaraPhysicalStopCandidate(
-                    item.Stop.Id,
-                    item.Stop.Name,
-                    item.Location.Site?.Id,
-                    item.Location.Address,
-                    item.Location.Latitude,
-                    item.Location.Longitude,
-                    item.Stop.PlannedArrivalUtc,
-                    OperationalStopOrdering.IsCollection(item.Stop.Name),
-                    item.Stop.OrderId,
-                    item.Stop.PlannerNote)));
-
-            var mappedSiteIds = physicalStops
-                .Where(item => item.Representative.SiteId is not null)
-                .Select(item => item.Representative.SiteId!.Value)
-                .Distinct()
-                .ToList();
-            var existingSiteMappings = mappedSiteIds.Count == 0
-                ? []
-                : await db.IntegrationMappings.AsNoTracking()
-                    .Where(item => item.Active &&
-                                   item.Provider == "Samsara" &&
-                                   item.TmsEntityType == "Site" &&
-                                   mappedSiteIds.Contains(item.TmsEntityId))
-                    .OrderByDescending(item => item.UpdatedAtUtc)
-                    .ToListAsync(ct);
-            var samsaraAddressBySiteId = existingSiteMappings
-                .GroupBy(item => item.TmsEntityId)
-                .ToDictionary(group => group.Key, group => group.First().ExternalKey);
-
-            // Address creation is the only genuinely per-site first-export work. Reuse
-            // the local mapping on later exports, and keep first-time provider calls
-            // bounded so a route with many stops cannot spend the whole API request in
-            // a serial GET -> POST/PATCH loop.
-            var addressFallbackBySiteId = new HashSet<Guid>();
-            var samsaraAddressByStopId = new Dictionary<Guid, string>();
-            if (samsara.AddressSyncEnabled)
-            {
-                using var addressGate = new SemaphoreSlim(4, 4);
-                var sitesToSync = physicalStops
-                    .Where(item => item.Representative.SiteId is not null &&
-                                   !string.IsNullOrWhiteSpace(item.Representative.Address) &&
-                                   !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
-                    .GroupBy(item => item.Representative.SiteId!.Value)
-                    .Select(group => group.First())
-                    .ToList();
-
-                var addressResults = await Task.WhenAll(sitesToSync.Select(async item =>
-                {
-                    var site = sites.Single(site => site.Id == item.Representative.SiteId!.Value);
-                    await addressGate.WaitAsync(ct);
-                    try
-                    {
-                        var result = await samsara.UpsertAddressAsync(
-                            new SamsaraAddressRequest(
-                                site.Id,
-                                site.ExternalCode,
-                                site.DriverTextName ?? site.Name,
-                                item.Representative.Address!,
-                                null,
-                                null,
-                                site.GeofenceRadiusMetres ?? samsara.StopRadiusMeters),
-                            ct);
-                        return new AddressSyncResult(site.Id, result.AddressId);
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        logger.LogWarning(
-                            exception,
-                            "Samsara reusable address sync failed for site {SiteId}; route stop will use a single-use location.",
-                            site.Id);
-                        return new AddressSyncResult(site.Id, null);
-                    }
-                    finally
-                    {
-                        addressGate.Release();
-                    }
-                }));
-
-                foreach (var addressResult in addressResults)
-                {
-                    if (!string.IsNullOrWhiteSpace(addressResult.AddressId))
-                    {
-                        samsaraAddressBySiteId[addressResult.SiteId] = addressResult.AddressId;
-                        await SaveMappingAsync(
+         …1597 tokens truncated…Async(
                             "Site",
                             addressResult.SiteId,
                             addressResult.AddressId,
@@ -943,60 +833,10 @@ public sealed class SamsaraDispatchController(
                     }
                 }
 
-                // A route can contain a physical address that did not resolve to a
-                // Site Master record (or whose site address sync failed). Create a
-                // reusable Samsara Address for that stop so route creation remains
-                // address-based and does not depend on single-use coordinates.
-                var stopAddressesToSync = physicalStops
-                    .Where(item => !string.IsNullOrWhiteSpace(item.Representative.Address) &&
-                                   (item.Representative.SiteId is null ||
-                                    !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value)))
-                    .GroupBy(item => item.Representative.StopId)
-                    .Select(group => group.First())
-                    .ToList();
-
-                var stopAddressResults = await Task.WhenAll(stopAddressesToSync.Select(async item =>
-                {
-                    await addressGate.WaitAsync(ct);
-                    try
-                    {
-                        var representative = item.Representative;
-                        var result = await samsara.UpsertAddressAsync(
-                            new SamsaraAddressRequest(
-                                representative.StopId,
-                                $"STOP-{representative.StopId:N}",
-                                representative.Name,
-                                representative.Address!,
-                                null,
-                                null,
-                                samsara.StopRadiusMeters),
-                            ct);
-                        return new StopAddressSyncResult(representative.StopId, result.AddressId);
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        logger.LogWarning(exception, "Samsara stop address sync failed for stop {StopId}.", item.Representative.StopId);
-                        return new StopAddressSyncResult(item.Representative.StopId, null);
-                    }
-                    finally
-                    {
-                        addressGate.Release();
-                    }
-                }));
-
-                foreach (var stopAddressResult in stopAddressResults)
-                {
-                    if (!string.IsNullOrWhiteSpace(stopAddressResult.AddressId))
-                    {
-                        samsaraAddressByStopId[stopAddressResult.StopId] = stopAddressResult.AddressId;
-                        await SaveMappingAsync(
-                            "LoadStop",
-                            stopAddressResult.StopId,
-                            stopAddressResult.AddressId,
-                            physicalStops.First(item => item.Representative.StopId == stopAddressResult.StopId).Representative.Name,
-                            ct);
-                    }
-                }
+                // Reusable addresses must come from a matched Site Master record.
+                // Do not create per-stop Samsara Places for unmatched route labels;
+                // use coordinates for a single-use route location or block export
+                // with the missing Site Master/address message below.
             }
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
@@ -1019,11 +859,11 @@ public sealed class SamsaraDispatchController(
                 var isFirst = index == 0;
                 var isLast = index == physicalStops.Count - 1;
                 var plannedArrival = physicalStop.Group.EarliestPlannedArrivalUtc;
-                // SLH TMS owns the schedule (recomputeScheduledTimes=false). A stop with no planned
-                // arrival is given a derived strictly-increasing fallback below rather than dropped,
-                // so an incomplete plan can never silently remove a stop or block the whole export.
-                if (!isFirst && plannedArrival is null)
+                if (!options.RecomputeScheduledTimes && !isFirst && plannedArrival is null)
+                {
                     missingSchedule.Add(physicalStopName);
+                    continue;
+                }
                 if (string.IsNullOrWhiteSpace(representative.Address))
                 {
                     missingLocations.Add(physicalStopName);
@@ -1051,7 +891,9 @@ public sealed class SamsaraDispatchController(
                 var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
                 DateTimeOffset? scheduledArrival = isFirst && departFirstStop
                     ? null
-                    : plannedArrival ?? firstScheduled;
+                    : options.RecomputeScheduledTimes
+                        ? null
+                        : plannedArrival ?? firstScheduled;
                 var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
                 var scheduledDeparture = isFirst && departFirstStop
                     ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
@@ -1077,14 +919,10 @@ public sealed class SamsaraDispatchController(
                     stopNotes));
             }
 
-            // SLH TMS owns the schedule: Samsara receives these exact times. Samsara rejects stops
-            // that share a scheduled arrival time when stop external IDs are attached, and a stop may
-            // never depart before it arrives. Normalise the outgoing payload so neither can happen,
-            // regardless of plan completeness.
-            EnsureStrictlyIncreasingArrivals(samsaraStops);
-            foreach (var builtStop in samsaraStops)
-                if (!string.IsNullOrWhiteSpace(builtStop.AddressId))
-                    stopSitesByAddressId[builtStop.AddressId!] = builtStop.Name;
+            // Samsara rejects stops that share a scheduled arrival time when stop external
+            // IDs are attached. Make arrivals strictly increasing (never earlier than planned).
+            if (!options.RecomputeScheduledTimes)
+                EnsureStrictlyIncreasingArrivals(samsaraStops);
 
             if (missingLocations.Count > 0)
                 return BadRequest(new
@@ -1100,11 +938,12 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingSamsaraLocations
                 });
 
-            if (missingSchedule.Count > 0)
-                logger.LogInformation(
-                    "Samsara export for run {RunId} ({Reference}): {Count} stop(s) had no planned arrival and were given a derived strictly-increasing time from the route start: {Stops}.",
-                    load.Id, load.Reference, missingSchedule.Count,
-                    string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase)));
+            if (!options.RecomputeScheduledTimes && missingSchedule.Count > 0)
+                return BadRequest(new
+                {
+                    message = $"Every Samsara stop after the route start needs a planned arrival time because SLH TMS owns the schedule. Complete the plan for: {string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase))}.",
+                    missingStops = missingSchedule
+                });
 
             // Validate the exact payload that will be sent, not only the source
             // register. A stale or partially-recovered planning copy can contain
@@ -1235,54 +1074,30 @@ public sealed class SamsaraDispatchController(
             logger.LogWarning(exception, "Samsara dispatch failed for run {RunId}.", runId);
             return StatusCode(StatusCodes.Status502BadGateway, new
             {
-                message = $"Samsara dispatch failed: {DescribeSamsaraError(exception.GetBaseException().Message, stopSitesByAddressId)}"
+                message = $"Samsara dispatch failed: {exception.GetBaseException().Message}"
             });
         }
     }
 
-    // A Samsara geocoding failure reports the opaque address id ("Address 1000001350088 has
-    // error: maps: ZERO_RESULTS"). Append the SLH site name for each address id we sent so the
-    // planner knows exactly which Site Master record needs a valid postcode.
-    private static string DescribeSamsaraError(string message, IReadOnlyDictionary<string, string> stopSitesByAddressId)
+    // Samsara rejects stops that share a scheduled arrival time when stop external IDs are
+    // attached. Nudge any colliding arrival forward one minute (and its departure if needed)
+    // so the sequence is strictly increasing, never moving a stop earlier than planned.
+    private static void EnsureStrictlyIncreasingArrivals(IList<SamsaraRouteStopRequest> stops)
     {
-        if (string.IsNullOrWhiteSpace(message) || stopSitesByAddressId.Count == 0) return message;
-        foreach (var (addressId, siteName) in stopSitesByAddressId)
-            if (!string.IsNullOrWhiteSpace(addressId) && message.Contains(addressId, StringComparison.Ordinal))
-                message = message.Replace(addressId, $"{addressId} ({siteName})", StringComparison.Ordinal);
-        return message;
-    }
-
-    // SLH TMS owns the schedule (recomputeScheduledTimes=false), so Samsara accepts the exact times
-    // we send only if the whole timeline is consistent: each stop's scheduled arrival must be strictly
-    // after every earlier arrival AND departure (you cannot arrive before you have left the previous
-    // stop), and no stop's departure may precede its own arrival. A single monotonically-advancing
-    // boundary enforces both, including the departure-only origin stop. Used for single routes and for
-    // both relay legs.
-    internal static void EnsureStrictlyIncreasingArrivals(IList<SamsaraRouteStopRequest> stops)
-    {
-        DateTimeOffset? boundary = null;
+        DateTimeOffset? previousArrival = null;
         for (var i = 0; i < stops.Count; i++)
         {
             var arrival = stops[i].ScheduledArrivalTime;
-            var departure = stops[i].ScheduledDepartureTime;
-
-            if (arrival is DateTimeOffset a)
+            if (arrival is null) continue;
+            if (previousArrival is DateTimeOffset prev && arrival <= prev)
             {
-                if (boundary is DateTimeOffset b && a <= b) a = b.AddMinutes(1);
-                if (departure is DateTimeOffset d && d < a) departure = a;
-                arrival = a;
+                var bumped = prev.AddMinutes(1);
+                var departure = stops[i].ScheduledDepartureTime;
+                if (departure is DateTimeOffset dep && dep < bumped) departure = bumped;
+                stops[i] = stops[i] with { ScheduledArrivalTime = bumped, ScheduledDepartureTime = departure };
+                arrival = bumped;
             }
-            else if (departure is DateTimeOffset d && boundary is DateTimeOffset b && d <= b)
-            {
-                // Departure-only origin stop: keep its departure after everything before it too.
-                departure = b.AddMinutes(1);
-            }
-
-            if (arrival != stops[i].ScheduledArrivalTime || departure != stops[i].ScheduledDepartureTime)
-                stops[i] = stops[i] with { ScheduledArrivalTime = arrival, ScheduledDepartureTime = departure };
-
-            if (arrival is DateTimeOffset na && (boundary is null || na > boundary)) boundary = na;
-            if (departure is DateTimeOffset nd && (boundary is null || nd > boundary)) boundary = nd;
+            previousArrival = arrival;
         }
     }
 
@@ -1756,7 +1571,11 @@ public sealed class SamsaraDispatchController(
     }
 
     private static string CleanStopName(string value) =>
-        System.Text.RegularExpressions.Regex.Replace(value, @"^(?:Collect|Deliver)\s*[·:\-]\s*", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+        System.Text.RegularExpressions.Regex.Replace(
+            value,
+            @"^(?:Collect|Deliver)\b\s*(?:[·•:–—-]\s*)?",
+            string.Empty,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
 
     private static string Normalise(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
@@ -1774,10 +1593,6 @@ public sealed class SamsaraDispatchController(
 
     private sealed record AddressSyncResult(
         Guid SiteId,
-        string? AddressId);
-
-    private sealed record StopAddressSyncResult(
-        Guid StopId,
         string? AddressId);
 
     private sealed record SiteAddressCandidate(Site Site);
