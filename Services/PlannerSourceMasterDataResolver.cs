@@ -322,7 +322,7 @@ public sealed class PlannerSourceMasterDataResolver
             yield return alias;
     }
 
-    private static string DisplayName(Site site) => !string.IsNullOrWhiteSpace(site.DriverTextName) ? site.DriverTextName.Trim() : site.Name.Trim();
+    private static string DisplayName(Site site) => site.Name.Trim();
 
     private static (decimal Longitude, decimal Latitude)? GeofenceCentre(SiteGeofence geofence)
     {
