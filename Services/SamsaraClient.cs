@@ -185,13 +185,30 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
     public async Task<SamsaraAddressUpsertResult> UpsertAddressAsync(SamsaraAddressRequest address, CancellationToken ct)
     {
         EnsureConfigured();
-        var external = ExternalSiteId(address.SiteReference);
+        var siteValue = SiteExternalValue(address);
+        var external = ExternalSiteId(siteValue);
         var existing = await GetAddressByExternalIdAsync(external, ct);
+        if (existing is null)
+        {
+            // Adopt an existing saved place before creating anything. A shared
+            // street address alone is not enough to identify a physical site.
+            var addresses = await ReadPagedAsync("addresses", item => ParseAddress(item.GetRawText()), ct);
+            var matches = addresses.Where(item =>
+                NormaliseAddressName(item.Name) == NormaliseAddressName(address.Name)).ToList();
+            if (matches.Count > 1)
+                throw new InvalidOperationException($"Multiple saved Samsara Addresses match Master Site {address.Name}; review their IDs before synchronising.");
+            existing = matches.SingleOrDefault();
+            if (existing is not null &&
+                existing.ExternalIds.TryGetValue(options.SiteExternalIdKey, out var linkedSite) &&
+                !string.Equals(linkedSite, siteValue, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(linkedSite, address.SiteReference, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Samsara Address {existing.Id} is already linked to another Master Site ({linkedSite}).");
+        }
         var payload = AddressPayload(address);
 
         if (existing is not null)
         {
-            using var patch = CreateRequest(HttpMethod.Patch, $"addresses/{Uri.EscapeDataString(external)}", payload);
+            using var patch = CreateRequest(HttpMethod.Patch, $"addresses/{Uri.EscapeDataString(existing.Id!)}", payload);
             using var patchResponse = await httpClient.SendAsync(patch, ct);
             var patchBody = await patchResponse.Content.ReadAsStringAsync(ct);
             if (patchResponse.StatusCode != HttpStatusCode.NotFound)
@@ -453,7 +470,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             ["formattedAddress"] = Clip(address.FormattedAddress, 500),
             ["externalIds"] = new Dictionary<string, string>
             {
-                [options.SiteExternalIdKey] = address.SiteReference
+                [options.SiteExternalIdKey] = SiteExternalValue(address)
             },
             ["geofence"] = new
             {
@@ -469,6 +486,16 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         // request so address-based dispatch is accepted consistently.
         return body;
     }
+
+    private static string SiteExternalValue(SamsaraAddressRequest address) =>
+        !string.IsNullOrWhiteSpace(address.SiteReference) &&
+        address.SiteReference.All(character =>
+            char.IsAsciiLetterOrDigit(character) || "@._+-".Contains(character))
+            ? address.SiteReference
+            : address.SiteId.ToString("N");
+
+    private static string NormaliseAddressName(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private string ExternalRouteId(Guid runId, string? suffix = null) => $"{options.ExternalIdKey}:{RouteExternalValue(runId, suffix)}";
     private static string RouteExternalValue(Guid runId, string? suffix) => string.IsNullOrWhiteSpace(suffix) ? runId.ToString("N") : $"{runId:N}:{suffix.Trim()}";
