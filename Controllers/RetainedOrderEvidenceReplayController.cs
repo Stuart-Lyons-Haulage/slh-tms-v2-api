@@ -68,18 +68,39 @@ public sealed class RetainedOrderEvidenceReplayController(
         };
 
         var summary = new ReplaySummary();
-        summary.LegacyMappingExceptionsArchived = await ArchiveLegacyMappingExceptions(
-            receivedFromUtc,
-            receivedToUtc,
-            minimumPlanningDate,
-            maximumPlanningDate,
-            ct);
-        var pendingCandidates = request.RefreshUnamendedPending != false
+        // Archive legacy placeholders once per job, not for every two-message batch.
+        summary.LegacyMappingExceptionsArchived = request.AfterReceivedAtUtc is null
+            ? await ArchiveLegacyMappingExceptions(
+                receivedFromUtc,
+                receivedToUtc,
+                minimumPlanningDate,
+                maximumPlanningDate,
+                ct)
+            : 0;
+        // Only materialise pending orders belonging to the messages in this batch.
+        // Loading the entire review queue (including its JSON payloads) on every
+        // batch made a large mailbox replay repeatedly scan and transfer the same rows.
+        var replayMessageIds = new List<string>();
+        foreach (var row in evidenceRows)
+        {
+            try
+            {
+                var messageId = Rehydrate(row.PayloadJson).MessageId;
+                if (!string.IsNullOrWhiteSpace(messageId) && !replayMessageIds.Contains(messageId, StringComparer.Ordinal))
+                    replayMessageIds.Add(messageId);
+            }
+            catch (JsonException) { }
+        }
+        var firstMessageId = replayMessageIds.ElementAtOrDefault(0);
+        var secondMessageId = replayMessageIds.ElementAtOrDefault(1);
+        var pendingCandidates = request.RefreshUnamendedPending != false && firstMessageId is not null
             ? await db.StagedImports
                 .Where(item => item.EntityType == "order" &&
                                item.Status == StagingStatus.PendingReview &&
                                item.ReceivedAtUtc >= receivedFromUtc &&
-                               (receivedToUtc == null || item.ReceivedAtUtc < receivedToUtc))
+                               (receivedToUtc == null || item.ReceivedAtUtc < receivedToUtc) &&
+                               (item.PayloadJson.Contains(firstMessageId) ||
+                                (secondMessageId != null && item.PayloadJson.Contains(secondMessageId))))
                 .ToListAsync(ct)
             : [];
         var manuallyAmendedPendingIds = pendingCandidates.Count == 0
