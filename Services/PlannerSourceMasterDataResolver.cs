@@ -7,9 +7,8 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Resolves the planner's human-readable source-line site labels to stable Site Master
-/// identity and the manually linked DOT/Falcon geofence without replacing the source
-/// wording used by Planner and driver instructions.
+/// Resolves planner source labels and aliases to stable Site Master identity, canonical
+/// Site Master display names, and the manually linked DOT/Falcon geofence.
 /// </summary>
 public sealed class PlannerSourceMasterDataResolver
 {
