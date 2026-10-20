@@ -42,17 +42,23 @@ public sealed class OrderIntakeCacheReplayController(TmsDbContext db, ILogger<Or
         [FromQuery] DateOnly? date = null,
         [FromQuery] DateTimeOffset? fromUtc = null,
         [FromQuery] DateTimeOffset? toUtc = null,
-        [FromQuery] int take = 250,
+        [FromQuery] int take = 100,
+        [FromQuery] int skip = 0,
         CancellationToken ct = default)
     {
-        take = Math.Clamp(take, 1, 1000);
+        take = Math.Clamp(take, 1, 100);
+        skip = Math.Max(0, skip);
         var (from, to) = ResolveWindow(date, fromUtc, toUtc);
 
         var evidenceRows = await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "email-evidence" && item.ReceivedAtUtc >= from && item.ReceivedAtUtc < to)
             .OrderByDescending(item => item.ReceivedAtUtc)
-            .Take(take)
+            .ThenByDescending(item => item.Id)
+            .Skip(skip)
+            .Take(take + 1)
             .ToListAsync(ct);
+        var hasMore = evidenceRows.Count > take;
+        if (hasMore) evidenceRows.RemoveAt(evidenceRows.Count - 1);
 
         var messageIds = evidenceRows
             .Select(TryReadEvidence)
@@ -88,7 +94,7 @@ public sealed class OrderIntakeCacheReplayController(TmsDbContext db, ILogger<Or
             };
         }).ToList();
 
-        return Ok(new { fromUtc = from, toUtc = to, count = records.Count, records });
+        return Ok(new { fromUtc = from, toUtc = to, count = records.Count, skip, hasMore, records });
     }
 
     [HttpPost("{evidenceId:guid}/force-review"), Authorize(Policy = "TmsWrite")]
