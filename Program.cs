@@ -502,8 +502,9 @@ if (migrationOnly)
 app.UseResponseCompression();
 app.UseHttpsRedirection();
 app.UseRouting();
-app.UseResponseCaching();
+// CORS must wrap response caching so cached responses still receive the caller's CORS headers.
 app.UseCors("Portal");
+app.UseResponseCaching();
 app.UseRequestTimeouts();
 app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
 app.UseAuthentication();
