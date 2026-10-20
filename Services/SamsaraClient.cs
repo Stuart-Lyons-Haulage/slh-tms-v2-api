@@ -383,7 +383,8 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                     ["address"] = stop.Address,
                     ["radiusMeters"] = stop.RadiusMeters
                 };
-                if (stop.Latitude is double latitude && stop.Longitude is double longitude)
+                if (SamsaraLocationRules.HasUsableCoordinates(stop.Latitude, stop.Longitude) &&
+                    stop.Latitude is double latitude && stop.Longitude is double longitude)
                 {
                     singleUseLocation["latitude"] = latitude;
                     singleUseLocation["longitude"] = longitude;
