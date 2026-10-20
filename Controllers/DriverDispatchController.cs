@@ -356,6 +356,8 @@ public sealed class DriverDispatchController(
                     stop.Longitude,
                     stop.PlannedArrivalUtc,
                     latestAccessTimeUtc = LatestCollectionAccessUtc(load, stop, timingRules, timingSites),
+                    plannedCollectionTimeUtc = DispatchRouteTiming.PlannedCollectionTimeUtc(load, stop, timingRules, timingSites),
+                    deliveryCutoffTimeUtc = DispatchRouteTiming.FinalDeliveryCutoffTimeUtc(load, stop, timingRules, timingSites),
                     stop.PlannerNote
                 })
             })
