@@ -33,6 +33,37 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Bulk_allocation_endpoint_allocates_each_entry_and_returns_a_result_per_order()
+    {
+        var seeded = await Seed();
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var bulk = await client.PostAsync("/api/v1/planning-control/allocations/bulk", Json(JsonSerializer.Serialize(new object[]
+        {
+            new { orderId = seeded.OrderId, loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 5, note = "Consolidated line", sourceLineId = seeded.SourceLineId }
+        })));
+        Assert.Equal(HttpStatusCode.OK, bulk.StatusCode);
+
+        using var response = JsonDocument.Parse(await bulk.Content.ReadAsStringAsync());
+        var result = Assert.Single(response.RootElement.EnumerateArray());
+        Assert.Equal(seeded.OrderId, result.GetProperty("orderId").GetGuid());
+        Assert.Equal(5, result.GetProperty("allocatedToRun").GetInt32());
+    }
+
+    [Fact]
+    public async Task Bulk_allocation_endpoint_fails_the_batch_the_same_way_a_single_allocation_would()
+    {
+        var seeded = await Seed();
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/v1/planning-control/allocations", Json(JsonSerializer.Serialize(new { orderId = seeded.OrderId, loadId = seeded.FirstLoadId, date = "2026-08-24", pallets = 7, sourceLineId = seeded.SourceLineId })))).StatusCode);
+
+        var bulk = await client.PostAsync("/api/v1/planning-control/allocations/bulk", Json(JsonSerializer.Serialize(new object[]
+        {
+            new { orderId = seeded.OrderId, loadId = seeded.SecondLoadId, date = "2026-08-24", pallets = 6, sourceLineId = seeded.SourceLineId }
+        })));
+        Assert.Equal(HttpStatusCode.Conflict, bulk.StatusCode);
+    }
+
+    [Fact]
     public async Task Allocation_above_source_line_quantity_is_rejected_without_mutation()
     {
         var seeded = await Seed();
