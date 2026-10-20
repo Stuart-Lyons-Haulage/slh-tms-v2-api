@@ -101,6 +101,7 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 {
     options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
+builder.Services.AddResponseCaching();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR();
@@ -501,6 +502,7 @@ if (migrationOnly)
 app.UseResponseCompression();
 app.UseHttpsRedirection();
 app.UseRouting();
+app.UseResponseCaching();
 app.UseCors("Portal");
 app.UseRequestTimeouts();
 app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
