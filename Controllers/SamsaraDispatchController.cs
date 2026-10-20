@@ -900,7 +900,7 @@ public sealed class SamsaraDispatchController(
                     .Where(item => item.Representative.SiteId is not null &&
                                    sites.Any(site => site.Id == item.Representative.SiteId.Value &&
                                                      SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress)) &&
-                                   !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value)
+                                   !samsaraAddressBySiteId.ContainsKey(item.Representative.SiteId.Value))
                     .GroupBy(item => item.Representative.SiteId!.Value)
                     .Select(group => group.First())
                     .ToList();
@@ -1739,10 +1739,6 @@ public sealed class SamsaraDispatchController(
 
     private sealed record AddressSyncResult(
         Guid SiteId,
-        string? AddressId);
-
-    private sealed record StopAddressSyncResult(
-        Guid StopId,
         string? AddressId);
 
     private sealed record SiteAddressCandidate(Site Site);
