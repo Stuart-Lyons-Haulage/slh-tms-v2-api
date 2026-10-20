@@ -253,7 +253,9 @@ public sealed class SamsaraClientTests
         var handler = new StubHandler(async request =>
         {
             if (request.Method == HttpMethod.Get)
-                return new HttpResponseMessage(HttpStatusCode.NotFound);
+                return request.RequestUri?.AbsolutePath == "/addresses"
+                    ? JsonResponse("""{"data":[],"pagination":{"hasNextPage":false}}""")
+                    : new HttpResponseMessage(HttpStatusCode.NotFound);
 
             if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/addresses")
             {
@@ -321,6 +323,73 @@ public sealed class SamsaraClientTests
         Assert.Equal("vehicle", root.GetProperty("type").GetString());
         Assert.Equal("BL70RHV", root.GetProperty("licensePlate").GetString());
         Assert.Equal("vehicle-123", root.GetProperty("externalIds").GetProperty("slhTmsAsset").GetString());
+    }
+
+
+    [Fact]
+    public async Task Address_sync_adopts_existing_numeric_id_and_uses_guid_for_invalid_site_reference()
+    {
+        var siteId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        string? patchedBody = null;
+        var writes = new List<string>();
+        var handler = new StubHandler(async request =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return request.RequestUri!.AbsolutePath == "/addresses"
+                    ? JsonResponse("""{"data":[{"id":"1000001352300","name":"ALDI DARLINGTON","formattedAddress":"Faverdale Industrial Estate, DL3 0UW","externalIds":{}}],"pagination":{"hasNextPage":false}}""")
+                    : new HttpResponseMessage(HttpStatusCode.NotFound);
+            writes.Add(request.Method + " " + request.RequestUri!.AbsolutePath);
+            patchedBody = await request.Content!.ReadAsStringAsync();
+            return JsonResponse("""{"data":{"id":"1000001352300","name":"ALDI DARLINGTON"}}""");
+        });
+
+        var result = await Client(handler).UpsertAddressAsync(
+            new SamsaraAddressRequest(siteId, "Site 155", "Aldi - Darlington",
+                "Faverdale Industrial Estate, DL3 0UW", null, null, 250), CancellationToken.None);
+
+        Assert.Equal("1000001352300", result.AddressId);
+        Assert.True(result.Updated);
+        Assert.False(result.Created);
+        Assert.Equal(new[] { "PATCH /addresses/1000001352300" }, writes);
+        using var body = JsonDocument.Parse(patchedBody!);
+        Assert.Equal(siteId.ToString("N"), body.RootElement.GetProperty("externalIds").GetProperty("slhTmsSite").GetString());
+    }
+
+    [Fact]
+    public async Task Address_sync_refuses_to_relink_another_master_sites_saved_address()
+    {
+        var handler = new StubHandler(request =>
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            return Task.FromResult(request.RequestUri!.AbsolutePath == "/addresses"
+                ? JsonResponse("""{"data":[{"id":"saved-1","name":"Aldi Darlington","externalIds":{"slhTmsSite":"OTHER"}}],"pagination":{"hasNextPage":false}}""")
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+        });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Client(handler).UpsertAddressAsync(
+            new SamsaraAddressRequest(Guid.NewGuid(), "Site 155", "Aldi Darlington", "DL3 0UW", null, null, 250),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public void Site_match_uses_unique_name_before_shared_address_and_keeps_ambiguous_addresses_unmatched()
+    {
+        var runcton = new Slh.Tms.Api.Models.Site { ExternalCode = "SITE184", Name = "NWF-Runcton", CollectionAddress = "Shared food park" };
+        var merston = new Slh.Tms.Api.Models.Site { ExternalCode = "SITE183", Name = "NWF Merston", CollectionAddress = "Shared food park" };
+        var sites = new[] { runcton, merston };
+        Assert.Same(runcton, SamsaraStopSiteMatcher.FindSite(
+            new Slh.Tms.Api.Models.LoadStop { Name = "Collect NWF-Runcton", Address = "Shared food park" }, sites));
+        Assert.Null(SamsaraStopSiteMatcher.FindSite(
+            new Slh.Tms.Api.Models.LoadStop { Name = "Unknown site", Address = "Shared food park" }, sites));
+    }
+
+    [Fact]
+    public void Site_match_prefers_delivery_destination_over_supplier_and_shared_address()
+    {
+        var source = new Slh.Tms.Api.Models.Site { ExternalCode = "SRC", Name = "NWF", CollectionAddress = "Source Road" };
+        var destination = new Slh.Tms.Api.Models.Site { ExternalCode = "SITE167", Name = "Morrisons-Stockton", Aliases = "Morrisons STOCKTON 994", CollectionAddress = "TS18 2SZ" };
+        Assert.Same(destination, SamsaraStopSiteMatcher.FindSite(
+            new Slh.Tms.Api.Models.LoadStop { Name = "Deliver · NWF · Morrisons STOCKTON 994", Address = "Source Road" },
+            new[] { source, destination }));
     }
 
     private static SamsaraClient Client(HttpMessageHandler handler)
