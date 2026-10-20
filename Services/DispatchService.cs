@@ -145,7 +145,10 @@ public sealed class DispatchService(
                               profile.ContractedDays.Count > 0 &&
                               !profile.ContractedDays.Contains(planningDate.DayOfWeek);
             availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability);
-            var tachoBlockReason = planningDate <= today
+            // Missing Tacho evidence is unverified, not proof that the driver's legal
+            // hours are exhausted. Keep the driver visible and leave the start time
+            // unconfirmed until a duty record is available.
+            var tachoBlockReason = planningDate <= today && driverDuties.Count > 0
                 ? TachoAvailabilityBlockReason(driveAvailable ?? 0, workAvailable ?? 0, weeklyWorking, dailyDriving, dailyDrivingLimit)
                 : null;
             // An existing allocation is not a blocker for the driver's own row:
@@ -258,15 +261,15 @@ public sealed class DispatchService(
                 : null;
             if (breach is null)
             {
-                if (useReducedRest && rest.Hours != 9)
-                    breach = "Reduced 9h daily rest is not available; the statutory reduced-rest allowance is exhausted or cannot be evidenced.";
-                else if (profile.HolidayDates.Contains(request.PlanningDate)) breach = "Annual leave";
+                if (profile.HolidayDates.Contains(request.PlanningDate)) breach = "Annual leave";
                 else if (IsHalfTramper(profile.EmploymentType) && profile.ContractedDays.Count > 0 && !profile.ContractedDays.Contains(request.PlanningDate.DayOfWeek))
                     breach = "Not contracted tomorrow";
-                else if (!breakCompliant) breach = "Break compliance breach — required Tacho break is not evidenced.";
-                else if (weeklyWorking >= 60m) breach = "WTD breach — 60-hour weekly limit already reached.";
-                else if (request.PlanningDate <= today && dailyDriving >= dailyLimitHours) breach = "Daily driving limit already reached.";
-                else if (shiftEnd is null) breach = "No completed TachoMaster duty is available to anchor the legal rest calculation.";
+                else if (driverDuties.Count > 0 && useReducedRest && rest.Hours != 9)
+                    breach = "Reduced 9h daily rest is not available; the statutory reduced-rest allowance is exhausted or cannot be evidenced.";
+                else if (driverDuties.Count > 0 && !breakCompliant) breach = "Break compliance breach — required Tacho break is not evidenced.";
+                else if (driverDuties.Count > 0 && weeklyWorking >= 60m) breach = "WTD breach — 60-hour weekly limit already reached.";
+                else if (driverDuties.Count > 0 && request.PlanningDate <= today && dailyDriving >= dailyLimitHours) breach = "Daily driving limit already reached.";
+                else if (driverDuties.Count > 0 && shiftEnd is null) breach = "No completed TachoMaster duty is available to anchor the legal rest calculation.";
             }
 
             result.Add(new DispatchAvailableTimeDto(
