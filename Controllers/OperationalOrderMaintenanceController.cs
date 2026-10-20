@@ -131,6 +131,12 @@ public sealed class OperationalOrderMaintenanceController(
         Set(payload, "depotId", Clip(request.DepotId, 80));
         Set(payload, "destination", Clip(request.Destination, 200));
         Set(payload, "deliveryAddress", Clip(request.DeliveryAddress, 500));
+        // PlanningRegisterStore projects DriverInstructions into the operational order.
+        // Keep that projection consistent with edits to the structured payload fields.
+        Set(payload, "driverInstructions", BuildNotes(
+            Clip(request.CollectionSite, 200), Clip(request.DepotId, 80), Clip(request.Destination, 200),
+            Clip(request.DeliveryAddress, 500), Clip(request.CustomerRef, 200), Clip(request.PoRef, 200),
+            Clip(request.UnitType, 80), Clip(request.PalletName, 200), Clip(request.Notes, 1000)));
         Set(payload, "customerRef", Clip(request.CustomerRef, 200));
         Set(payload, "poRef", Clip(request.PoRef, 200));
         Set(payload, "unitType", Clip(request.UnitType, 80));
