@@ -765,6 +765,10 @@ public sealed class SamsaraDispatchController(
             ? null
             : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
 
+        // Maps each Samsara address id back to its SLH site name so a geocoding failure
+        // (ZERO_RESULTS) can name the site to fix rather than an opaque address id.
+        var stopSitesByAddressId = new Dictionary<string, string>(StringComparer.Ordinal);
+
         try
         {
             var dispatchState = await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct);
@@ -1013,11 +1017,11 @@ public sealed class SamsaraDispatchController(
                 var isFirst = index == 0;
                 var isLast = index == physicalStops.Count - 1;
                 var plannedArrival = physicalStop.Group.EarliestPlannedArrivalUtc;
-                if (!options.RecomputeScheduledTimes && !isFirst && plannedArrival is null)
-                {
+                // SLH TMS owns the schedule (recomputeScheduledTimes=false). A stop with no planned
+                // arrival is given a derived strictly-increasing fallback below rather than dropped,
+                // so an incomplete plan can never silently remove a stop or block the whole export.
+                if (!isFirst && plannedArrival is null)
                     missingSchedule.Add(physicalStopName);
-                    continue;
-                }
                 if (string.IsNullOrWhiteSpace(representative.Address))
                 {
                     missingLocations.Add(physicalStopName);
@@ -1045,9 +1049,7 @@ public sealed class SamsaraDispatchController(
                 var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
                 DateTimeOffset? scheduledArrival = isFirst && departFirstStop
                     ? null
-                    : options.RecomputeScheduledTimes
-                        ? null
-                        : plannedArrival ?? firstScheduled;
+                    : plannedArrival ?? firstScheduled;
                 var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
                 var scheduledDeparture = isFirst && departFirstStop
                     ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
@@ -1073,10 +1075,14 @@ public sealed class SamsaraDispatchController(
                     stopNotes));
             }
 
-            // Samsara rejects stops that share a scheduled arrival time when stop external
-            // IDs are attached. Make arrivals strictly increasing (never earlier than planned).
-            if (!options.RecomputeScheduledTimes)
-                EnsureStrictlyIncreasingArrivals(samsaraStops);
+            // SLH TMS owns the schedule: Samsara receives these exact times. Samsara rejects stops
+            // that share a scheduled arrival time when stop external IDs are attached, and a stop may
+            // never depart before it arrives. Normalise the outgoing payload so neither can happen,
+            // regardless of plan completeness.
+            EnsureStrictlyIncreasingArrivals(samsaraStops);
+            foreach (var builtStop in samsaraStops)
+                if (!string.IsNullOrWhiteSpace(builtStop.AddressId))
+                    stopSitesByAddressId[builtStop.AddressId!] = builtStop.Name;
 
             if (missingLocations.Count > 0)
                 return BadRequest(new
@@ -1092,12 +1098,11 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingSamsaraLocations
                 });
 
-            if (!options.RecomputeScheduledTimes && missingSchedule.Count > 0)
-                return BadRequest(new
-                {
-                    message = $"Every Samsara stop after the route start needs a planned arrival time because SLH TMS owns the schedule. Complete the plan for: {string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase))}.",
-                    missingStops = missingSchedule
-                });
+            if (missingSchedule.Count > 0)
+                logger.LogInformation(
+                    "Samsara export for run {RunId} ({Reference}): {Count} stop(s) had no planned arrival and were given a derived strictly-increasing time from the route start: {Stops}.",
+                    load.Id, load.Reference, missingSchedule.Count,
+                    string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase)));
 
             // Validate the exact payload that will be sent, not only the source
             // register. A stale or partially-recovered planning copy can contain
@@ -1219,30 +1224,54 @@ public sealed class SamsaraDispatchController(
             logger.LogWarning(exception, "Samsara dispatch failed for run {RunId}.", runId);
             return StatusCode(StatusCodes.Status502BadGateway, new
             {
-                message = $"Samsara dispatch failed: {exception.GetBaseException().Message}"
+                message = $"Samsara dispatch failed: {DescribeSamsaraError(exception.GetBaseException().Message, stopSitesByAddressId)}"
             });
         }
     }
 
-    // Samsara rejects stops that share a scheduled arrival time when stop external IDs are
-    // attached. Nudge any colliding arrival forward one minute (and its departure if needed)
-    // so the sequence is strictly increasing, never moving a stop earlier than planned.
-    private static void EnsureStrictlyIncreasingArrivals(IList<SamsaraRouteStopRequest> stops)
+    // A Samsara geocoding failure reports the opaque address id ("Address 1000001350088 has
+    // error: maps: ZERO_RESULTS"). Append the SLH site name for each address id we sent so the
+    // planner knows exactly which Site Master record needs a valid postcode.
+    private static string DescribeSamsaraError(string message, IReadOnlyDictionary<string, string> stopSitesByAddressId)
     {
-        DateTimeOffset? previousArrival = null;
+        if (string.IsNullOrWhiteSpace(message) || stopSitesByAddressId.Count == 0) return message;
+        foreach (var (addressId, siteName) in stopSitesByAddressId)
+            if (!string.IsNullOrWhiteSpace(addressId) && message.Contains(addressId, StringComparison.Ordinal))
+                message = message.Replace(addressId, $"{addressId} ({siteName})", StringComparison.Ordinal);
+        return message;
+    }
+
+    // SLH TMS owns the schedule (recomputeScheduledTimes=false), so Samsara accepts the exact times
+    // we send only if the whole timeline is consistent: each stop's scheduled arrival must be strictly
+    // after every earlier arrival AND departure (you cannot arrive before you have left the previous
+    // stop), and no stop's departure may precede its own arrival. A single monotonically-advancing
+    // boundary enforces both, including the departure-only origin stop. Used for single routes and for
+    // both relay legs.
+    internal static void EnsureStrictlyIncreasingArrivals(IList<SamsaraRouteStopRequest> stops)
+    {
+        DateTimeOffset? boundary = null;
         for (var i = 0; i < stops.Count; i++)
         {
             var arrival = stops[i].ScheduledArrivalTime;
-            if (arrival is null) continue;
-            if (previousArrival is DateTimeOffset prev && arrival <= prev)
+            var departure = stops[i].ScheduledDepartureTime;
+
+            if (arrival is DateTimeOffset a)
             {
-                var bumped = prev.AddMinutes(1);
-                var departure = stops[i].ScheduledDepartureTime;
-                if (departure is DateTimeOffset dep && dep < bumped) departure = bumped;
-                stops[i] = stops[i] with { ScheduledArrivalTime = bumped, ScheduledDepartureTime = departure };
-                arrival = bumped;
+                if (boundary is DateTimeOffset b && a <= b) a = b.AddMinutes(1);
+                if (departure is DateTimeOffset d && d < a) departure = a;
+                arrival = a;
             }
-            previousArrival = arrival;
+            else if (departure is DateTimeOffset d && boundary is DateTimeOffset b && d <= b)
+            {
+                // Departure-only origin stop: keep its departure after everything before it too.
+                departure = b.AddMinutes(1);
+            }
+
+            if (arrival != stops[i].ScheduledArrivalTime || departure != stops[i].ScheduledDepartureTime)
+                stops[i] = stops[i] with { ScheduledArrivalTime = arrival, ScheduledDepartureTime = departure };
+
+            if (arrival is DateTimeOffset na && (boundary is null || na > boundary)) boundary = na;
+            if (departure is DateTimeOffset nd && (boundary is null || nd > boundary)) boundary = nd;
         }
     }
 
