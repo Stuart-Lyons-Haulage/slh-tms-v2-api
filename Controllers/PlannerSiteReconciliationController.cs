@@ -107,7 +107,12 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db, ILogger
 
                 matchedStops++;
                 var site = matches[0];
+                var beforeName = stop.Name;
                 var beforeAddress = stop.Address;
+
+                // Keep the operational action (Collect/Deliver), but replace any order
+                // alias with the canonical Site Master name before the load is saved.
+                stop.Name = CanonicalStopName(stop.Name, site.Name);
 
                 // User-facing planning/dispatch data is deliberately address/postcode + notes.
                 // GPS coordinates remain internal to tracker/geofence evidence and are not copied
@@ -115,7 +120,8 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db, ILogger
                 if (!string.IsNullOrWhiteSpace(site.CollectionAddress))
                     stop.Address = MergeAddress(site.CollectionAddress, stop.Address);
 
-                if (!string.Equals(beforeAddress, stop.Address, StringComparison.Ordinal))
+                if (!string.Equals(beforeName, stop.Name, StringComparison.Ordinal) ||
+                    !string.Equals(beforeAddress, stop.Address, StringComparison.Ordinal))
                 {
                     changedStops++;
                     loadChanged = true;
@@ -180,6 +186,16 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db, ILogger
 
             return Aliases(site.Aliases).Any(alias => Normalize(alias) == needle);
         }).DistinctBy(site => site.Id);
+    }
+
+    private static string CanonicalStopName(string? stopName, string? canonicalSiteName)
+    {
+        if (string.IsNullOrWhiteSpace(canonicalSiteName)) return stopName?.Trim() ?? string.Empty;
+        var value = stopName?.Trim() ?? string.Empty;
+        foreach (var prefix in new[] { "Collect · ", "Deliver · ", "Collect - ", "Deliver - " })
+            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return $"{prefix[..prefix.IndexOfAny(['·', '-'])].Trim()} · {canonicalSiteName.Trim()}";
+        return canonicalSiteName.Trim();
     }
 
     private static IEnumerable<string> Aliases(string? aliases) => string.IsNullOrWhiteSpace(aliases)
