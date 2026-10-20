@@ -7,12 +7,6 @@ public static class SamsaraStopSiteMatcher
     public static Site? FindSite(LoadStop stop, IReadOnlyList<Site> sites)
     {
         var cleanName = CleanStopName(stop.Name);
-        var fullKeys = new[] { cleanName, stop.Address }
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(Normalise)
-            .Where(value => value.Length > 0)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
         var parts = stop.Name
             .Split(['·', '•'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
@@ -26,18 +20,35 @@ public static class SamsaraStopSiteMatcher
             ? null
             : Normalise(OperationalStopOrdering.IsCollection(stop.Name) ? parts[0] : parts[^1]);
 
-        var matches = sites.Where(site =>
+        // Names and aliases identify the site. Shared supplier addresses must
+        // never make a unique name match ambiguous or override a destination.
+        if (!string.IsNullOrWhiteSpace(preferredKey))
         {
-            var keys = SiteKeys(site).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            return (preferredKey is not null && keys.Contains(preferredKey)) || keys.Any(fullKeys.Contains);
-        }).ToList();
+            var preferred = UniqueMatch(sites, site => IdentityKeys(site).Contains(preferredKey));
+            if (preferred.Count > 0) return preferred.Site;
+        }
 
-        return matches.Count == 1 ? matches[0] : null;
+        var nameKey = Normalise(cleanName);
+        var named = UniqueMatch(sites, site => IdentityKeys(site).Contains(nameKey));
+        if (named.Count > 0) return named.Site;
+
+        var addressKey = Normalise(stop.Address);
+        if (addressKey.Length == 0) return null;
+        return UniqueMatch(sites, site => Normalise(site.CollectionAddress) == addressKey).Site;
     }
+
+    private static (int Count, Site? Site) UniqueMatch(IReadOnlyList<Site> sites, Func<Site, bool> predicate)
+    {
+        var matches = sites.Where(predicate).Take(2).ToList();
+        return (matches.Count, matches.Count == 1 ? matches[0] : null);
+    }
+
+    private static IEnumerable<string> IdentityKeys(Site site) => SiteKeys(site);
+
 
     private static IEnumerable<string> SiteKeys(Site site)
     {
-        foreach (var value in new[] { site.Name, site.DriverTextName, site.ExternalCode, site.CollectionAddress })
+        foreach (var value in new[] { site.Name, site.DriverTextName, site.ExternalCode })
         {
             var key = Normalise(value);
             if (key.Length > 0) yield return key;
