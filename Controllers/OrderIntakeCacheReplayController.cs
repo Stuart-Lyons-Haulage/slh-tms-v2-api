@@ -63,7 +63,7 @@ public sealed class OrderIntakeCacheReplayController(TmsDbContext db, ILogger<Or
 
         var existingOrders = messageIds.Count == 0
             ? new Dictionary<string, int>(StringComparer.Ordinal)
-            : await ExistingOrderCountsByMessageId(messageIds, ct);
+            : await ExistingOrderCountsByMessageId(messageIds, from, to, ct);
 
         var records = evidenceRows.Select(row =>
         {
@@ -295,10 +295,10 @@ public sealed class OrderIntakeCacheReplayController(TmsDbContext db, ILogger<Or
         };
     }
 
-    private async Task<Dictionary<string, int>> ExistingOrderCountsByMessageId(IReadOnlyCollection<string> messageIds, CancellationToken ct)
+    private async Task<Dictionary<string, int>> ExistingOrderCountsByMessageId(IReadOnlyCollection<string> messageIds, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
     {
         var orders = await db.StagedImports.AsNoTracking()
-            .Where(item => item.EntityType == "order")
+            .Where(item => item.EntityType == "order" && item.ReceivedAtUtc >= from && item.ReceivedAtUtc < to)
             .Select(item => item.PayloadJson)
             .ToListAsync(ct);
 
