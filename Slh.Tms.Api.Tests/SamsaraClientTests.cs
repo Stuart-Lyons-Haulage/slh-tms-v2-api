@@ -109,6 +109,112 @@ public sealed class SamsaraClientTests
     }
 
     [Fact]
+    public async Task Route_create_retries_without_stop_external_ids_when_samsara_rejects_duplicate_arrivals()
+    {
+        var postedBodies = new List<string>();
+        var handler = new StubHandler(async request =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+
+            var body = await request.Content!.ReadAsStringAsync();
+            postedBodies.Add(body);
+            if (postedBodies.Count == 1)
+                return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent("""{"message":"cannot assign external IDs to stops, when multiple stops have the same scheduled arrival time"}""", Encoding.UTF8, "application/json")
+                };
+
+            return JsonResponse("""
+            {
+              "data": {
+                "id": "route-duplicate-fallback",
+                "externalIds": { "slhTmsRun": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+                "stops": [
+                  { "id": "samsara-stop-1", "sequenceNumber": 1 },
+                  { "id": "samsara-stop-2", "sequenceNumber": 2 }
+                ]
+              }
+            }
+            """);
+        });
+
+        var client = Client(handler);
+        var runId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        var arrival = new DateTimeOffset(2026, 10, 20, 9, 0, 0, TimeSpan.Zero);
+        var result = await client.UpsertRouteAsync(
+            new SamsaraRouteRequest(runId, "SLH duplicate", "plan", null, null,
+            [
+                new SamsaraRouteStopRequest(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), 1, "Depot", null, "Depot", 50, -0.1, 250, null, arrival, null),
+                new SamsaraRouteStopRequest(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), 2, "Customer", null, "Customer", 51, -0.2, 250, arrival, null, null)
+            ]),
+            CancellationToken.None);
+
+        Assert.True(result.Created);
+        Assert.Equal("route-duplicate-fallback", result.RouteId);
+        Assert.Equal(2, postedBodies.Count);
+        using var original = JsonDocument.Parse(postedBodies[0]);
+        using var retry = JsonDocument.Parse(postedBodies[1]);
+        Assert.True(original.RootElement.GetProperty("stops")[0].TryGetProperty("externalIds", out _));
+        Assert.False(retry.RootElement.GetProperty("stops")[0].TryGetProperty("externalIds", out _));
+        Assert.False(retry.RootElement.GetProperty("stops")[1].TryGetProperty("externalIds", out _));
+    }
+
+    [Fact]
+    public async Task Route_update_clears_stale_times_and_never_sends_departure_before_arrival()
+    {
+        string? patchedBody = null;
+        var handler = new StubHandler(async request =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return JsonResponse("""
+                {
+                  "data": {
+                    "id": "route-1",
+                    "externalIds": { "slhTmsRun": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+                    "stops": [
+                      { "id": "stop-1", "sequenceNumber": 1, "externalIds": { "slhTmsStop": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, "scheduledArrivalTime": "2026-10-20T08:00:00Z", "scheduledDepartureTime": "2026-10-20T08:01:00Z" },
+                      { "id": "stop-2", "sequenceNumber": 2, "externalIds": { "slhTmsStop": "cccccccccccccccccccccccccccccccc" }, "scheduledArrivalTime": "2026-10-20T09:00:00Z", "scheduledDepartureTime": "2026-10-20T09:30:00Z" }
+                    ]
+                  }
+                }
+                """);
+
+            if (request.Method == HttpMethod.Patch)
+            {
+                patchedBody = await request.Content!.ReadAsStringAsync();
+                return JsonResponse("""
+                { "data": { "id": "route-1", "externalIds": { "slhTmsRun": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "stops": [] } }
+                """);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.BadRequest);
+        });
+
+        var client = Client(handler);
+        var runId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        var firstStop = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        var secondStop = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+        var arrival = new DateTimeOffset(2026, 10, 20, 8, 30, 0, TimeSpan.Zero);
+        await client.UpsertRouteAsync(
+            new SamsaraRouteRequest(runId, "SLH update", "plan", null, null,
+            [
+                new SamsaraRouteStopRequest(firstStop, 1, "Depot", null, "Depot", 50, -0.1, 250, null, null, null),
+                new SamsaraRouteStopRequest(secondStop, 2, "Customer", null, "Customer", 51, -0.2, 250, arrival.AddHours(1), arrival.AddMinutes(30), null)
+            ]),
+            CancellationToken.None);
+
+        Assert.NotNull(patchedBody);
+        using var document = JsonDocument.Parse(patchedBody!);
+        var stops = document.RootElement.GetProperty("stops");
+        Assert.Equal("stop-1", stops[0].GetProperty("id").GetString());
+        Assert.Equal(JsonValueKind.Null, stops[0].GetProperty("scheduledArrivalTime").ValueKind);
+        Assert.Equal(JsonValueKind.Null, stops[0].GetProperty("scheduledDepartureTime").ValueKind);
+        Assert.Equal("2026-10-20T09:30:00.0000000Z", stops[1].GetProperty("scheduledArrivalTime").GetString());
+        Assert.Equal("2026-10-20T09:30:00.0000000Z", stops[1].GetProperty("scheduledDepartureTime").GetString());
+    }
+
+    [Fact]
     public async Task Address_upsert_uses_site_external_id_and_geofence()
     {
         string? postedBody = null;

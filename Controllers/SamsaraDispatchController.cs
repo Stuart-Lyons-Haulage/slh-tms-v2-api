@@ -267,12 +267,13 @@ public sealed class SamsaraDispatchController(
         var pending = candidates.Count - mapped;
         var activeSites = sites.Count;
         var sitesWithReference = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode));
-        var sitesWithAddress = sites.Count(site => !string.IsNullOrWhiteSpace(site.CollectionAddress));
+        var sitesWithAddress = sites.Count(site => SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress));
         var sitesWithCoordinates = sites.Count(site => site.Latitude is not null && site.Longitude is not null);
         var missingCoordinates = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
                                                      (site.Latitude is null || site.Longitude is null));
         var missingAddress = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
-                                                 string.IsNullOrWhiteSpace(site.CollectionAddress));
+                                                 !SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress));
+        var referenceOnlyAddress = sites.Count(site => SamsaraLocationRules.IsLongNumericReference(site.CollectionAddress?.Trim()));
 
         return Ok(new
         {
@@ -287,6 +288,7 @@ public sealed class SamsaraDispatchController(
             pending,
             missingCoordinates,
             missingAddress,
+            referenceOnlyAddress,
             message = !samsara.IsConfigured
                 ? $"Samsara settings are incomplete: {string.Join(", ", samsara.MissingSettings)}."
                 : candidates.Count == 0
@@ -1167,6 +1169,15 @@ public sealed class SamsaraDispatchController(
                 foreach (var remoteStop in result.Route.Stops)
                 {
                     var tmsStopId = ResolveTmsStopId(remoteStop);
+                    if (tmsStopId is null && remoteStop.SequenceNumber is long sequenceNumber &&
+                        sequenceNumber >= 1 && sequenceNumber <= physicalStops.Count)
+                    {
+                        // Samsara can reject stop external IDs when it computes the same
+                        // scheduled arrival for multiple jobs. In that fallback request,
+                        // preserve local stop visibility by pairing the returned sequence
+                        // with the exact ordered payload stops.
+                        tmsStopId = physicalStops[(int)sequenceNumber - 1].Representative.StopId;
+                    }
                     if (tmsStopId is null || string.IsNullOrWhiteSpace(remoteStop.Id)) continue;
 
                     var group = physicalStops.FirstOrDefault(item => item.Representative.StopId == tmsStopId.Value);
@@ -1518,7 +1529,7 @@ public sealed class SamsaraDispatchController(
 
     private static List<SiteAddressCandidate> ToSiteAddressCandidates(IEnumerable<Site> sites) => sites
             .Where(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
-                          !string.IsNullOrWhiteSpace(site.CollectionAddress))
+                          SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress))
             .Select(site => new SiteAddressCandidate(site))
             .ToList();
 
@@ -1684,21 +1695,23 @@ public sealed class SamsaraDispatchController(
     private static ResolvedStopLocation ResolveLocation(LoadStop stop, IReadOnlyList<Site> sites)
     {
         var matchedSite = SamsaraStopSiteMatcher.FindSite(stop, sites);
+        var physicalAddress = SamsaraLocationRules.ResolvePhysicalAddress(
+            stop.Address,
+            matchedSite?.CollectionAddress,
+            CleanStopName(stop.Name));
 
         if (stop.Latitude is not null && stop.Longitude is not null)
             return new ResolvedStopLocation(
-                string.IsNullOrWhiteSpace(stop.Address)
-                    ? matchedSite?.CollectionAddress ?? CleanStopName(stop.Name)
-                    : stop.Address!,
+                physicalAddress,
                 (double)stop.Latitude.Value,
                 (double)stop.Longitude.Value,
                 matchedSite);
 
         if (matchedSite is null)
-            return new ResolvedStopLocation(stop.Address ?? CleanStopName(stop.Name), null, null, null);
+            return new ResolvedStopLocation(physicalAddress, null, null, null);
 
         return new ResolvedStopLocation(
-            stop.Address ?? matchedSite.CollectionAddress ?? matchedSite.Name,
+            physicalAddress,
             matchedSite.Latitude is null ? null : (double)matchedSite.Latitude.Value,
             matchedSite.Longitude is null ? null : (double)matchedSite.Longitude.Value,
             matchedSite);
