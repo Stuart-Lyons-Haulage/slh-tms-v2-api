@@ -24,11 +24,11 @@ IF OBJECT_ID(N'dbo.StagedImports', N'U') IS NOT NULL
    AND COL_LENGTH(N'dbo.StagedImports', N'CollectionDate') IS NOT NULL
 BEGIN
     UPDATE dbo.StagedImports
-       SET CollectionDate = TRY_CONVERT(date, LEFT(JSON_VALUE(PayloadJson, '$.collectionDate'), 10), 23)
+       SET CollectionDate = TRY_CONVERT(date, JSON_VALUE(PayloadJson, '$.collectionDate'))
      WHERE CollectionDate IS NULL
        AND (EntityType = N'order' OR EntityType = N'register:order')
        AND ReceivedAtUtc >= DATEADD(day, -120, SYSDATETIMEOFFSET())
-       AND JSON_VALUE(PayloadJson, '$.collectionDate') IS NOT NULL;
+       AND TRY_CONVERT(date, JSON_VALUE(PayloadJson, '$.collectionDate')) IS NOT NULL;
 END;
 GO
 
