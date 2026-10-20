@@ -1,6 +1,7 @@
 # Build output
 bin/
 obj/
+out/
 
 # Visual Studio files
 .vs/
@@ -8,6 +9,8 @@ obj/
 *.suo
 *.userosscache
 *.sln.docstates
+*.csproj.user
+launchSettings.json
 
 # Rider
 .idea/
@@ -15,6 +18,7 @@ obj/
 
 # macOS
 .DS_Store
+Thumbs.db
 
 # Publish output
 publish/
@@ -29,10 +33,12 @@ publish/
 
 # Local app settings
 appsettings.Development.json
+appsettings.Local.json
 secrets.json
 
 # Test results
 TestResults/
+coverage/
 
 # Database files
 *.db
@@ -44,3 +50,28 @@ TestResults/
 *.pfx
 *.key
 *.pem
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# dotnet tool manifest
+# .config/ — uncomment if not using dotnet tools
+
+# User-specific
+*.rsuser
+*.DotSettings.user
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+bld/
+[Bb]in/
+[Oo]bj/
+
+# Docker
+docker-compose.override.yml

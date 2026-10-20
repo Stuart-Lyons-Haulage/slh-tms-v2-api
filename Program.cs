@@ -345,6 +345,11 @@ builder.Services.AddHostedService<SageCalendarSyncService>();
 builder.Services.AddSingleton<RequestLatencyMonitor>();
 builder.Services.AddHostedService<SamsaraReconciliationService>();
 
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+});
+
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
@@ -487,6 +492,7 @@ if (migrationOnly)
     return;
 }
 
+app.UseResponseCompression();
 app.UseHttpsRedirection();
 app.UseRouting();
 app.UseCors("Portal");
