@@ -10,41 +10,79 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController> logger, SiteAddressPropagationService siteAddressPropagation) : ControllerBase
 {
-    [HttpGet("customers")] public async Task<IActionResult> Customers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Customers.AsNoTracking().Where(x => x.Active && (q == null || x.Code.Contains(q) || x.Name.Contains(q))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct));
-    [HttpGet("customer-contacts")] public async Task<IActionResult> CustomerContacts([FromQuery] string? q, CancellationToken ct) => Ok(await db.CustomerContacts.AsNoTracking().Where(x => x.Active && (q == null || x.CustomerCode.Contains(q) || x.Name.Contains(q) || (x.Email != null && x.Email.Contains(q)))).OrderBy(x => x.CustomerCode).ThenBy(x => x.Name).Take(5000).ToListAsync(ct));
-    [HttpGet("vehicles")] public async Task<IActionResult> Vehicles([FromQuery] string? q, CancellationToken ct)
+    private const int MaxPageSize = 200;
+    private const int DefaultPageSize = 50;
+    private const int UnpagedLimit = 5000;
+
+    [HttpGet("customers")]
+    public async Task<IActionResult> Customers([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
     {
-        // Filter out placeholder registrations (e.g. C12345) in SQL rather than fetching all rows
-        // and filtering in memory. TODO: add pagination to all lookup endpoints.
-        var rows = await db.Vehicles.AsNoTracking()
+        var query = db.Customers.AsNoTracking()
+            .Where(x => x.Active && (q == null || x.Code.Contains(q) || x.Name.Contains(q)))
+            .OrderBy(x => x.Name);
+        return await Paginate(query, page, pageSize, ct);
+    }
+
+    [HttpGet("customer-contacts")]
+    public async Task<IActionResult> CustomerContacts([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
+    {
+        var query = db.CustomerContacts.AsNoTracking()
+            .Where(x => x.Active && (q == null || x.CustomerCode.Contains(q) || x.Name.Contains(q) || (x.Email != null && x.Email.Contains(q))))
+            .OrderBy(x => x.CustomerCode).ThenBy(x => x.Name);
+        return await Paginate(query, page, pageSize, ct);
+    }
+
+    [HttpGet("vehicles")]
+    public async Task<IActionResult> Vehicles([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
+    {
+        var query = db.Vehicles.AsNoTracking()
             .Where(x => x.Active && (q == null || x.Registration.Contains(q) || (x.FleetNumber != null && x.FleetNumber.Contains(q))))
             .Where(x => x.Registration == null
                 || x.Registration.Length < 6
                 || !EF.Functions.Like(x.Registration, "C[0-9][0-9][0-9][0-9][0-9]%"))
-            .OrderBy(x => x.Registration)
-            .Take(5000)
-            .ToListAsync(ct);
-        return Ok(rows);
+            .OrderBy(x => x.Registration);
+        return await Paginate(query, page, pageSize, ct);
     }
-    [HttpGet("drivers")] public async Task<IActionResult> Drivers([FromQuery] string? q, CancellationToken ct)
+
+    [HttpGet("drivers")]
+    public async Task<IActionResult> Drivers([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
     {
-        // TODO: add pagination to all lookup endpoints.
         // Driver enrichment and dedup must remain in memory because enrichment pulls
         // from a secondary detail store and the dedup key depends on enriched fields.
-        var rows = await db.Drivers.AsNoTracking().Where(x => x.Active && (q == null || x.EmployeeNumber.Contains(q) || x.DisplayName.Contains(q))).OrderBy(x => x.DisplayName).Take(5000).ToListAsync(ct);
+        var rows = await db.Drivers.AsNoTracking()
+            .Where(x => x.Active && (q == null || x.EmployeeNumber.Contains(q) || x.DisplayName.Contains(q)))
+            .OrderBy(x => x.DisplayName)
+            .Take(UnpagedLimit)
+            .ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
-        return Ok(rows.Where(DriverPopulationRules.IsDriver)
+        var deduped = rows.Where(DriverPopulationRules.IsDriver)
             .GroupBy(x => !string.IsNullOrWhiteSpace(x.TachoMasterDriverId) ? $"member:{x.TachoMasterDriverId}" :
                           !string.IsNullOrWhiteSpace(x.TachoCardNumber) ? $"card:{x.TachoCardNumber}" : $"employee:{x.EmployeeNumber}", StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.First()));
+            .Select(group => group.First())
+            .ToList();
+        return PaginateInMemory(deduped, page, pageSize);
     }
-    [HttpGet("trailers")] public async Task<IActionResult> Trailers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Trailers.AsNoTracking().Where(x => x.Active && (q == null || x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)))).OrderBy(x => x.TrailerNumber).Take(5000).ToListAsync(ct));
-    [HttpGet("sites")] public async Task<IActionResult> Sites([FromQuery] string? q, CancellationToken ct)
+
+    [HttpGet("trailers")]
+    public async Task<IActionResult> Trailers([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
+    {
+        var query = db.Trailers.AsNoTracking()
+            .Where(x => x.Active && (q == null || x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q))))
+            .OrderBy(x => x.TrailerNumber);
+        return await Paginate(query, page, pageSize, ct);
+    }
+
+    [HttpGet("sites")]
+    public async Task<IActionResult> Sites([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
     {
         List<Site> rows;
         try
         {
-            rows = await db.Sites.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct);
+            rows = await db.Sites.AsNoTracking()
+                .Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q))))
+                .OrderBy(x => x.Name)
+                .Take(UnpagedLimit)
+                .ToListAsync(ct);
         }
         catch (Exception ex) when (IsLookupSchemaUnavailable(ex))
         {
@@ -62,14 +100,20 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
             logger.LogWarning(ex, "Site lookup detail enrichment failed; returning base site records so live planning can continue.");
             db.ChangeTracker.Clear();
         }
-        return Ok(rows);
+        return PaginateInMemory(rows, page, pageSize);
     }
 
-    [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct)
+    [HttpGet("market-contacts")]
+    public async Task<IActionResult> MarketContacts([FromQuery] string? q, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
     {
-        var rows = await db.MarketContacts.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || x.Market.Contains(q))).OrderBy(x => x.Market).ThenBy(x => x.Name).Take(5000).ToListAsync(ct);
+        var rows = await db.MarketContacts.AsNoTracking()
+            .Where(x => x.Active && (q == null || x.Name.Contains(q) || x.Market.Contains(q)))
+            .OrderBy(x => x.Market).ThenBy(x => x.Name)
+            .Take(UnpagedLimit)
+            .ToListAsync(ct);
         foreach (var row in rows) row.Market = CanonicalMarket(row.Market);
-        return Ok(rows.OrderBy(row => row.Market).ThenBy(row => row.Name));
+        var sorted = rows.OrderBy(row => row.Market).ThenBy(row => row.Name).ToList();
+        return PaginateInMemory(sorted, page, pageSize);
     }
 
     [HttpPut("market-contacts/{id:guid}"), Authorize(Policy = "TmsWrite")]
@@ -197,6 +241,29 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         await MasterDetailStore.SaveAsync(db, "site", code, JsonSerializer.Serialize(site), "SLH site editor", User.Identity?.Name, ct);
         await siteAddressPropagation.PropagateMasterAddressToOpenOrdersAsync(site, ct);
         return Ok(site);
+    }
+
+    private async Task<IActionResult> Paginate<T>(IQueryable<T> query, int? page, int? pageSize, CancellationToken ct)
+    {
+        if (page is null)
+            return Ok(await query.Take(UnpagedLimit).ToListAsync(ct));
+
+        var p = Math.Max(1, page.Value);
+        var size = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
+        var totalCount = await query.CountAsync(ct);
+        var items = await query.Skip((p - 1) * size).Take(size).ToListAsync(ct);
+        return Ok(new PagedResult<T> { Items = items, Page = p, PageSize = size, TotalCount = totalCount });
+    }
+
+    private IActionResult PaginateInMemory<T>(List<T> rows, int? page, int? pageSize)
+    {
+        if (page is null)
+            return Ok(rows);
+
+        var p = Math.Max(1, page.Value);
+        var size = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
+        var items = rows.Skip((p - 1) * size).Take(size).ToList();
+        return Ok(new PagedResult<T> { Items = items, Page = p, PageSize = size, TotalCount = rows.Count });
     }
 
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
