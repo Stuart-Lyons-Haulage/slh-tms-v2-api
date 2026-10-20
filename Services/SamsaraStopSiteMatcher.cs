@@ -6,16 +6,17 @@ public static class SamsaraStopSiteMatcher
 {
     public static Site? FindSite(LoadStop stop, IReadOnlyList<Site> sites)
     {
-        var fullKeys = new[] { CleanStopName(stop.Name), stop.Address }
+        var cleanName = CleanStopName(stop.Name);
+        var fullKeys = new[] { cleanName, stop.Address }
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(Normalise)
             .Where(value => value.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var parts = stop.Name
-            .Split('·', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Split(['·', '•'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
-        if (parts.Count > 0 && (parts[0].Equals("Collect", StringComparison.OrdinalIgnoreCase) || parts[0].Equals("Deliver", StringComparison.OrdinalIgnoreCase)))
+        if (parts.Count > 0 && IsStopAction(parts[0]))
             parts.RemoveAt(0);
 
         // Compound delivery labels contain the supplier/source followed by the actual
@@ -49,8 +50,16 @@ public static class SamsaraStopSiteMatcher
         }
     }
 
+    private static bool IsStopAction(string value) =>
+        value.Equals("Collect", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("Deliver", StringComparison.OrdinalIgnoreCase);
+
     private static string CleanStopName(string value) =>
-        System.Text.RegularExpressions.Regex.Replace(value, @"^(?:Collect|Deliver)\s*[·:\-]\s*", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+        System.Text.RegularExpressions.Regex.Replace(
+            value,
+            @"^(?:Collect|Deliver)\b\s*(?:[·•:–—-]\s*)?",
+            string.Empty,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
 
     private static string Normalise(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
