@@ -140,70 +140,178 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         var deleted = new List<object>();
         var blocked = new List<object>();
         var notFound = new List<Guid>();
-        foreach (var id in ids)
+
+        try
         {
-            var item = await Find(entity, id, ct);
-            if (item is null)
+            // ── Phase 1: Load all entities in ONE query instead of N individual finds ──
+            var allItems = new Dictionary<Guid, object>();
+            switch (entity)
             {
-                notFound.Add(id);
-                continue;
+                case "drivers":
+                    foreach (var d in await db.Drivers.Where(x => ids.Contains(x.Id)).ToListAsync(ct))
+                        allItems[d.Id] = d;
+                    break;
+                case "sites":
+                    foreach (var s in await db.Sites.Where(x => ids.Contains(x.Id)).ToListAsync(ct))
+                        allItems[s.Id] = s;
+                    break;
             }
 
             var forceSiteHistoryOverride = entity == "sites" && request.ForceHistoryOverride;
-            if (forceSiteHistoryOverride && GetActive(item))
+
+            // ── Phase 2: Classify each id as blocked, not-found, or deletable ──
+            var toDelete = new List<(Guid Id, object Item)>();
+            foreach (var id in ids)
             {
-                blocked.Add(new
+                if (!allItems.TryGetValue(id, out var item))
                 {
-                    id,
-                    label = Label(item),
-                    reason = "Archive this site before using the force delete override."
-                });
-                continue;
-            }
+                    notFound.Add(id);
+                    continue;
+                }
 
-            var usage = directUsage[id];
-            if (usage.Count == 0 && recoveryRegisterPayloads.Count > 0)
-            {
-                var token = id.ToString();
-                var planningCount = recoveryRegisterPayloads.Count(payload =>
-                    payload.Contains(token, StringComparison.OrdinalIgnoreCase));
-                if (planningCount > 0)
-                    usage.Add(new { area = "Planning register", count = planningCount });
-            }
-
-            if (usage.Count > 0 && !forceSiteHistoryOverride)
-            {
-                blocked.Add(new
+                if (forceSiteHistoryOverride && GetActive(item))
                 {
+                    blocked.Add(new
+                    {
+                        id,
+                        label = Label(item),
+                        reason = "Archive this site before using the force delete override."
+                    });
+                    continue;
+                }
+
+                var usage = directUsage[id];
+                if (usage.Count == 0 && recoveryRegisterPayloads.Count > 0)
+                {
+                    var token = id.ToString();
+                    var planningCount = recoveryRegisterPayloads.Count(payload =>
+                        payload.Contains(token, StringComparison.OrdinalIgnoreCase));
+                    if (planningCount > 0)
+                        usage.Add(new { area = "Planning register", count = planningCount });
+                }
+
+                if (usage.Count > 0 && !forceSiteHistoryOverride)
+                {
+                    blocked.Add(new
+                    {
+                        id,
+                        label = Label(item),
+                        reason = $"This {Singular(entity)} is referenced by TMS history or live operational data.",
+                        references = usage
+                    });
+                    continue;
+                }
+
+                toDelete.Add((id, item));
+            }
+
+            // ── Phase 3: Batch-remove all deletable entities in ONE SaveChanges ──
+            var removeResults = new Dictionary<Guid, (int MappingsRemoved, int GeofencesDetached, string Snapshot, string Label)>();
+
+            if (toDelete.Count > 0)
+            {
+                var deleteIds = toDelete.Select(x => x.Id).ToList();
+
+                // Batch-load integration mappings for all deletable entities
+                var allMappings = await db.IntegrationMappings
+                    .Where(x => deleteIds.Contains(x.TmsEntityId))
+                    .ToListAsync(ct);
+                var mappingsByEntity = allMappings.GroupBy(x => x.TmsEntityId)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                if (allMappings.Count > 0)
+                    db.IntegrationMappings.RemoveRange(allMappings);
+
+                // Handle site geofence detachment in batch
+                var geofencesByEntity = new Dictionary<Guid, int>();
+                if (forceSiteHistoryOverride && entity == "sites")
+                {
+                    var linkedGeofences = await db.SiteGeofences
+                        .Where(x => x.SiteId.HasValue && deleteIds.Contains(x.SiteId.Value))
+                        .ToListAsync(ct);
+                    foreach (var geofence in linkedGeofences)
+                    {
+                        if (!geofencesByEntity.ContainsKey(geofence.SiteId!.Value))
+                            geofencesByEntity[geofence.SiteId!.Value] = 0;
+                        geofencesByEntity[geofence.SiteId!.Value]++;
+                        geofence.SiteId = null;
+                        geofence.SiteNumber = null;
+                        geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    }
+                }
+
+                // Snapshot and mark for removal
+                foreach (var (id, item) in toDelete)
+                {
+                    var snapshot = Snapshot(item);
+                    var mappingsRemoved = mappingsByEntity.TryGetValue(id, out var m) ? m.Count : 0;
+                    geofencesByEntity.TryGetValue(id, out var geofencesDetached);
+                    removeResults[id] = (mappingsRemoved, geofencesDetached, snapshot, Label(item));
+
+                    switch (item)
+                    {
+                        case Driver value: db.Drivers.Remove(value); break;
+                        case Site value: db.Sites.Remove(value); break;
+                    }
+                }
+
+                // ONE SaveChanges for all removes
+                await db.SaveChangesAsync(ct);
+            }
+
+            // ── Phase 4: Batch-write all audit records in ONE SaveChanges ──
+            var auditEntries = new List<MasterDataAudit>();
+            var deletedDetails = new List<(Guid Id, string Label, int MappingsRemoved, int GeofencesDetached)>();
+            foreach (var (id, _) in toDelete)
+            {
+                if (!removeResults.TryGetValue(id, out var result)) continue;
+                auditEntries.Add(BuildAudit(
+                    Title(Singular(entity)),
                     id,
-                    label = Label(item),
-                    reason = $"This {Singular(entity)} is referenced by TMS history or live operational data.",
-                    references = usage
+                    result.GeofencesDetached > 0 ? "BulkForceDeletedGeofenceLinksDetached" : "BulkDeleted",
+                    result.Snapshot,
+                    null));
+                deletedDetails.Add((id, result.Label, result.MappingsRemoved, result.GeofencesDetached));
+            }
+
+            var auditRecorded = true;
+            if (auditEntries.Count > 0)
+            {
+                try
+                {
+                    db.MasterDataAudits.AddRange(auditEntries);
+                    await db.SaveChangesAsync(ct);
+                }
+                catch
+                {
+                    db.ChangeTracker.Clear();
+                    auditRecorded = false;
+                }
+            }
+
+            // Build the deleted response list now that we know audit status
+            foreach (var d in deletedDetails)
+            {
+                deleted.Add(new
+                {
+                    id = d.Id,
+                    label = d.Label,
+                    integrationMappingsRemoved = d.MappingsRemoved,
+                    geofenceLinksDetached = d.GeofencesDetached,
+                    auditRecorded
                 });
-                continue;
             }
-
-            var removed = await Remove(entity, id, forceSiteHistoryOverride, ct);
-            if (removed is null)
+        }
+        catch (OperationCanceledException) { throw; } // let cancellation propagate
+        catch (Exception ex)
+        {
+            // Return a proper error instead of crashing the worker (which causes Azure 503 without CORS)
+            return StatusCode(500, new
             {
-                notFound.Add(id);
-                continue;
-            }
-
-            var auditRecorded = await TryAudit(
-                Title(Singular(entity)),
-                id,
-                removed.Value.GeofencesDetached > 0 ? "BulkForceDeletedGeofenceLinksDetached" : "BulkDeleted",
-                removed.Value.Snapshot,
-                null,
-                ct);
-            deleted.Add(new
-            {
-                id,
-                label = Label(item),
-                integrationMappingsRemoved = removed.Value.MappingsRemoved,
-                geofenceLinksDetached = removed.Value.GeofencesDetached,
-                auditRecorded
+                code = "bulk_delete_failed",
+                message = $"The bulk delete operation failed after deleting {deleted.Count} record(s). {ex.GetBaseException().Message}",
+                deletedSoFar = deleted.Count,
+                blockedSoFar = blocked.Count
             });
         }
 
