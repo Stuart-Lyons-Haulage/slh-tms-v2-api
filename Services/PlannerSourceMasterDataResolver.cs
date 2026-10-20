@@ -7,9 +7,8 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Resolves the planner's human-readable source-line site labels to stable Site Master
-/// identity and the manually linked DOT/Falcon geofence without replacing the source
-/// wording used by Planner and driver instructions.
+/// Resolves planner source labels and aliases to stable Site Master identity, canonical
+/// Site Master display names, and the manually linked DOT/Falcon geofence.
 /// </summary>
 public sealed class PlannerSourceMasterDataResolver
 {
@@ -322,7 +321,7 @@ public sealed class PlannerSourceMasterDataResolver
             yield return alias;
     }
 
-    private static string DisplayName(Site site) => !string.IsNullOrWhiteSpace(site.DriverTextName) ? site.DriverTextName.Trim() : site.Name.Trim();
+    private static string DisplayName(Site site) => site.Name.Trim();
 
     private static (decimal Longitude, decimal Latitude)? GeofenceCentre(SiteGeofence geofence)
     {

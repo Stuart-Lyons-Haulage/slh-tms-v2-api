@@ -153,7 +153,7 @@ public sealed class PlannerSourceLineImportTests : IClassFixture<CustomWebFactor
         Assert.Equal(LoadStatus.Planned, load.Status);
 
         var stop = finalDb.LoadStops.Where(row => row.LoadId == load.Id).OrderBy(row => row.Sequence).First();
-        Assert.Equal("Collect · NWF-Selsey", stop.Name);
+        Assert.Equal("Collect · Selsey Nature's Way", stop.Name);
         Assert.Contains("10 pallets", stop.Address);
         Assert.Contains("for Morrisons-Stockton", stop.Address);
         Assert.Equal(latitude, stop.Latitude);

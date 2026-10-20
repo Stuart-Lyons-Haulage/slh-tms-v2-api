@@ -69,6 +69,7 @@ public sealed class PlannerSiteReconciliationTests : IClassFixture<CustomWebFact
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
         var stop = await verifyDb.LoadStops.SingleAsync(x => x.LoadId == loadId);
+        Assert.Equal("Collect · Natures Way Selsey", stop.Name);
         Assert.StartsWith("Park Farm, Selsey, Chichester, PO20 0XY", stop.Address);
         Assert.Contains("4 pallets", stop.Address);
         Assert.Null(stop.Latitude);

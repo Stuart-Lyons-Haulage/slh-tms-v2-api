@@ -55,8 +55,8 @@ public sealed class EmailOrderSiteMasterAlignmentTests : IClassFixture<CustomWeb
         var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, CancellationToken.None);
         var root = aligned.Orders.Single().Payload;
 
-        Assert.Equal("Morrisons Bridgwater", root.GetProperty("stallNumber").GetString());
-        Assert.Equal("Morrisons Bridgwater", root.GetProperty("marketName").GetString());
+        Assert.Equal("Morrisons Bridgwater Canonical", root.GetProperty("stallNumber").GetString());
+        Assert.Equal("Morrisons Bridgwater Canonical", root.GetProperty("marketName").GetString());
         Assert.Equal("Morrisons", root.GetProperty("sourceMarketName").GetString());
         Assert.Equal("Morrisons FRUITBRIDGWATER 718", root.GetProperty("sourceStallNumber").GetString());
         Assert.True(root.GetProperty("depotResolvedFromDestination").GetBoolean());
