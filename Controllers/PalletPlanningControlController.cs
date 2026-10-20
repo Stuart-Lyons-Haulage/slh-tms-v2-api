@@ -211,6 +211,35 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         });
     }
 
+    /// <summary>
+    /// A consolidated Run Planner line can represent several orders on one row. The web
+    /// client batches those into one call; this allocates each entry through the same
+    /// single-order path as <see cref="Allocate"/> (same validation, same capacity and
+    /// learning side effects) rather than a heavier SQL batch transaction, which held one
+    /// transaction open across the whole recalculation and could sit in "Saving"
+    /// indefinitely for a consolidated line.
+    /// </summary>
+    [HttpPost("allocations/bulk")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> AllocateBulk([FromBody] List<PalletAllocationRequest> requests, CancellationToken ct)
+    {
+        if (requests is null || requests.Count == 0) return Ok(Array.Empty<object>());
+        var results = new List<object>(requests.Count);
+        foreach (var request in requests)
+        {
+            var outcome = await Allocate(request, ct);
+            if (outcome is OkObjectResult { Value: { } value })
+            {
+                results.Add(value);
+                continue;
+            }
+            // Fail the batch the same way a single allocation would fail on its own
+            // (not found, conflict, etc.), rather than silently dropping one line.
+            return outcome;
+        }
+        return Ok(results);
+    }
+
     [HttpPost("allocations")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Allocate([FromBody] PalletAllocationRequest request, CancellationToken ct)
