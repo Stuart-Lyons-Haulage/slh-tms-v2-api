@@ -61,6 +61,37 @@ public sealed class MarketOrderAlignmentTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Retailer_name_does_not_override_the_named_delivery_depot()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..6];
+        var generic = new Site
+        {
+            Id = Guid.NewGuid(),
+            ExternalCode = $"WAITROSE-GENERIC-{suffix}",
+            Name = $"Waitrose {suffix}",
+            Aliases = $"Waitrose {suffix} generic",
+            Active = true
+        };
+        var leyland = new Site
+        {
+            Id = Guid.NewGuid(),
+            ExternalCode = $"WAITROSE-LEYLAND-{suffix}",
+            Name = $"Waitrose Leyland {suffix}",
+            Active = true
+        };
+        db.Sites.AddRange(generic, leyland);
+        await db.SaveChangesAsync();
+
+        var alignment = await OrderSiteMasterAlignment.ResolveNamesAsync(
+            db, null, leyland.Name, null, null, null, null,
+            CancellationToken.None, generic.Name);
+
+        Assert.Equal(leyland.Name, alignment.DeliveryName);
+    }
+
+    [Fact]
     public async Task Ambiguous_market_customer_still_uses_market_site_geofence_without_guessing_stall()
     {
         await using var scope = factory.Services.CreateAsyncScope();
