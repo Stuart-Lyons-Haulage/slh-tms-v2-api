@@ -1073,27 +1073,10 @@ public sealed class SamsaraDispatchController(
                     stopNotes));
             }
 
-            // Samsara rejects stops that share a scheduled arrival time when stop
-            // external IDs are attached. Nudge any colliding arrival forward so the
-            // sequence is strictly increasing, never moving a stop earlier than planned.
+            // Samsara rejects stops that share a scheduled arrival time when stop external
+            // IDs are attached. Make arrivals strictly increasing (never earlier than planned).
             if (!options.RecomputeScheduledTimes)
-            {
-                DateTimeOffset? previousArrival = null;
-                for (var i = 0; i < samsaraStops.Count; i++)
-                {
-                    var arrival = samsaraStops[i].ScheduledArrivalTime;
-                    if (arrival is null) continue;
-                    if (previousArrival is DateTimeOffset prev && arrival <= prev)
-                    {
-                        var bumped = prev.AddMinutes(1);
-                        var departure = samsaraStops[i].ScheduledDepartureTime;
-                        if (departure is DateTimeOffset dep && dep < bumped) departure = bumped;
-                        samsaraStops[i] = samsaraStops[i] with { ScheduledArrivalTime = bumped, ScheduledDepartureTime = departure };
-                        arrival = bumped;
-                    }
-                    previousArrival = arrival;
-                }
-            }
+                EnsureStrictlyIncreasingArrivals(samsaraStops);
 
             if (missingLocations.Count > 0)
                 return BadRequest(new
@@ -1241,6 +1224,28 @@ public sealed class SamsaraDispatchController(
         }
     }
 
+    // Samsara rejects stops that share a scheduled arrival time when stop external IDs are
+    // attached. Nudge any colliding arrival forward one minute (and its departure if needed)
+    // so the sequence is strictly increasing, never moving a stop earlier than planned.
+    private static void EnsureStrictlyIncreasingArrivals(IList<SamsaraRouteStopRequest> stops)
+    {
+        DateTimeOffset? previousArrival = null;
+        for (var i = 0; i < stops.Count; i++)
+        {
+            var arrival = stops[i].ScheduledArrivalTime;
+            if (arrival is null) continue;
+            if (previousArrival is DateTimeOffset prev && arrival <= prev)
+            {
+                var bumped = prev.AddMinutes(1);
+                var departure = stops[i].ScheduledDepartureTime;
+                if (departure is DateTimeOffset dep && dep < bumped) departure = bumped;
+                stops[i] = stops[i] with { ScheduledArrivalTime = bumped, ScheduledDepartureTime = departure };
+                arrival = bumped;
+            }
+            previousArrival = arrival;
+        }
+    }
+
     private async Task<IActionResult> DispatchRelayAsync(
         Load load,
         LoadRelayPlan relay,
@@ -1300,6 +1305,10 @@ public sealed class SamsaraDispatchController(
 
         var collectionStops = routeStops.Take(split).Append(handoverStop).Select((stop, index) => stop with { SequenceNumber = index + 1 }).ToList();
         var deliveryStops = new[] { handoverStop }.Concat(routeStops.Skip(split)).Select((stop, index) => stop with { SequenceNumber = index + 1 }).ToList();
+        // The inserted handover stop can share an arrival time with the real stop next to
+        // it in each leg; re-apply the strictly-increasing rule so neither leg is rejected.
+        EnsureStrictlyIncreasingArrivals(collectionStops);
+        EnsureStrictlyIncreasingArrivals(deliveryStops);
         var collectionSamsaraDriverId = await ResolveDriverIdAsync(collectionDriver, ct);
         var deliverySamsaraDriverId = await ResolveDriverIdAsync(deliveryDriver, ct);
         var collectionNotes = RelayNotes(load, collectionDriver, collectionVehicle, collectionTrailer, deliveryDriver, deliveryVehicle, deliveryTrailer, "collection", collectionState?.PlannedStartUtc);
