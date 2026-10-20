@@ -29,5 +29,6 @@
     <Content Remove="**/bin/**;**/obj/**" />
     <None Remove="**/bin/**;**/obj/**" />
     <EmbeddedResource Include="Database/*.sql" />
+    <EmbeddedResource Include="Data/SeedData/*.json" />
   </ItemGroup>
 </Project>
