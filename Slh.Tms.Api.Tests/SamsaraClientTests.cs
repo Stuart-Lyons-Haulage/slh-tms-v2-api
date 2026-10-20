@@ -199,7 +199,7 @@ public sealed class SamsaraClientTests
         await client.UpsertRouteAsync(
             new SamsaraRouteRequest(runId, "SLH update", "plan", null, null,
             [
-                new SamsaraRouteStopRequest(firstStop, 1, "Depot", null, "Depot", 50, -0.1, 250, null, arrival, null),
+                new SamsaraRouteStopRequest(firstStop, 1, "Depot", null, "Depot", 50, -0.1, 250, null, null, null),
                 new SamsaraRouteStopRequest(secondStop, 2, "Customer", null, "Customer", 51, -0.2, 250, arrival.AddHours(1), arrival.AddMinutes(30), null)
             ]),
             CancellationToken.None);
