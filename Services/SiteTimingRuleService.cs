@@ -86,6 +86,48 @@ public static class SiteTimingRuleMatcher
     }
 }
 
+public static class DispatchRouteTiming
+{
+    public static DateTimeOffset? PlannedCollectionTimeUtc(
+        Load load,
+        LoadStop collectionStop,
+        IReadOnlyList<SiteTimingRule> rules,
+        IReadOnlyList<Site> sites)
+    {
+        if (!collectionStop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var finalDelivery = load.Stops.OrderBy(stop => stop.Sequence)
+            .LastOrDefault(stop => !stop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase));
+        var rule = finalDelivery is null
+            ? null
+            : SiteTimingRuleMatcher.MatchForLoad(load, finalDelivery, rules, sites);
+        return rule is null
+            ? collectionStop.PlannedArrivalUtc
+            : SiteTimingRuleMatcher.CollectionWindow(rule, load.PlanningDate).Start ?? collectionStop.PlannedArrivalUtc;
+    }
+
+    public static DateTimeOffset? FinalDeliveryCutoffTimeUtc(
+        Load load,
+        LoadStop deliveryStop,
+        IReadOnlyList<SiteTimingRule> rules,
+        IReadOnlyList<Site> sites)
+    {
+        if (deliveryStop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var finalDelivery = load.Stops.OrderBy(stop => stop.Sequence)
+            .LastOrDefault(stop => !stop.Name.StartsWith("Collect", StringComparison.OrdinalIgnoreCase));
+        if (finalDelivery?.Id != deliveryStop.Id)
+            return null;
+
+        var rule = SiteTimingRuleMatcher.MatchForLoad(load, deliveryStop, rules, sites);
+        return rule is null
+            ? null
+            : SiteTimingRuleMatcher.DeliveryWindow(rule, load.PlanningDate).End;
+    }
+}
+
 public sealed class SiteTimingRuleStore(TmsDbContext db, ILogger<SiteTimingRuleStore> logger)
 {
     public async Task<IReadOnlyList<SiteTimingRule>> ReadAsync(CancellationToken ct)
