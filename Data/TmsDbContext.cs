@@ -222,12 +222,6 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<StagedImport>()
             .HasIndex(x => new { x.EntityType, x.Status, x.ReceivedAtUtc })
             .HasDatabaseName("IX_StagedImports_Entity_Status_ReceivedAtUtc");
-        // Indexed order collection date (migration 088) so date-scoped pallet reads are an
-        // index seek rather than a PayloadJson LIKE scan. Populated on write in
-        // StagingService.PromoteOrder and backfilled for recent rows by the migration.
-        b.Entity<StagedImport>()
-            .HasIndex(x => new { x.EntityType, x.CollectionDate })
-            .HasDatabaseName("IX_StagedImports_EntityType_CollectionDate");
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
         b.Entity<StagedImportEvent>().HasIndex(x => new { x.StagedImportId, x.OccurredAtUtc });
         b.Entity<StagedImportEvent>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);

@@ -102,8 +102,7 @@ public sealed class SchemaResourceTests
             "084_Canonical_Summer_Berry_Customer.sql",
             "085_Fleetio_Trailer_Status.sql",
             "086_Driver_Availability_Windows.sql",
-            "087_TachoMaster_Shared_Snapshot.sql",
-            "088_StagedImports_Collection_Date.sql"
+            "087_TachoMaster_Shared_Snapshot.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }
