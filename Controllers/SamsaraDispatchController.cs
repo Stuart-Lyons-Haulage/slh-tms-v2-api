@@ -339,7 +339,7 @@ public sealed class SamsaraDispatchController(
                     new SamsaraAddressRequest(
                         candidate.Site.Id,
                         candidate.Site.ExternalCode,
-                        candidate.Site.DriverTextName ?? candidate.Site.Name,
+                        candidate.Site.Name,
                         candidate.Site.CollectionAddress!,
                         null,
                         null,
