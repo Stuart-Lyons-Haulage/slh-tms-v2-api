@@ -208,7 +208,7 @@ public sealed class SamsaraClientTests
         using var document = JsonDocument.Parse(patchedBody!);
         var stops = document.RootElement.GetProperty("stops");
         Assert.Equal("stop-1", stops[0].GetProperty("id").GetString());
-        Assert.Equal("2026-10-20T08:30:00.0000000Z", stops[0].GetProperty("scheduledArrivalTime").GetString());
+        Assert.Equal(JsonValueKind.Null, stops[0].GetProperty("scheduledArrivalTime").ValueKind);
         Assert.Equal(JsonValueKind.Null, stops[0].GetProperty("scheduledDepartureTime").ValueKind);
         Assert.Equal("2026-10-20T09:30:00.0000000Z", stops[1].GetProperty("scheduledArrivalTime").GetString());
         Assert.Equal("2026-10-20T09:30:00.0000000Z", stops[1].GetProperty("scheduledDepartureTime").GetString());
