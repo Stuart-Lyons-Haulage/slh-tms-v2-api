@@ -686,14 +686,14 @@ public sealed class SamsaraDispatchController(
             var isLast = index == orderedStops.Count - 1;
             var arrival = isFirst ? null : stop.PlannedArrivalUtc;
             var departure = isFirst || isLast ? stop.PlannedArrivalUtc : null;
-            var addressName = resolved.Site?.DriverTextName ?? resolved.Site?.Name ?? CleanStopName(stop.Name);
+            var addressName = resolved.Site?.Name ?? CleanStopName(stop.Name);
 
             csv.AppendLine(string.Join(",", new[]
             {
                 Csv($"SLH {load.Reference}"),
                 Csv(samsaraDriverUsername),
                 Csv(vehicle.Registration),
-                Csv(CleanStopName(stop.Name)),
+                Csv(resolved.Site?.Name ?? CleanStopName(stop.Name)),
                 Csv(FormatCsvTime(arrival)),
                 Csv(FormatCsvTime(departure)),
                 Csv(stopNotes),
@@ -916,7 +916,7 @@ public sealed class SamsaraDispatchController(
                             new SamsaraAddressRequest(
                                 site.Id,
                                 site.ExternalCode,
-                                site.DriverTextName ?? site.Name,
+                                site.Name,
                                 site.CollectionAddress!,
                                 null,
                                 null,
@@ -976,7 +976,7 @@ public sealed class SamsaraDispatchController(
                 var representativeSite = representative.SiteId is Guid representativeSiteId
                     ? sites.SingleOrDefault(item => item.Id == representativeSiteId)
                     : null;
-                var physicalStopName = representativeSite?.DriverTextName ?? representativeSite?.Name ?? CleanStopName(stop.Name);
+                var physicalStopName = representativeSite?.Name ?? CleanStopName(stop.Name);
                 var index = physicalStop.Index;
                 var isFirst = index == 0;
                 var isLast = index == physicalStops.Count - 1;
