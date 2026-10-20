@@ -5,6 +5,16 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class SamsaraLocationRulesTests
 {
+    [Theory]
+    [InlineData(50.8, -0.1, true)]
+    [InlineData(0.0, 0.0, false)]
+    [InlineData(91.0, 0.0, false)]
+    [InlineData(50.8, 181.0, false)]
+    public void Coordinate_validation_rejects_zero_placeholder_and_out_of_range_points(double latitude, double longitude, bool expected)
+    {
+        Assert.Equal(expected, SamsaraLocationRules.HasUsableCoordinates(latitude, longitude));
+    }
+
     [Fact]
     public void Numeric_transport_reference_uses_matched_site_physical_address()
     {
