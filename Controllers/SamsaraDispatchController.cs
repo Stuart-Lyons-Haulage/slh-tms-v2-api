@@ -285,9 +285,9 @@ public sealed class SamsaraDispatchController(
         var activeSites = sites.Count;
         var sitesWithReference = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode));
         var sitesWithAddress = sites.Count(site => SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress));
-        var sitesWithCoordinates = sites.Count(site => site.Latitude is not null && site.Longitude is not null);
+        var sitesWithCoordinates = sites.Count(site => SamsaraLocationRules.HasUsableCoordinates(site.Latitude, site.Longitude));
         var missingCoordinates = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
-                                                     (site.Latitude is null || site.Longitude is null));
+                                                     !SamsaraLocationRules.HasUsableCoordinates(site.Latitude, site.Longitude));
         var missingAddress = sites.Count(site => !string.IsNullOrWhiteSpace(site.ExternalCode) &&
                                                  !SamsaraLocationRules.IsUsablePhysicalAddress(site.CollectionAddress));
         var referenceOnlyAddress = sites.Count(site => SamsaraLocationRules.IsLongNumericReference(site.CollectionAddress?.Trim()));
@@ -1021,7 +1021,7 @@ public sealed class SamsaraDispatchController(
                     samsaraAddressId = stopAddressId;
 
                 if (string.IsNullOrWhiteSpace(samsaraAddressId) &&
-                    (representative.Latitude is null || representative.Longitude is null))
+                    !SamsaraLocationRules.HasUsableCoordinates(representative.Latitude, representative.Longitude))
                 {
                     missingSamsaraLocations.Add(physicalStopName);
                     continue;
@@ -1075,7 +1075,7 @@ public sealed class SamsaraDispatchController(
             if (missingSamsaraLocations.Count > 0)
                 return BadRequest(new
                 {
-                    message = $"Samsara could not obtain a reusable address or coordinates for: {string.Join(", ", missingSamsaraLocations.Distinct(StringComparer.OrdinalIgnoreCase))}. Run Master Data / Address synchronisation, then retry.",
+                    message = $"Samsara needs a reusable address or valid coordinates for: {string.Join(", ", missingSamsaraLocations.Distinct(StringComparer.OrdinalIgnoreCase))}. Check Site Master latitude/longitude; 0,0 and out-of-range values are invalid. Then run Master Data / Address synchronisation and retry.",
                     missingStops = missingSamsaraLocations
                 });
 
@@ -1708,21 +1708,19 @@ public sealed class SamsaraDispatchController(
             matchedSite?.CollectionAddress,
             CleanStopName(stop.Name));
 
-        if (stop.Latitude is not null && stop.Longitude is not null)
-            return new ResolvedStopLocation(
-                physicalAddress,
-                (double)stop.Latitude.Value,
-                (double)stop.Longitude.Value,
-                matchedSite);
+        var stopLatitude = stop.Latitude is decimal stopLat ? (double)stopLat : (double?)null;
+        var stopLongitude = stop.Longitude is decimal stopLng ? (double)stopLng : (double?)null;
+        if (SamsaraLocationRules.HasUsableCoordinates(stopLatitude, stopLongitude))
+            return new ResolvedStopLocation(physicalAddress, stopLatitude, stopLongitude, matchedSite);
 
         if (matchedSite is null)
             return new ResolvedStopLocation(physicalAddress, null, null, null);
 
-        return new ResolvedStopLocation(
-            physicalAddress,
-            matchedSite.Latitude is null ? null : (double)matchedSite.Latitude.Value,
-            matchedSite.Longitude is null ? null : (double)matchedSite.Longitude.Value,
-            matchedSite);
+        var siteLatitude = matchedSite.Latitude is decimal siteLat ? (double)siteLat : (double?)null;
+        var siteLongitude = matchedSite.Longitude is decimal siteLng ? (double)siteLng : (double?)null;
+        return SamsaraLocationRules.HasUsableCoordinates(siteLatitude, siteLongitude)
+            ? new ResolvedStopLocation(physicalAddress, siteLatitude, siteLongitude, matchedSite)
+            : new ResolvedStopLocation(physicalAddress, null, null, matchedSite);
     }
 
     private Guid? ResolveTmsStopId(SamsaraRouteStopSnapshot stop)
