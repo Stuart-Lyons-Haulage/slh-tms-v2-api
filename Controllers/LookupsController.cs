@@ -5,8 +5,6 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using System.Text.Json;
-using System.Text.RegularExpressions;
-
 namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1")]
 [Authorize]
@@ -16,11 +14,23 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
     [HttpGet("customer-contacts")] public async Task<IActionResult> CustomerContacts([FromQuery] string? q, CancellationToken ct) => Ok(await db.CustomerContacts.AsNoTracking().Where(x => x.Active && (q == null || x.CustomerCode.Contains(q) || x.Name.Contains(q) || (x.Email != null && x.Email.Contains(q)))).OrderBy(x => x.CustomerCode).ThenBy(x => x.Name).Take(5000).ToListAsync(ct));
     [HttpGet("vehicles")] public async Task<IActionResult> Vehicles([FromQuery] string? q, CancellationToken ct)
     {
-        var rows = await db.Vehicles.AsNoTracking().Where(x => x.Active && (q == null || x.Registration.Contains(q) || (x.FleetNumber != null && x.FleetNumber.Contains(q)))).OrderBy(x => x.Registration).Take(5000).ToListAsync(ct);
-        return Ok(rows.Where(vehicle => !Regex.IsMatch(vehicle.Registration, "^C\\d{5,}$", RegexOptions.IgnoreCase)));
+        // Filter out placeholder registrations (e.g. C12345) in SQL rather than fetching all rows
+        // and filtering in memory. TODO: add pagination to all lookup endpoints.
+        var rows = await db.Vehicles.AsNoTracking()
+            .Where(x => x.Active && (q == null || x.Registration.Contains(q) || (x.FleetNumber != null && x.FleetNumber.Contains(q))))
+            .Where(x => x.Registration == null
+                || x.Registration.Length < 6
+                || !EF.Functions.Like(x.Registration, "C[0-9][0-9][0-9][0-9][0-9]%"))
+            .OrderBy(x => x.Registration)
+            .Take(5000)
+            .ToListAsync(ct);
+        return Ok(rows);
     }
     [HttpGet("drivers")] public async Task<IActionResult> Drivers([FromQuery] string? q, CancellationToken ct)
     {
+        // TODO: add pagination to all lookup endpoints.
+        // Driver enrichment and dedup must remain in memory because enrichment pulls
+        // from a secondary detail store and the dedup key depends on enriched fields.
         var rows = await db.Drivers.AsNoTracking().Where(x => x.Active && (q == null || x.EmployeeNumber.Contains(q) || x.DisplayName.Contains(q))).OrderBy(x => x.DisplayName).Take(5000).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
         return Ok(rows.Where(DriverPopulationRules.IsDriver)

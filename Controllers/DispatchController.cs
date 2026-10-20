@@ -1,8 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Contracts;
-using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -10,22 +8,8 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/dispatch")]
 [Authorize]
-public sealed class DispatchController : ControllerBase
+public sealed class DispatchController(DispatchService dispatch) : ControllerBase
 {
-    private readonly DispatchService dispatch;
-
-    public DispatchController(
-        TmsDbContext db,
-        TachoMasterClient tachoMaster,
-        SageHrClient sageHr,
-        IMemoryCache cache,
-        IConfiguration configuration,
-        ILogger<DispatchService> logger)
-    {
-        var options = new DispatchOptions();
-        configuration.GetSection("Dispatch").Bind(options);
-        dispatch = new DispatchService(db, tachoMaster, sageHr, options, logger, cache);
-    }
 
     [HttpGet("drivers")]
     public async Task<ActionResult<IReadOnlyList<DispatchDriverDto>>> Drivers([FromQuery] DateOnly date, CancellationToken ct) =>

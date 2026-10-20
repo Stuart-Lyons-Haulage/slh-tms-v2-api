@@ -1,27 +1,31 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database (Cloud alternative: use Railway/Fly.io managed DB)
-  postgres:
-    image: postgres:16-alpine
+  # SQL Server Database — the application uses EF Core with UseSqlServer, not PostgreSQL.
+  # Uses the official Microsoft SQL Server 2022 image for Linux.
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: slh-tms-db
     environment:
-      POSTGRES_USER: slh_user
-      POSTGRES_PASSWORD: ChangeMe123!SecurePassword
-      POSTGRES_DB: slh_tms_v2
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "ChangeMe123!SecurePassword"
+      MSSQL_PID: "Developer"
     ports:
-      - "5432:5432"
+      - "1433:1433"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./Database:/docker-entrypoint-initdb.d
+      - sqlserver_data:/var/opt/mssql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U slh_user"]
+      test: ["CMD-SHELL", "/opt/mssql-tools*/bin/sqlcmd -S localhost -U SA -P 'ChangeMe123!SecurePassword' -Q 'SELECT 1' -b || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     networks:
       - slh-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
 
   # C# API
   api:
@@ -31,7 +35,7 @@ services:
     container_name: slh-tms-api
     environment:
       ASPNETCORE_ENVIRONMENT: Development
-      ConnectionStrings__TmsDb: "Server=postgres;Port=5432;Database=slh_tms_v2;User Id=slh_user;Password=ChangeMe123!SecurePassword;Ssl Mode=Disable;"
+      ConnectionStrings__TmsDb: "Server=sqlserver,1433;Database=slh_tms_v2;User Id=SA;Password=ChangeMe123!SecurePassword;TrustServerCertificate=True;"
       Entra__TenantId: "your-tenant-id-here"
       Entra__Audience: "api://slh-tms-v2"
       Entra__AllowedDomains__0: "lyonshaulage.com"
@@ -40,10 +44,15 @@ services:
     ports:
       - "5000:5000"
     depends_on:
-      postgres:
+      sqlserver:
         condition: service_healthy
     networks:
       - slh-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/v1/health"]
       interval: 30s
@@ -64,6 +73,11 @@ services:
       - api
     networks:
       - slh-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
       interval: 30s
@@ -71,7 +85,7 @@ services:
       retries: 3
 
 volumes:
-  postgres_data:
+  sqlserver_data:
     driver: local
 
 networks:
