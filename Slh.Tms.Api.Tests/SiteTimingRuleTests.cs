@@ -1,8 +1,61 @@
+using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
+
+/// <summary>
+/// SiteTimingRuleStore.ReadAsync used to load every Promoted StagedImport row (orders, email
+/// evidence, driver/tacho/sage syncs - everything) and filter to site-timing rows in memory.
+/// That full-table load got slow enough, once StagedImports had grown, to fail outright - and
+/// the failure was swallowed and reported as "no rules", which silently guessed every route's
+/// collection/delivery time instead of using Site Master. This pins the fix: the EntityType
+/// filter runs in SQL, and unrelated rows (of any status/type) never affect the result.
+/// </summary>
+public sealed class SiteTimingRuleStoreTests : IClassFixture<CustomWebFactory>
+{
+    private readonly CustomWebFactory factory;
+    public SiteTimingRuleStoreTests(CustomWebFactory factory) => this.factory = factory;
+
+    [Fact]
+    public async Task ReadAsync_returns_only_promoted_site_timing_rows_among_unrelated_staged_imports()
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var routeCombination = $"TEST-ROUTE-{Guid.NewGuid():N}";
+
+        db.StagedImports.AddRange(
+            new StagedImport
+            {
+                EntityType = "masterdetail:sitetimingrule",
+                IdempotencyKey = $"rule-{Guid.NewGuid():N}",
+                Status = StagingStatus.Promoted,
+                PayloadJson = JsonSerializer.Serialize(new { routeCombination, palletType = "Std", lastDespatch = "07:00", collectFrom = "06:00", collectTo = "07:00", depotDeadline = "18:00" })
+            },
+            // A rule row that is not yet Promoted must not be returned.
+            new StagedImport
+            {
+                EntityType = "masterdetail:sitetimingrule",
+                IdempotencyKey = $"rule-pending-{Guid.NewGuid():N}",
+                Status = StagingStatus.PendingReview,
+                PayloadJson = JsonSerializer.Serialize(new { routeCombination = $"PENDING-{Guid.NewGuid():N}" })
+            },
+            // Unrelated Promoted rows of other entity types must not be matched or scanned.
+            new StagedImport { EntityType = "order", IdempotencyKey = $"order-{Guid.NewGuid():N}", Status = StagingStatus.Promoted, PayloadJson = "{}" },
+            new StagedImport { EntityType = "email-evidence", IdempotencyKey = $"evidence-{Guid.NewGuid():N}", Status = StagingStatus.Promoted, PayloadJson = "{}" });
+        await db.SaveChangesAsync();
+
+        var store = new SiteTimingRuleStore(db, NullLogger<SiteTimingRuleStore>.Instance);
+        var rules = await store.ReadAsync(CancellationToken.None);
+
+        Assert.Contains(rules, rule => rule.RouteCombination == routeCombination);
+        Assert.DoesNotContain(rules, rule => rule.RouteCombination.StartsWith("PENDING-", StringComparison.Ordinal));
+    }
+}
 
 public sealed class SiteTimingRuleTests
 {

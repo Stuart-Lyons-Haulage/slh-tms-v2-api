@@ -134,11 +134,16 @@ public sealed class SiteTimingRuleStore(TmsDbContext db, ILogger<SiteTimingRuleS
     {
         try
         {
+            // Filter by EntityType in SQL rather than loading every Promoted StagedImport row
+            // (orders, email evidence, driver/tacho/sage syncs - everything) and filtering to
+            // the handful of site-timing rows in memory. That full-table load is slow enough,
+            // now that StagedImports has grown, to fail outright - and a failure here is
+            // swallowed below and reported as "no rules", which silently guesses every route's
+            // collection/delivery time instead of surfacing a fetch problem.
             var rows = await db.StagedImports.AsNoTracking()
-                .Where(row => row.Status == StagingStatus.Promoted)
+                .Where(row => row.Status == StagingStatus.Promoted && row.EntityType == "masterdetail:sitetimingrule")
                 .ToListAsync(ct);
-            return rows.Where(row => row.EntityType.Equals("masterdetail:sitetimingrule", StringComparison.OrdinalIgnoreCase))
-                .Select(Parse)
+            return rows.Select(Parse)
                 .Where(rule => rule is not null)
                 .Cast<SiteTimingRule>()
                 .ToList();
