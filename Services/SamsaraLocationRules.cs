@@ -6,6 +6,16 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public static class SamsaraLocationRules
 {
+    public static bool HasUsableCoordinates(double? latitude, double? longitude) =>
+        latitude is >= -90 and <= 90 &&
+        longitude is >= -180 and <= 180 &&
+        !(latitude.Value == 0 && longitude.Value == 0);
+
+    public static bool HasUsableCoordinates(decimal? latitude, decimal? longitude) =>
+        latitude is >= -90 and <= 90 &&
+        longitude is >= -180 and <= 180 &&
+        !(latitude.Value == 0 && longitude.Value == 0);
+
     public static bool IsLongNumericReference(string? value) =>
         value is { Length: >= 10 } && value.All(char.IsDigit);
 
