@@ -72,8 +72,13 @@ public static class OrderSiteMasterAlignment
         // The market is the physical delivery location and therefore owns the geofence.
         // Resolve it independently of the trader/stall lookup so a missing or ambiguous
         // Market Master contact can never turn a market delivery into a fake site.
-        var marketSite = Match(sites, effectiveMarketName)
-            ?? (marketContext is null ? null : Match(sites, marketContext.Market));
+        // A retailer label such as "Waitrose" is not a physical market site.
+        // Let the actual depot in the order win; otherwise a generic retailer
+        // match can route Leyland, Bracknell and Aylesford all to one depot.
+        var marketSite = IsPhysicalMarket(effectiveMarketName)
+            ? Match(sites, effectiveMarketName)
+                ?? (marketContext is null ? null : Match(sites, marketContext.Market))
+            : null;
         var delivery = marketSite ?? Match(sites, rawDelivery);
 
         var collectionName = DisplayName(collection) ?? rawCollection;
@@ -199,6 +204,16 @@ public static class OrderSiteMasterAlignment
         if (unique.Count != 1) return null;
         var match = unique[0];
         return new MarketContext(match.Market.Trim(), match.Name.Trim(), Clean(match.StandOrLocation), Clean(match.Salesman));
+    }
+
+    private static bool IsPhysicalMarket(string? value)
+    {
+        var key = Normalise(value);
+        return key.Contains("COVENT", StringComparison.Ordinal) ||
+               key.Contains("SPITALFIELDS", StringComparison.Ordinal) ||
+               key == "SPIT" ||
+               key.Contains("WESTERN", StringComparison.Ordinal) ||
+               key.Contains("SENDER", StringComparison.Ordinal);
     }
 
     private static string? InferMarketName(string? marketName, string? destination, string? instructions)
