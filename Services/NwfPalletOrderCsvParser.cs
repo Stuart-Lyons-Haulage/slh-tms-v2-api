@@ -234,7 +234,9 @@ public sealed class NwfPalletOrderCsvParser
         if (LooksLikePalletOrderRows(htmlRows)) return ToCsv(htmlRows);
         var body = !string.IsNullOrWhiteSpace(request.BodyHtml) ? request.BodyHtml : request.BodyText;
         var pipeRows = ExtractPipeRows(body);
-        return LooksLikePalletOrderRows(pipeRows) ? ToCsv(pipeRows) : null;
+        if (LooksLikePalletOrderRows(pipeRows)) return ToCsv(pipeRows);
+        var proseRows = ExtractProseListRows(body);
+        return proseRows.Count > 0 ? ToCsv(proseRows) : null;
     }
 
     private static List<List<string>> ExtractHtmlTableRows(string? html)
@@ -247,6 +249,31 @@ public sealed class NwfPalletOrderCsvParser
                 .Select(match => CleanHtmlCell(match.Groups["cell"].Value))
                 .ToList();
             if (cells.Any(value => !string.IsNullOrWhiteSpace(value))) rows.Add(cells);
+        }
+        return rows;
+    }
+
+    private static List<List<string>> ExtractProseListRows(string? body)
+    {
+        var rows = new List<List<string>>();
+        if (string.IsNullOrWhiteSpace(body)) return rows;
+
+        var prosePattern = new Regex(
+            @"(?m)^[-•*]?\s*(?<ref>\S+)\s*[:—-]\s*(?<from>.+?)\s+(?:→|to)\s+(?<to>.+?)\s*,?\s*(?<qty>\d+)\s*p(?:allets?|lts?)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        foreach (Match match in prosePattern.Matches(body))
+        {
+            var ref_ = match.Groups["ref"].Value.Trim();
+            var from = match.Groups["from"].Value.Trim();
+            var to = match.Groups["to"].Value.Trim();
+            var qty = match.Groups["qty"].Value.Trim();
+
+            if (!string.IsNullOrWhiteSpace(ref_) && !string.IsNullOrWhiteSpace(from) &&
+                !string.IsNullOrWhiteSpace(to) && !string.IsNullOrWhiteSpace(qty))
+            {
+                rows.Add(new List<string> { ref_, from, to, qty });
+            }
         }
         return rows;
     }
@@ -269,7 +296,8 @@ public sealed class NwfPalletOrderCsvParser
             // the row before header detection instead of silently losing it.
             var candidate = buffered.ToString();
             var cells = candidate.Split('|').Select(cell => cell.Replace("\\.", ".").Trim()).ToList();
-            if (cells.Count < RequiredHeaders.Length) continue;
+            if (cells.Count < 9) continue;
+            if (cells.Count < RequiredHeaders.Length && cells.Count < 11) continue;
             if (cells.Count == RequiredHeaders.Length && string.IsNullOrWhiteSpace(cells[^1])) continue;
 
             buffered.Clear();
