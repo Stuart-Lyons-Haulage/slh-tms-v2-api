@@ -71,7 +71,20 @@ public sealed class PlannerAutosaveController(TmsDbContext db, PlanningStopTimin
         else
         {
             db.LoadStops.RemoveRange(previousStops);
-            await db.SaveChangesAsync(ct);
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // Another request updated the Load concurrently (e.g. a pallet allocation
+                // writing capacity data). Reload the current RowVersion and retry once so
+                // the stop save is not lost.
+                foreach (var entry in db.ChangeTracker.Entries())
+                    await entry.ReloadAsync(ct);
+                load.Stops = nextStops;
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         return Ok(load);

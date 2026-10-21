@@ -290,6 +290,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<TransportOrder>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.SourceStagedImportId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<TransportOrder>().HasIndex(x => x.SourceMovementId);
         b.Entity<TransportOrder>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.SourceMovementId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<Load>().Property(x => x.RowVersion).IsRowVersion().IsConcurrencyToken();
         b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<Load>().HasIndex(x => x.PlanningDate);
         b.Entity<Load>().HasIndex(x => new { x.PlanningDate, x.Status })

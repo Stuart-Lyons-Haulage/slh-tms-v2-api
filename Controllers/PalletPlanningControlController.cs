@@ -307,9 +307,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         }
 
         await EnsureOrderOnRun(load, order, detail, ct);
-        var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
-
+        // Re-read allocations (a new one was just written) but reuse the
+        // already-loaded orders, details and source lines to avoid the
+        // duplicate DB round-trips that made saves take 60-90 seconds.
         var allLatest = await ReadLatestAllocations(request.Date, ct);
+        var capacity = await UpdateRunPalletTotal(load.Id, request.Date, loads, allLatest, orders, detailMap, sourceLineMap, ct);
         var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
         var ordered = sourceLines.Count > 0 ? sourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0)) : EffectiveOrderedPallets(order, detail);
         return Ok(new
@@ -486,14 +488,25 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     }
 
     private async Task<PalletCapacityResult?> UpdateRunPalletTotal(Guid loadId, DateOnly date, CancellationToken ct)
+        => await UpdateRunPalletTotal(loadId, date, null, null, null, null, null, ct);
+
+    private async Task<PalletCapacityResult?> UpdateRunPalletTotal(
+        Guid loadId,
+        DateOnly date,
+        List<Load>? preloadedLoads,
+        Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>? preloadedAllocations,
+        List<TransportOrder>? preloadedOrders,
+        Dictionary<string, OrderDetail>? preloadedDetails,
+        Dictionary<Guid, List<OrderSourceLine>>? preloadedSourceLines,
+        CancellationToken ct)
     {
-        var loads = await ReadLoads(date, ct);
+        var loads = preloadedLoads ?? await ReadLoads(date, ct);
         var target = loads.SingleOrDefault(x => x.Id == loadId);
         if (target is null) return null;
-        var latest = await ReadLatestAllocations(date, ct);
-        var orders = await ReadOrders(date, ct);
-        var details = await ReadOrderDetails(date, orders, ct);
-        var sourceLines = await ReadCurrentSourceLines(orders, ct);
+        var latest = preloadedAllocations ?? await ReadLatestAllocations(date, ct);
+        var orders = preloadedOrders ?? await ReadOrders(date, ct);
+        var details = preloadedDetails ?? await ReadOrderDetails(date, orders, ct);
+        var sourceLines = preloadedSourceLines ?? await ReadCurrentSourceLines(orders, ct);
         decimal standard = 0;
         decimal euro = 0;
         decimal unknown = 0;
@@ -580,6 +593,26 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                     capacity.StandardEquivalentUsed, capacity.StandardEquivalentCapacity, capacityLabel, load.DepotSplits, load.TemperatureC, load.PlannerNotes), User.Identity?.Name, ct);
                 return capacity;
             }
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Another request touched this Load concurrently. Reload and retry
+            // the capacity write so the utilisation figures stay current.
+            foreach (var entry in db.ChangeTracker.Entries())
+                await entry.ReloadAsync(ct);
+            try
+            {
+                var reloaded = await db.Loads.SingleOrDefaultAsync(x => x.Id == loadId, ct);
+                if (reloaded is not null)
+                {
+                    await LoadCommercialStore.EnrichAsync(db, new[] { reloaded }, ct);
+                    await LoadCommercialStore.SaveAsync(db, reloaded, new LoadCommercialValues(reloaded.RevenueAmount, reloaded.FuelSurchargeAmount, reloaded.EstimatedCostAmount,
+                        reloaded.ActualCostAmount, reloaded.EstimatedDistanceMiles, reloaded.EmptyMiles, reloaded.InvoiceStatus, reloaded.CommercialNotes,
+                        capacity.StandardEquivalentUsed, capacity.StandardEquivalentCapacity, capacityLabel, reloaded.DepotSplits, reloaded.TemperatureC, reloaded.PlannerNotes), User.Identity?.Name, ct);
+                    return capacity;
+                }
+            }
+            catch (Exception retryEx) when (SchemaUnavailable(retryEx)) { db.ChangeTracker.Clear(); }
         }
         catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         var registered = await PlanningRegisterStore.GetLoadAsync(db, loadId, ct);

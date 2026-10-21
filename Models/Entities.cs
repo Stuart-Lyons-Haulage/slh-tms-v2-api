@@ -512,6 +512,7 @@ public sealed class Load
         ? Math.Round(PalletSpacesUsed.Value / TotalPalletSpaces.Value * 100, 1)
         : null;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public byte[] RowVersion { get; set; } = [];
     public List<LoadStop> Stops { get; set; } = [];
 }
 
