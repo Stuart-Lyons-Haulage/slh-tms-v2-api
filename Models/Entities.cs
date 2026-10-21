@@ -454,6 +454,7 @@ public sealed class ReferenceChaseEvent
     public DateTimeOffset OccurredAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 public enum OrderStatus { Draft, ReadyToPlan, Planned, InTransit, Delivered, Cancelled }
+public enum ConfirmationStatus { AwaitingReview, Confirmed, Rejected }
 public sealed class TransportOrder
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -473,6 +474,9 @@ public sealed class TransportOrder
     [MaxLength(1000)] public string? MapLink { get; set; }
     public bool NeedsReplan { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.ReadyToPlan;
+    public ConfirmationStatus ConfirmationStatus { get; set; } = ConfirmationStatus.AwaitingReview;
+    public DateTimeOffset? ConfirmedAtUtc { get; set; }
+    [MaxLength(160)] public string? ConfirmedBy { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 public enum LoadStatus { Draft, Planned, Dispatched, InProgress, Completed, Cancelled }

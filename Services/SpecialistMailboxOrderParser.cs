@@ -109,8 +109,10 @@ public sealed class SpecialistMailboxOrderParser
         var marketLines = ParsePmTransportMarketLines(request, subject, body);
         if (marketLines is not null) return marketLines;
 
-        if (subject.Contains("Covent Garden", StringComparison.OrdinalIgnoreCase) &&
-            body.Contains("APS Produce", StringComparison.OrdinalIgnoreCase))
+        if ((subject.Contains("Covent Garden", StringComparison.OrdinalIgnoreCase) ||
+             subject.Contains("French Garden", StringComparison.OrdinalIgnoreCase)) &&
+            (body.Contains("APS Produce", StringComparison.OrdinalIgnoreCase) ||
+             body.Contains("Ham Farm", StringComparison.OrdinalIgnoreCase)))
         {
             return ParseCoventGarden(request, subject, body);
         }
