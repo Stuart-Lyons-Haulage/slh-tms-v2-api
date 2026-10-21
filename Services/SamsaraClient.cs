@@ -105,6 +105,22 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             var patchBody = await patchResponse.Content.ReadAsStringAsync(ct);
             if (patchResponse.StatusCode != HttpStatusCode.NotFound)
             {
+                if (IsDuplicateStopArrivalExternalIdFailure(patchResponse.StatusCode, patchBody))
+                {
+                    logger.LogWarning(
+                        "Samsara rejected stop external IDs for route {ExternalId} because computed arrival times collide; retrying with the stop IDs omitted and sequence based mapping.",
+                        external);
+                    using var retry = CreateRequest(
+                        HttpMethod.Patch,
+                        $"fleet/routes/{Uri.EscapeDataString(external)}",
+                        RoutePayload(route, existing, includeStopExternalIds: false));
+                    using var retryResponse = await httpClient.SendAsync(retry, ct);
+                    var retryBody = await retryResponse.Content.ReadAsStringAsync(ct);
+                    EnsureSuccess(retryResponse, retryBody, "route update without stop external IDs");
+                    var retried = ParseRoute(retryBody);
+                    return new SamsaraRouteUpsertResult(retried?.Id ?? existing.Id, external, false, true, retried ?? existing);
+                }
+
                 EnsureSuccess(patchResponse, patchBody, "route update");
                 var updated = ParseRoute(patchBody);
                 return new SamsaraRouteUpsertResult(updated?.Id ?? existing.Id, external, false, true, updated ?? existing);
@@ -116,6 +132,19 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         using var create = CreateRequest(HttpMethod.Post, "fleet/routes", RoutePayload(route, null));
         using var createResponse = await httpClient.SendAsync(create, ct);
         var createBody = await createResponse.Content.ReadAsStringAsync(ct);
+        if (IsDuplicateStopArrivalExternalIdFailure(createResponse.StatusCode, createBody))
+        {
+            logger.LogWarning(
+                "Samsara rejected stop external IDs for new route {ExternalId} because computed arrival times collide; retrying with the stop IDs omitted and sequence based mapping.",
+                external);
+            using var retry = CreateRequest(HttpMethod.Post, "fleet/routes", RoutePayload(route, null, includeStopExternalIds: false));
+            using var retryResponse = await httpClient.SendAsync(retry, ct);
+            var retryBody = await retryResponse.Content.ReadAsStringAsync(ct);
+            EnsureSuccess(retryResponse, retryBody, "route create without stop external IDs");
+            var retried = ParseRoute(retryBody);
+            return new SamsaraRouteUpsertResult(retried?.Id, external, true, false, retried);
+        }
+
         EnsureSuccess(createResponse, createBody, "route create");
         var created = ParseRoute(createBody);
         return new SamsaraRouteUpsertResult(created?.Id, external, true, false, created);
@@ -299,7 +328,7 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
         return request;
     }
 
-    private object RoutePayload(SamsaraRouteRequest route, SamsaraRouteSnapshot? existing)
+    private object RoutePayload(SamsaraRouteRequest route, SamsaraRouteSnapshot? existing, bool includeStopExternalIds = true)
     {
         var externalIds = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -311,18 +340,30 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
             var stopExternalValue = stop.StopId.ToString("N");
             var existingStop = existing?.Stops.FirstOrDefault(item =>
                 item.ExternalIds.TryGetValue(options.StopExternalIdKey, out var value) &&
-                string.Equals(value, stopExternalValue, StringComparison.OrdinalIgnoreCase));
+                string.Equals(value, stopExternalValue, StringComparison.OrdinalIgnoreCase))
+                ?? existing?.Stops.FirstOrDefault(item => item.SequenceNumber == stop.SequenceNumber);
 
             var payload = new Dictionary<string, object?>
             {
-                ["externalIds"] = new Dictionary<string, string>
-                {
-                    [options.StopExternalIdKey] = stopExternalValue
-                },
                 ["name"] = Clip(stop.Name, 200),
                 ["notes"] = string.IsNullOrWhiteSpace(stop.Notes) ? null : Clip(stop.Notes, 2000),
                 ["sequenceNumber"] = stop.SequenceNumber
             };
+
+            if (includeStopExternalIds)
+            {
+                payload["externalIds"] = new Dictionary<string, string>
+                {
+                    [options.StopExternalIdKey] = stopExternalValue
+                };
+            }
+            else if (existingStop is not null)
+            {
+                // Samsara's route endpoint uses JSON Merge Patch semantics. Explicitly
+                // clear a previously stored stop external ID when retrying a route that
+                // cannot accept stop IDs because calculated arrivals collide.
+                payload["externalIds"] = null;
+            }
 
             if (!string.IsNullOrWhiteSpace(existingStop?.Id))
                 payload["id"] = existingStop.Id;
@@ -350,10 +391,20 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
                 payload["singleUseLocation"] = singleUseLocation;
             }
 
-            if (stop.ScheduledArrivalTime is not null)
-                payload["scheduledArrivalTime"] = stop.ScheduledArrivalTime.Value.UtcDateTime.ToString("O");
-            if (stop.ScheduledDepartureTime is not null)
-                payload["scheduledDepartureTime"] = stop.ScheduledDepartureTime.Value.UtcDateTime.ToString("O");
+            var scheduledArrival = stop.ScheduledArrivalTime;
+            var scheduledDeparture = stop.ScheduledDepartureTime;
+            if (scheduledArrival is DateTimeOffset arrival && scheduledDeparture is DateTimeOffset departure && departure < arrival)
+                scheduledDeparture = arrival;
+
+            if (scheduledArrival is not null)
+                payload["scheduledArrivalTime"] = scheduledArrival.Value.UtcDateTime.ToString("O");
+            else if (existingStop is not null)
+                payload["scheduledArrivalTime"] = null;
+
+            if (scheduledDeparture is not null)
+                payload["scheduledDepartureTime"] = scheduledDeparture.Value.UtcDateTime.ToString("O");
+            else if (existingStop is not null)
+                payload["scheduledDepartureTime"] = null;
             return payload;
         }).ToList();
 
@@ -387,6 +438,11 @@ public sealed class SamsaraClient(HttpClient httpClient, SamsaraOptions options,
 
         return body;
     }
+
+    private static bool IsDuplicateStopArrivalExternalIdFailure(HttpStatusCode statusCode, string body) =>
+        statusCode == HttpStatusCode.BadRequest &&
+        body.Contains("cannot assign external IDs to stops", StringComparison.OrdinalIgnoreCase) &&
+        body.Contains("same scheduled arrival time", StringComparison.OrdinalIgnoreCase);
 
     private object AddressPayload(SamsaraAddressRequest address)
     {

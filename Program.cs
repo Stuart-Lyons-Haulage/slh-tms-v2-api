@@ -188,6 +188,7 @@ builder.Services.AddScoped<SiteAddressPropagationService>();
 builder.Services.AddScoped<MasterAssignmentComplianceService>();
 builder.Services.AddSingleton<CustomerCommunicationExtractionService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();
+builder.Services.AddScoped<OrderIntakeReconciliationService>();
 builder.Services.AddScoped<IntakeMappingService>();
 builder.Services.AddScoped<OrderCompletenessService>();
 builder.Services.AddScoped<WarehouseMovementService>();
@@ -334,6 +335,7 @@ builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>()
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();
 builder.Services.AddHostedService<SharePointOrderRetentionBackgroundService>();
+builder.Services.AddHostedService<OrderIntakeReconciliationWorker>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
 builder.Services.AddHostedService<SamsaraRouteProgressWorker>();
