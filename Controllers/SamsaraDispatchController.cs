@@ -800,9 +800,12 @@ public sealed class SamsaraDispatchController(
             // An unallocated route may be exported for route visibility and later
             // resource assignment. Tacho/legal-start validation applies only when
             // a driver is assigned.
-            var firstScheduled = state?.PlannedStartUtc
-                ?? orderedStops[0].PlannedArrivalUtc
-                ?? new DateTimeOffset(load.PlanningDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            // Never fabricate a midnight-UTC start (01:10 BST after walkaround).
+            // A route needs either the saved dispatch start or a timed first stop.
+            var plannedStart = state?.PlannedStartUtc ?? orderedStops[0].PlannedArrivalUtc;
+            if (plannedStart is null)
+                return BadRequest(new { message = "Samsara export requires a planned route start or timed first collection. Set the time in Dispatch before exporting; no midnight fallback will be used." });
+            var firstScheduled = plannedStart.Value;
             if (driver is not null)
             {
                 var available = (await dispatch.GetAvailableTimesAsync(
@@ -979,6 +982,16 @@ public sealed class SamsaraDispatchController(
                 var isFirst = index == 0;
                 var isLast = index == physicalStops.Count - 1;
                 var plannedArrival = physicalStop.Group.EarliestPlannedArrivalUtc;
+                // If the planner has not set a stop ETA, the delivery window start
+                // is the best available target. The window end remains a deadline,
+                // not a substitute arrival time.
+                if (plannedArrival is null && physicalStop.Group.Members.All(member => !member.IsCollection))
+                    plannedArrival = physicalStop.Group.Members
+                        .Where(member => member.OrderId is Guid id && orders.ContainsKey(id))
+                        .Select(member => orders[member.OrderId!.Value].DeliveryWindowStartUtc)
+                        .Where(time => time.HasValue)
+                        .OrderBy(time => time)
+                        .FirstOrDefault();
                 // SLH TMS owns the schedule (recomputeScheduledTimes=false). A stop with no planned
                 // arrival is given a derived strictly-increasing fallback below rather than dropped,
                 // so an incomplete plan can never silently remove a stop or block the whole export.
@@ -1038,6 +1051,12 @@ public sealed class SamsaraDispatchController(
             // that share a scheduled arrival time when stop external IDs are attached, and a stop may
             // never depart before it arrives. Normalise the outgoing payload so neither can happen,
             // regardless of plan completeness.
+            if (missingSchedule.Count > 0)
+                return BadRequest(new
+                {
+                    message = "Samsara export blocked because these stops lack planned times or delivery window starts. Add times in Dispatch before exporting; estimated ETAs cannot be based on fabricated times.",
+                    missingStops = missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+                });
             EnsureStrictlyIncreasingArrivals(samsaraStops);
             foreach (var builtStop in samsaraStops)
                 if (!string.IsNullOrWhiteSpace(builtStop.AddressId))
