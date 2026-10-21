@@ -65,7 +65,7 @@ public static class PalletDestinationPresentationStore
             var fallback = fallbackRegions.GetValueOrDefault(destination, "Other");
             var region = ResolveRegion(site, destination, fallback);
             var displayName = ResolveDisplayName(site, destination);
-            result[destination] = new PalletDestinationPresentation(region, displayName, site?.ExternalCode, site is not null);
+            result[destination] = new PalletDestinationPresentation(region, displayName, site is null ? null : site.Id.ToString(), site is not null);
         }
 
         return result;
@@ -140,11 +140,14 @@ public static class PalletDestinationPresentationStore
             .Any(candidate => candidate.Length > 0 && candidate == key));
         if (exact is not null) return exact;
 
-        return sites.FirstOrDefault(site => IdentityValues(site)
+        // Substring matching is a last resort only when it resolves uniquely.
+        // Multiple matches must remain ungrouped rather than merge different depots.
+        var candidates = sites.Where(site => IdentityValues(site)
             .Select(Normalise)
             .Where(candidate => candidate.Length >= 5)
             .Any(candidate => key.Contains(candidate, StringComparison.OrdinalIgnoreCase)
-                || candidate.Contains(key, StringComparison.OrdinalIgnoreCase)));
+                || candidate.Contains(key, StringComparison.OrdinalIgnoreCase))).Take(2).ToList();
+        return candidates.Count == 1 ? candidates[0] : null;
     }
 
     private static IEnumerable<string> IdentityValues(Site site)
