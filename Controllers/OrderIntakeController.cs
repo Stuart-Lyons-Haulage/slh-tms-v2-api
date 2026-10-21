@@ -362,8 +362,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     public async Task<IActionResult> SourceEmail(Guid stagingId, CancellationToken ct)
     {
         var staged = await db.StagedImports.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == stagingId && item.EntityType == "order", ct);
+            .SingleOrDefaultAsync(item => item.Id == stagingId && (item.EntityType == "order" || item.EntityType == "email-evidence"), ct);
         if (staged is null) return NotFound(new { error = "staged_order_not_found" });
+        if (staged.EntityType == "email-evidence")
+            return Content(staged.PayloadJson, "application/json");
 
         try
         {
@@ -724,6 +726,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         CancellationToken ct,
         bool reuseMasterDataForReplay = false)
     {
+        var sourceClassification = OrderSourceDirectionClassifier.Classify(request);
         // Keep operational status messages out of the order-creation lane while still
         // allowing Intake() to link them to the existing staged order as evidence.
         // The generic parser is used here only for its explicit operational-message
@@ -731,7 +734,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // Our own outbound planner snapshots are comparison evidence, not inbound orders.
         // This guard runs before the NWF-transfer exception so Lyons Collections and SB plans
         // cannot be promoted back into the TMS as fresh work.
-        if (IsInternalPlannerSnapshot(request))
+        if (sourceClassification.Direction == OrderSourceDirection.OutboundLyonsPlan)
             return new EmailIntakeParseResult(
                 [],
                 [],
@@ -742,6 +745,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 [],
                 [],
                 "NWF transport purchase order (what NWF will pay for haulage, for invoicing); not a collection order. Source evidence retained.");
+
+        if (sourceClassification.Direction == OrderSourceDirection.ForwardedInbound &&
+            !string.IsNullOrWhiteSpace(sourceClassification.EffectiveSender))
+            request = request with
+            {
+                SenderAddress = sourceClassification.EffectiveSender,
+                BodyText = OrderSourceDirectionClassifier.ExtractForwardedInstruction(request.BodyText ?? request.BodyHtml),
+                BodyHtml = null
+            };
 
         var nwfTransfer = IsNwfTransferSource(request);
         var operationalSignal = new EmailOrderIntakeService().Parse(request);
@@ -755,7 +767,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // not new customer orders. Keep the evidence via Intake(), but stop before
         // any approved-source or specialist parser can turn the quoted content into
         // a staging order.
-        if (IsInternalSender(request.SenderAddress) && !nwfTransfer)
+        if (sourceClassification.Direction == OrderSourceDirection.InternalOutbound && !nwfTransfer)
             return new EmailIntakeParseResult(
                 [],
                 [],
@@ -1032,36 +1044,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         Regex.IsMatch(request.Subject ?? string.Empty, @"\bOutbound\s+PO\b", RegexOptions.IgnoreCase);
 
     internal static bool IsInternalPlannerSnapshot(MailboxEmailIntakeRequest request)
-    {
-        if (!IsInternalSender(request.SenderAddress)) return false;
-
-        var subject = request.Subject?.Trim() ?? string.Empty;
-        if (subject.Contains("LYONS COLLECTIONS", StringComparison.OrdinalIgnoreCase)) return true;
-        if (subject.StartsWith("SB ", StringComparison.OrdinalIgnoreCase) ||
-            subject.StartsWith("SB-", StringComparison.OrdinalIgnoreCase) ||
-            subject.StartsWith("SB_", StringComparison.OrdinalIgnoreCase) ||
-            subject.StartsWith("SOUTHBOUND", StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        return (request.Attachments ?? [])
-            .Where(item => item.IsInline != true)
-            .Select(item => Path.GetFileName(item.Name ?? string.Empty))
-            .Any(name =>
-                (name.StartsWith("SB ", StringComparison.OrdinalIgnoreCase) ||
-                 name.StartsWith("SB-", StringComparison.OrdinalIgnoreCase) ||
-                 name.StartsWith("SB_", StringComparison.OrdinalIgnoreCase) ||
-                 name.StartsWith("SOUTHBOUND", StringComparison.OrdinalIgnoreCase)) &&
-                (name.Contains("BOOKING", StringComparison.OrdinalIgnoreCase) ||
-                 name.Contains("LOAD PLAN", StringComparison.OrdinalIgnoreCase)));
-    }
+        => OrderSourceDirectionClassifier.Classify(request).Direction == OrderSourceDirection.OutboundLyonsPlan;
 
     internal static bool IsInternalSender(string? senderAddress)
-    {
-        var sender = senderAddress?.Trim();
-        return !string.IsNullOrWhiteSpace(sender) &&
-               (sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase) ||
-                sender.EndsWith("@stuartlyonshaulage.co.uk", StringComparison.OrdinalIgnoreCase));
-    }
+        => OrderSourceDirectionClassifier.IsLyons(senderAddress);
 
     internal static bool IsApprovedAutomaticSource(MailboxEmailIntakeRequest request)
     {
@@ -1554,6 +1540,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         var bodyText = Clip(request.BodyText, SourceBodyTextLimit);
         var bodyHtml = Clip(request.BodyHtml, SourceBodyHtmlLimit);
+        var sourceClassification = OrderSourceDirectionClassifier.Classify(request);
         var payload = JsonSerializer.Serialize(new
         {
             messageId = request.MessageId,
@@ -1572,6 +1559,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             toRecipients = request.ToRecipients,
             ccRecipients = request.CcRecipients,
             correlationId = request.CorrelationId,
+            sourceDirection = sourceClassification.Direction.ToString(),
+            sourceClassification.IsOrderCandidate,
+            sourceClassification.EffectiveSender,
+            sourceClassification.Reason,
             attachments = (request.Attachments ?? []).Select(attachment => new
             {
                 attachment.Name,
