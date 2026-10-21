@@ -20,6 +20,12 @@ public sealed class DispatchService(
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
     private const string DriverDetailType = "masterdetail:driver";
 
+    public void ClearRosterCache(DateOnly planningDate)
+    {
+        var cacheKey = $"dispatch-driver-roster:{planningDate:yyyy-MM-dd}";
+        cache.Remove(cacheKey);
+    }
+
     public async Task<IReadOnlyList<DispatchDriverDto>> GetDriversAsync(DateOnly planningDate, CancellationToken ct)
     {
         var cacheKey = $"dispatch-driver-roster:{planningDate:yyyy-MM-dd}";
