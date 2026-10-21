@@ -8,7 +8,8 @@ public sealed record PalletDestinationPresentation(
     string Region,
     string DisplayName,
     string? SiteCode,
-    bool MasterMatched);
+    bool MasterMatched,
+    string? SiteIdentity = null);
 
 /// <summary>
 /// Resolves the planning-board presentation of delivery destinations from Site Master.
@@ -65,7 +66,7 @@ public static class PalletDestinationPresentationStore
             var fallback = fallbackRegions.GetValueOrDefault(destination, "Other");
             var region = ResolveRegion(site, destination, fallback);
             var displayName = ResolveDisplayName(site, destination);
-            result[destination] = new PalletDestinationPresentation(region, displayName, site is null ? null : site.Id.ToString(), site is not null);
+            result[destination] = new PalletDestinationPresentation(region, displayName, site?.ExternalCode, site is not null, site?.Id.ToString());
         }
 
         return result;
