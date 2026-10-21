@@ -532,6 +532,32 @@ BARBOG Nisa Retail Ltd Nisa Retail Ltd (Stoke) 30/09/2026 5168878/3565163 15 1
     }
 
     [Fact]
+    public void VitacressTransshipmentWithDepotTemperatureSuffix_StagesCorrectly()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-vitacress-chill", null, "info@lyonshaulage.com", "maciej@vitacress.com", "Maciej",
+            "RE: Leyland Chill", DateTimeOffset.Parse("2026-08-26T09:35:00Z"),
+            """
+            Morning
+
+            From: Maciej Rybitwa <Maciej.Rybitwa@vitacress.com>
+            To: Waitrose Primary Transport; info <info@lyonshaulage.com>
+            Subject: Leyland
+
+            Morning
+            We will drop 5 plts into Bracknell Chill tomorrow 27/08/26 around 08.00 for your onward delivery to Leyland.
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Bracknell", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leyland", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(5, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("08:00", order.Payload.GetProperty("requestedTime").GetString());
+    }
+
+    [Fact]
     public void PmTransportAdditionalMarketEmail_StagesShortMarketAmendmentForReview()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

@@ -1199,15 +1199,18 @@ public sealed class EmailOrderIntakeService
             !sourceText.Contains("Leyland", StringComparison.OrdinalIgnoreCase))
             return [];
 
+        // Depot names may carry a temperature suffix (e.g. "Bracknell Chill", "Brinklow Ambient").
+        // Capture the full label and normalise to the canonical depot name below.
+        const string depotPattern = @"(?:Bracknell|Aylesford|Brinklow|Leyland)(?:\s+(?:Chill(?:ed)?|Ambient|Frozen|FRV|Mix))?";
         var match = Regex.Match(
             sourceText,
-            @"drop\s+(?<qty>\d{1,3})\s*(?:plts?|pallets?)\s+into\s+(?<collection>Bracknell|Aylesford|Brinklow|Leyland)\s+(?<dateText>tomorrow\s+)?(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?(?:[^.\r\n]*?\baround\s+(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?))?[^.\r\n]*?onward\s+delivery\s+to\s+(?<destination>Leyland|Bracknell|Aylesford|Brinklow)",
+            $@"drop\s+(?<qty>\d{{1,3}})\s*(?:plts?|pallets?)\s+into\s+(?<collection>{depotPattern})\s+(?<dateText>tomorrow\s+)?(?<date>\d{{1,2}}[./-]\d{{1,2}}(?:[./-]\d{{2,4}})?)?(?:[^.\r\n]*?\baround\s+(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{{2}})?))?[^.\r\n]*?onward\s+delivery\s+to\s+(?<destination>{depotPattern})",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (!match.Success) return [];
 
         var pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture);
-        var collection = CleanSourceLine(match.Groups["collection"].Value);
-        var destination = CleanSourceLine(match.Groups["destination"].Value);
+        var collection = NormaliseDepotName(match.Groups["collection"].Value);
+        var destination = NormaliseDepotName(match.Groups["destination"].Value);
         var date = match.Groups["date"].Success
             ? ExtractDate(match.Groups["date"].Value, receivedAt)
             : match.Groups["dateText"].Success
@@ -2907,6 +2910,14 @@ public sealed class EmailOrderIntakeService
         var cleaned = Regex.Replace(value, @"\s+", " ").Trim();
         return cleaned.Length <= 200 ? cleaned : cleaned[..200];
     }
+
+    /// <summary>
+    /// Strips temperature/type suffixes (Chill, Chilled, Ambient, Frozen, FRV, Mix) from a
+    /// Waitrose depot label captured by regex, returning the canonical depot name only.
+    /// "Bracknell Chill" → "Bracknell", "Leyland" → "Leyland".
+    /// </summary>
+    private static string NormaliseDepotName(string raw) =>
+        Regex.Replace(raw.Trim(), @"\s+(?:Chill(?:ed)?|Ambient|Frozen|FRV|Mix)$", "", RegexOptions.IgnoreCase).Trim();
 
     private static byte[] DecodeBase64(string value)
     {
