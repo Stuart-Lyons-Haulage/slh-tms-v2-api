@@ -8,7 +8,7 @@ public static class SamsaraStopSiteMatcher
     {
         var cleanName = CleanStopName(stop.Name);
         var parts = stop.Name
-            .Split(['·', '•'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Split(new[] { '·', '•' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
         if (parts.Count > 0 && IsStopAction(parts[0]))
             parts.RemoveAt(0);
