@@ -34,7 +34,7 @@ public sealed class SiteTimingRuleStoreTests : IClassFixture<CustomWebFactory>
                 EntityType = "masterdetail:sitetimingrule",
                 IdempotencyKey = $"rule-{Guid.NewGuid():N}",
                 Status = StagingStatus.Promoted,
-                PayloadJson = JsonSerializer.Serialize(new { routeCombination, palletType = "Std", lastDespatch = "07:00", collectFrom = "06:00", collectTo = "07:00", depotDeadline = "18:00" })
+                PayloadJson = JsonSerializer.Serialize(new { routeCombination, collectionKey = "NWF", deliveryKey = "Gadbrook", collectionContext = "Selsey", palletType = "Std", lastDespatch = "07:00", collectFrom = "06:00", collectTo = "07:00", depotDeadline = "18:00" })
             },
             // A rule row that is not yet Promoted must not be returned.
             new StagedImport
@@ -52,7 +52,7 @@ public sealed class SiteTimingRuleStoreTests : IClassFixture<CustomWebFactory>
         var store = new SiteTimingRuleStore(db, NullLogger<SiteTimingRuleStore>.Instance);
         var rules = await store.ReadAsync(CancellationToken.None);
 
-        Assert.Contains(rules, rule => rule.RouteCombination == routeCombination);
+        Assert.Contains(rules, rule => rule.RouteCombination == routeCombination && rule.CollectionKey == "NWF" && rule.DeliveryKey == "Gadbrook" && rule.CollectionContext == "Selsey");
         Assert.DoesNotContain(rules, rule => rule.RouteCombination.StartsWith("PENDING-", StringComparison.Ordinal));
     }
 }
@@ -72,6 +72,24 @@ public sealed class SiteTimingRuleTests
         var matched = SiteTimingRuleMatcher.Match(rule, "NWF - Merston", "Morrisons-Wakefield", "Standard", sites);
 
         Assert.True(matched);
+    }
+
+    [Fact]
+    public void Match_uses_stored_keys_without_NWF_site_master_and_distinguishes_collection_depots()
+    {
+        var selsey = new SiteTimingRule("NWF-Sel-Morrisons-Gadbrook", "Std", "07:00", "05:00", "06:00", "18:00", "NWF", "Gadbrook", "Selsey");
+        var drayton = new SiteTimingRule("NWF-Dra-Morrisons-Gadbrook", "Std", "07:00", "06:00", "07:00", "18:00", "NWF", "Gadbrook", "Drayton");
+        Assert.True(SiteTimingRuleMatcher.Match(selsey, "NWFSELSEY", "Morrisons Gadbrook", "Std", []));
+        Assert.False(SiteTimingRuleMatcher.Match(drayton, "NWFSELSEY", "Morrisons Gadbrook", "Std", []));
+        Assert.True(SiteTimingRuleMatcher.Match(drayton, "NWFDRAYTON", "Morrisons Gadbrook", "Std", []));
+    }
+
+    [Fact]
+    public void Match_does_not_confuse_produce_and_standard_Gadbrook()
+    {
+        var produce = new SiteTimingRule("NWF-Sel-Morrisons-Gadbrook Produce", "Std", "07:00", "05:00", "06:00", "16:00", "NWF", "Gadbrook Produce", "Selsey");
+        Assert.False(SiteTimingRuleMatcher.Match(produce, "NWFSELSEY", "Morrisons Gadbrook", "Std", []));
+        Assert.True(SiteTimingRuleMatcher.Match(produce, "NWFSELSEY", "Morrisons Gadbrook Produce", "Std", []));
     }
 
     [Fact]
