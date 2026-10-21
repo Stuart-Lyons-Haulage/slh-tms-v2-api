@@ -11,7 +11,10 @@ public sealed record SiteTimingRule(
     string? LastDespatch,
     string? CollectFrom,
     string? CollectTo,
-    string? DepotDeadline);
+    string? DepotDeadline,
+    string? CollectionKey = null,
+    string? DeliveryKey = null,
+    string? CollectionContext = null);
 
 public sealed record SiteTimingWindow(DateTimeOffset? Start, DateTimeOffset? End);
 
@@ -31,7 +34,7 @@ public static class SiteTimingRuleMatcher
     {
         var route = Normalize(rule.RouteCombination);
         if (string.IsNullOrWhiteSpace(route)) return false;
-        if (!MatchesSite(route, collectionName, sites) || !MatchesSite(route, deliveryName, sites)) return false;
+        if (!MatchesCollection(rule, collectionName, sites) || !MatchesDelivery(rule, deliveryName, sites)) return false;
         return string.IsNullOrWhiteSpace(rule.PalletType) || string.IsNullOrWhiteSpace(palletType) ||
             Normalize(rule.PalletType) == Normalize(palletType) ||
             (Normalize(rule.PalletType) == "STD" && Normalize(palletType) is "STANDARD" or "STD");
@@ -59,6 +62,51 @@ public static class SiteTimingRuleMatcher
     {
         var separator = value.IndexOf('·');
         return separator >= 0 ? value[(separator + 1)..].Trim() : value.Trim();
+    }
+
+    // The timing seed stores explicit route-end keys. Match these before Site Master
+    // aliases: NWF collection sites may not yet have Site rows in production.
+    private static bool MatchesCollection(SiteTimingRule rule, string? name, IEnumerable<Site> sites)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        if (string.IsNullOrWhiteSpace(rule.CollectionKey))
+            return MatchesSite(Normalize(rule.RouteCombination), name, sites);
+
+        var key = Normalize(rule.CollectionKey);
+        var actual = Normalize(name);
+        if (actual == key && string.IsNullOrWhiteSpace(rule.CollectionContext)) return true;
+
+        // NWFSELSEY and NWFDRAYTON must not match each other's rules.
+        var context = Normalize(rule.CollectionContext);
+        var location = context switch
+        {
+            "SELSEY" => "SEL",
+            "DRAYTON" => "DRA",
+            "MERSTON" => "MER",
+            _ => context
+        };
+        var route = Normalize(rule.RouteCombination);
+        if (location.Length > 0 && !route.StartsWith(key + location, StringComparison.Ordinal)) return false;
+        if (actual.StartsWith(key, StringComparison.Ordinal) &&
+            (context.Length == 0 || actual.Contains(context, StringComparison.Ordinal) ||
+             (location.Length >= 3 && actual.Contains(location, StringComparison.Ordinal)))) return true;
+        return MatchesSite(route, name, sites) &&
+            (context.Length == 0 || route.StartsWith(key + location, StringComparison.Ordinal));
+    }
+
+    private static bool MatchesDelivery(SiteTimingRule rule, string? name, IEnumerable<Site> sites)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        if (string.IsNullOrWhiteSpace(rule.DeliveryKey))
+            return MatchesSite(Normalize(rule.RouteCombination), name, sites);
+        var route = Normalize(rule.RouteCombination);
+        var key = Normalize(rule.DeliveryKey);
+        var actual = Normalize(name);
+        // Exact destination suffix keeps Gadbrook and Gadbrook Produce distinct.
+        return key.Length >= 4 && route.EndsWith(key, StringComparison.Ordinal) &&
+            (actual == key || actual.EndsWith(key, StringComparison.Ordinal) ||
+             sites.Any(site => Normalize(site.Name) == actual &&
+                               (Normalize(site.ExternalCode) == key || Normalize(site.DriverTextName).EndsWith(key, StringComparison.Ordinal))));
     }
 
     private static bool MatchesSite(string route, string? name, IEnumerable<Site> sites)
@@ -165,7 +213,7 @@ public sealed class SiteTimingRuleStore(TmsDbContext db, ILogger<SiteTimingRuleS
                 ? null
                 : root.EnumerateObject().First(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Value.ToString();
             var route = Text("routeCombination");
-            return string.IsNullOrWhiteSpace(route) ? null : new SiteTimingRule(route, Text("palletType"), Text("lastDespatch"), Text("collectFrom"), Text("collectTo"), Text("depotDeadline"));
+            return string.IsNullOrWhiteSpace(route) ? null : new SiteTimingRule(route, Text("palletType"), Text("lastDespatch"), Text("collectFrom"), Text("collectTo"), Text("depotDeadline"), Text("collectionKey"), Text("deliveryKey"), Text("collectionContext"));
         }
         catch (JsonException) { return null; }
     }
