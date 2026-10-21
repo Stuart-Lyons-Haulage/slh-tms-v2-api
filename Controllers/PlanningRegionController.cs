@@ -90,6 +90,11 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
             destination => presentation.GetValueOrDefault(destination)?.SiteCode,
             StringComparer.OrdinalIgnoreCase);
 
+        var siteIdentities = destinations.ToDictionary(
+            destination => destination,
+            destination => presentation.GetValueOrDefault(destination)?.SiteIdentity,
+            StringComparer.OrdinalIgnoreCase);
+
         var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             ["North"] = 0,
@@ -114,6 +119,7 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
             destinationRegions = map,
             destinationLabels = labels,
             destinationSiteCodes = siteCodes,
+            destinationSiteIdentities = siteIdentities,
             unmatchedDestinations = presentation.Count(item => !item.Value.MasterMatched),
             temperatureConflicts = temperatureSync.Conflicts,
             temperatureUpdatedLoads = temperatureSync.UpdatedLoads,
