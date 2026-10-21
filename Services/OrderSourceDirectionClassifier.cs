@@ -30,7 +30,7 @@ public static partial class OrderSourceDirectionClassifier
     [GeneratedRegex(@"(?i)^(?:FW|FWD)\s*:")]
     private static partial Regex ForwardedSubjectRegex();
 
-    [GeneratedRegex(@"(?i)\b(order|booking|collect(?:ion)?|deliver(?:y)?|backhaul|return load|empty (?:tray|crate|pallet)|transfer|trans[ -]?ship|pallet|quantity|qty|cancel|amend|revis(?:e|ed|ion))\b")]
+    [GeneratedRegex(@"(?i)\b(order|booking|collect(?:ion)?|deliver(?:y)?|backhaul|return load|empty (?:tray|crate|pallet)|transfer|trans[ -]?ship|pallet|quantity|qty|cancel|amend|revis(?:e|ed|ion)|add|remove)\b")]
     private static partial Regex InstructionSignalRegex();
 
     public static OrderSourceClassification Classify(MailboxEmailIntakeRequest request)

@@ -209,7 +209,7 @@ public sealed class OrderIntakeReconciliationWorker(IServiceScopeFactory scopes,
         var next = new DateTime(local.Year, local.Month, local.Day, local.Hour - local.Hour % 2, 0, 0).AddHours(2);
         while (next.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) next = next.Date.AddDays(1).AddHours(6);
         if (next.Hour < 6) next = next.Date.AddHours(6);
-        if (next.Hour > 20) { next = next.Date.AddDays(1).AddHours(6); while (next.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) next = next.Date.AddDays(1); }
+        if (next.Hour > 20) { next = next.Date.AddDays(1).AddHours(6); while (next.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) next = next.AddDays(1); }
         return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(next, DateTimeKind.Unspecified), zone));
     }
 
