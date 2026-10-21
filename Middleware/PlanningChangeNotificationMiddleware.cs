@@ -113,6 +113,13 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
             || path.Equals("/api/v1/operations/exceptions", StringComparison.OrdinalIgnoreCase))
             return TimeSpan.FromSeconds(10);
 
+        // Pallet Order screen. The heavy endpoint rebuilds orders, allocations, source lines and
+        // capacity every call. A short cache eliminates duplicate work when several browser tabs
+        // hit the same date within seconds. Any planning mutation clears the cache (below), so a
+        // just-saved allocation is never stale.
+        if (path.Equals("/api/v1/planning-control/pallets", StringComparison.OrdinalIgnoreCase))
+            return TimeSpan.FromSeconds(5);
+
         return null;
     }
 
