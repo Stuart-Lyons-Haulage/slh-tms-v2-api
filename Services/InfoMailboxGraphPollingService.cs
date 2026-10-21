@@ -131,7 +131,8 @@ public sealed class InfoMailboxGraphPollingService(
     private static readonly string[] VerifiedOrderSourceDomains =
     [
         "barfoots.co.uk",
-        "nwfltd.co.uk"
+        "nwfltd.co.uk",
+        "fowlerwelch.co.uk"
     ];
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
