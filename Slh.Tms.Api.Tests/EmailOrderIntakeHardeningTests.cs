@@ -23,6 +23,38 @@ public sealed class EmailOrderIntakeHardeningTests
     }
 
     [Fact]
+    public void ForwardedCustomerInstruction_IsInboundAndUsesExternalSender()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "forward-1", null, "info@lyonshaulage.com", "planner@lyonshaulage.com", "Planner", "FW: Aldi collection",
+            DateTimeOffset.UtcNow,
+            "From: bookings@barfoots.co.uk\nSent: Tuesday, 20 October 2026\nSubject: Aldi collection\n\nPlease collect 18 pallets from Sefter for Aldi Atherstone.",
+            null, null, null);
+
+        var result = OrderSourceDirectionClassifier.Classify(request);
+
+        Assert.Equal(OrderSourceDirection.ForwardedInbound, result.Direction);
+        Assert.Equal("bookings@barfoots.co.uk", result.EffectiveSender);
+        Assert.True(result.IsOrderCandidate);
+        Assert.StartsWith("Please collect", OrderSourceDirectionClassifier.ExtractForwardedInstruction(request.BodyText));
+    }
+
+    [Fact]
+    public void CustomerReplyWithQuotedLyonsPlan_RemainsInbound()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "reply-1", null, "info@lyonshaulage.com", "bookings@barfoots.co.uk", "Bookings", "RE: Lyons Collections",
+            DateTimeOffset.UtcNow,
+            "Please add 4 pallets for Aldi Bolton.\n\nFrom: planner@lyonshaulage.com\nSent: yesterday\nSubject: Lyons Collections\n[quoted plan]",
+            null, null, null);
+
+        var result = OrderSourceDirectionClassifier.Classify(request);
+
+        Assert.Equal(OrderSourceDirection.Inbound, result.Direction);
+        Assert.True(result.IsOrderCandidate);
+    }
+
+    [Fact]
     public void LangmeadSubdomainSender_MatchesVerifiedRootDomain()
     {
         Assert.True(EmailOrderIntakeService.SenderAddressMatchesDomain(
