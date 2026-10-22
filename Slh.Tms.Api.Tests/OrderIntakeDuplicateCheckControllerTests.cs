@@ -102,6 +102,65 @@ public sealed class OrderIntakeDuplicateCheckControllerTests
         Assert.DoesNotContain("Amendment/update", json);
     }
 
+    [Theory]
+    [InlineData("BARFOOTS")]
+    [InlineData("COOP")]
+    [InlineData("SAINSBURYS")]
+    [InlineData("SUMMERBERRY")]
+    public async Task Any_customer_same_po_on_new_service_day_is_new_order(string customer)
+    {
+        await using var db = CreateDb();
+        db.TransportOrders.Add(new TransportOrder
+        {
+            Reference = "PO-REPEAT-001/STORE-A",
+            CustomerCode = customer,
+            CollectionDate = new DateOnly(2026, 10, 22),
+            DeliveryDate = new DateOnly(2026, 10, 22),
+            SellerName = "NWF Merston",
+            StallNumber = $"{customer} Store A",
+            Pallets = 10
+        });
+        await db.SaveChangesAsync();
+
+        var controller = Controller(db);
+        var result = await controller.Check(new OrderIntakeDuplicateCheckRequest(
+            customer, "POREPEAT001", null, "PO-REPEAT-001/STORE-A",
+            new DateOnly(2026, 10, 23), new DateOnly(2026, 10, 23),
+            "NWF Merston", $"{customer} Store A", 10), CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("New order", json);
+        Assert.DoesNotContain("Amendment/update", json);
+    }
+
+    [Fact]
+    public async Task Same_po_same_date_different_quantity_is_still_amendment()
+    {
+        await using var db = CreateDb();
+        db.TransportOrders.Add(new TransportOrder
+        {
+            Reference = "PO-SAME-DAY/STORE-B",
+            CustomerCode = "BARFOOTS",
+            CollectionDate = new DateOnly(2026, 10, 22),
+            DeliveryDate = new DateOnly(2026, 10, 22),
+            SellerName = "NWF Merston",
+            StallNumber = "Barfoots Store B",
+            Pallets = 10
+        });
+        await db.SaveChangesAsync();
+
+        var controller = Controller(db);
+        var result = await controller.Check(new OrderIntakeDuplicateCheckRequest(
+            "BARFOOTS", "POSAMEDAY", null, "PO-SAME-DAY/STORE-B",
+            new DateOnly(2026, 10, 22), new DateOnly(2026, 10, 22),
+            "NWF Merston", "Barfoots Store B", 15), CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value);
+        Assert.Contains("Amendment/update", json);
+    }
+
     [Fact]
     public async Task Different_order_with_weak_overlap_remains_new()
     {
