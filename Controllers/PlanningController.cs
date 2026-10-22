@@ -250,6 +250,30 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             catch (FormatException) { /* invalid Base64 — ignore the version check */ }
         }
 
+        // Planning gate: reject stops referencing unconfirmed orders.
+        var orderIds = request.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToArray();
+        if (orderIds.Length > 0)
+        {
+            try
+            {
+                var unconfirmed = await db.TransportOrders
+                    .AsNoTracking()
+                    .Where(order => orderIds.Contains(order.Id) && order.ConfirmationStatus != ConfirmationStatus.Confirmed)
+                    .Select(order => new { order.Id, order.Reference, order.ConfirmationStatus })
+                    .ToListAsync(ct);
+                if (unconfirmed.Count > 0)
+                    return BadRequest(new
+                    {
+                        message = $"{unconfirmed.Count} order{(unconfirmed.Count == 1 ? " has" : "s have")} not been confirmed. Confirm orders before adding them to a run.",
+                        unconfirmedOrders = unconfirmed.Select(order => new { order.Id, order.Reference, status = order.ConfirmationStatus.ToString() })
+                    });
+            }
+            catch (Exception exception) when (IsSchemaUnavailable(exception))
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+
         if (!register) db.LoadStops.RemoveRange(load.Stops);
         var nextStops = request.Select((stop, index) => new LoadStop
         {
