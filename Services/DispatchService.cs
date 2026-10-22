@@ -344,7 +344,10 @@ public sealed class DispatchService(
                 failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId, "Run is not available on the requested planning date."));
                 continue;
             }
-            if (!availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability) || !sharedAvailability.Dispatchable)
+            if (!availabilityByDriver.TryGetValue(driver.Id, out var sharedAvailability) ||
+                (!sharedAvailability.Dispatchable &&
+                 !(run.Load.DriverId == driver.Id && sharedAvailability.BlockReasons.Count > 0 &&
+                   sharedAvailability.BlockReasons.All(reason => reason.StartsWith("Already allocated", StringComparison.Ordinal)))))
             {
                 var reason = sharedAvailability is null ? "No shared Driver Availability decision is available." : string.Join(" · ", sharedAvailability.BlockReasons);
                 failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId, $"{driver.DisplayName} is not dispatchable: {reason}"));
