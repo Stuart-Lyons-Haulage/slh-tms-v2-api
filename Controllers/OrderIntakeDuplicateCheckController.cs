@@ -50,8 +50,18 @@ public sealed class OrderIntakeDuplicateCheckController(
                 return Ok(new { classification = "New order", reference, changes = Array.Empty<object>(), current = (object?)null, incoming });
 
             var existing = OrderSnapshot.FromLive(current);
+
+            // Use the shared Classify logic so date-aware rules apply.
+            // When the PO matches but the service date differs this is a
+            // new movement, not an amendment to the prior day's order.
+            var structuralClassification = Classify(incoming, existing);
+            if (structuralClassification is null)
+                return Ok(new { classification = "New order", reference, changes = Array.Empty<object>(), current = (object?)null, incoming });
+
             var changes = BuildChanges(existing, incoming);
-            var classification = changes.Count == 0 ? "Exact duplicate" : "Amendment/update";
+            var classification = structuralClassification == "Exact duplicate" || changes.Count == 0
+                ? "Exact duplicate"
+                : structuralClassification;
             return Ok(new
             {
                 classification,
@@ -276,12 +286,14 @@ public sealed class OrderIntakeDuplicateCheckController(
 
         if (strongPoMatch)
         {
-            // Daily-repeat customers may legitimately reuse the same PO/reference
-            // on each service day. A different service day is a new movement, not
-            // an amendment to the prior day's order.
-            if (IsDailyRepeatCustomer(candidate.Customer) &&
-                candidate.CollectionDate is not null && existing.CollectionDate is not null &&
-                candidate.CollectionDate != existing.CollectionDate)
+            // Any customer may legitimately reuse the same PO/reference across
+            // service days (e.g. a standing PO for weekly deliveries). When the
+            // service date differs this is a new movement, not an amendment to
+            // the prior day's order.
+            if ((candidate.CollectionDate is not null && existing.CollectionDate is not null &&
+                 candidate.CollectionDate != existing.CollectionDate) ||
+                (candidate.DeliveryDate is not null && existing.DeliveryDate is not null &&
+                 candidate.DeliveryDate != existing.DeliveryDate))
                 return null;
 
             if (CompleteComparable(candidate) && CompleteComparable(existing) && EquivalentCore(candidate, existing))
@@ -364,11 +376,6 @@ public sealed class OrderIntakeDuplicateCheckController(
         return a.Length == 0 || b.Length == 0 || a == b;
     }
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static bool IsDailyRepeatCustomer(string? customer)
-    {
-        var value = Normalise(customer);
-        return value is "MORRISONS" or "ALDI" or "WAITROSE";
-    }
     private static int Rank(string classification) => classification switch
     {
         "Exact duplicate" => 0,
