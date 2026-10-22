@@ -1066,12 +1066,6 @@ public sealed class SamsaraDispatchController(
                     missingStops = missingSamsaraLocations
                 });
 
-            if (missingSchedule.Count > 0)
-                logger.LogInformation(
-                    "Samsara export for run {RunId} ({Reference}): {Count} stop(s) had no planned arrival and were given a derived strictly-increasing time from the route start: {Stops}.",
-                    load.Id, load.Reference, missingSchedule.Count,
-                    string.Join(", ", missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase)));
-
             // Validate the exact payload that will be sent, not only the source
             // register. A stale or partially-recovered planning copy can contain
             // stops that are later excluded while resolving coordinates/times. Do
