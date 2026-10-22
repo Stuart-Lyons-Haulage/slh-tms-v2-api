@@ -45,6 +45,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.084_Canonical_Summer_Berry_Customer.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.087_TachoMaster_Shared_Snapshot.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.088_Load_Concurrency_Token.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.089_Driver_Tacho_Operational_State_Repair.sql", resources);
     }
 
     [Fact]
@@ -104,7 +105,8 @@ public sealed class SchemaResourceTests
             "085_Fleetio_Trailer_Status.sql",
             "086_Driver_Availability_Windows.sql",
             "087_TachoMaster_Shared_Snapshot.sql",
-            "088_Load_Concurrency_Token.sql"
+            "088_Load_Concurrency_Token.sql",
+            "089_Driver_Tacho_Operational_State_Repair.sql"
         };
         Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }
