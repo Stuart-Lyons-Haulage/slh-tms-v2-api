@@ -231,8 +231,27 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: true, ct);
         if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         if (request.Count == 0 || request.Any(stop => string.IsNullOrWhiteSpace(stop.Name))) return BadRequest("At least one named stop is required.");
+
+        // Optimistic concurrency: if the caller sends an If-Match header, reject
+        // the save when another write has changed the run since the caller last
+        // read it. The ETag is the Base64-encoded RowVersion from the Load entity.
+        if (!register && load.RowVersion.Length > 0 && Request?.Headers.IfMatch.Count > 0)
+        {
+            var clientEtag = Request.Headers.IfMatch.ToString().Trim('"');
+            try
+            {
+                var clientVersion = Convert.FromBase64String(clientEtag);
+                if (!clientVersion.SequenceEqual(load.RowVersion))
+                {
+                    Response.Headers.ETag = $"\"{Convert.ToBase64String(load.RowVersion)}\"";
+                    return Conflict(new { message = "This run was changed by another session. Refresh to see the latest version.", load });
+                }
+            }
+            catch (FormatException) { /* invalid Base64 — ignore the version check */ }
+        }
+
         if (!register) db.LoadStops.RemoveRange(load.Stops);
-        load.Stops = request.Select((stop, index) => new LoadStop
+        var nextStops = request.Select((stop, index) => new LoadStop
         {
             OrderId = stop.OrderId,
             Sequence = index + 1,
@@ -243,8 +262,24 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             PlannedArrivalUtc = stop.PlannedArrivalUtc,
             PlannerNote = Clip(stop.PlannerNote, 1000)
         }).ToList();
+        load.Stops = nextStops;
         await stopTiming.ApplyMissingTimesAsync(load, ct);
-        await SaveLoadAsync(load, register, ct);
+        try
+        {
+            await SaveLoadAsync(load, register, ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Another request updated the Load concurrently (e.g. a pallet allocation
+            // writing capacity data). Reload the current RowVersion and retry once so
+            // the stop save is not lost.
+            foreach (var entry in db.ChangeTracker.Entries())
+                await entry.ReloadAsync(ct);
+            load.Stops = nextStops;
+            await SaveLoadAsync(load, register, ct);
+        }
+        if (load.RowVersion.Length > 0 && Response is not null)
+            Response.Headers.ETag = $"\"{Convert.ToBase64String(load.RowVersion)}\"";
         return Ok(load);
     }
 

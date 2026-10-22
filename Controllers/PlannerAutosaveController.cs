@@ -48,6 +48,24 @@ public sealed class PlannerAutosaveController(TmsDbContext db, PlanningStopTimin
         if (request.Count == 0 && load.Status != LoadStatus.Draft)
             return BadRequest(new { message = "Only a draft run can have all stops cleared." });
 
+        // Optimistic concurrency: if the caller sends an If-Match header, reject
+        // the save when another write has changed the run since the caller last
+        // read it. The ETag is the Base64-encoded RowVersion from the Load entity.
+        if (!registerBacked && load.RowVersion.Length > 0 && Request?.Headers.IfMatch.Count > 0)
+        {
+            var clientEtag = Request.Headers.IfMatch.ToString().Trim('"');
+            try
+            {
+                var clientVersion = Convert.FromBase64String(clientEtag);
+                if (!clientVersion.SequenceEqual(load.RowVersion))
+                {
+                    Response.Headers.ETag = $"\"{Convert.ToBase64String(load.RowVersion)}\"";
+                    return Conflict(new { message = "This run was changed by another session. Refresh to see the latest version.", load });
+                }
+            }
+            catch (FormatException) { /* invalid Base64 — ignore the version check */ }
+        }
+
         var nextStops = request.Select((stop, index) => new LoadStop
         {
             LoadId = load.Id,
@@ -87,6 +105,8 @@ public sealed class PlannerAutosaveController(TmsDbContext db, PlanningStopTimin
             }
         }
 
+        if (load.RowVersion.Length > 0 && Response is not null)
+            Response.Headers.ETag = $"\"{Convert.ToBase64String(load.RowVersion)}\"";
         return Ok(load);
     }
 
