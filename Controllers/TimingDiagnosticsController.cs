@@ -117,18 +117,38 @@ public sealed class TimingDiagnosticsController(TmsDbContext db, SiteTimingRuleS
             }
         }
 
+        // Identify rules that exist in Master Data but have no usable time fields.
+        // These are "incomplete" rules — they match routes but cannot supply arrival
+        // times, so every stop on that route falls through to guesswork.
+        var incompleteRules = rules
+            .Where(rule => string.IsNullOrWhiteSpace(rule.LastDespatch)
+                        && string.IsNullOrWhiteSpace(rule.CollectFrom)
+                        && string.IsNullOrWhiteSpace(rule.CollectTo)
+                        && string.IsNullOrWhiteSpace(rule.DepotDeadline))
+            .Select(rule => new
+            {
+                route = rule.RouteCombination,
+                palletType = rule.PalletType,
+                collectionKey = rule.CollectionKey,
+                deliveryKey = rule.DeliveryKey
+            })
+            .OrderBy(rule => rule.route)
+            .ToList();
+
         return Ok(new
         {
             date = targetDate,
             totalRuns = loads.Count,
             runsWithTimingGaps = runsWithGaps.Count,
             totalTimingRules = rules.Count,
+            incompleteTimingRules = incompleteRules.Count,
             routesCoveredByRules = coveredRoutes,
             routesNotCoveredByRules = uncoveredRoutes,
             missingRouteCombinations = missingRouteCombinations
                 .OrderByDescending(pair => pair.Value)
                 .Select(pair => new { route = pair.Key, occurrences = pair.Value })
                 .ToList(),
+            incompleteRules,
             runs = runsWithGaps
         });
     }

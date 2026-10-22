@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
@@ -8,7 +9,7 @@ namespace Slh.Tms.Api.Services;
 /// Fills only missing planned stop times from preserved order evidence or an exact
 /// Site Master route rule. Planner-entered or previously calculated times always win.
 /// </summary>
-public sealed class PlanningStopTimingService(TmsDbContext db, SiteTimingRuleStore timingRuleStore)
+public sealed class PlanningStopTimingService(TmsDbContext db, SiteTimingRuleStore timingRuleStore, ILogger<PlanningStopTimingService>? logger = null)
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
 
@@ -58,7 +59,16 @@ public sealed class PlanningStopTimingService(TmsDbContext db, SiteTimingRuleSto
                 continue;
             }
             var masterDelivery = rule is null ? null : SiteTimingRuleMatcher.DeliveryWindow(rule, order.DeliveryDate ?? load.PlanningDate).End;
-            if (masterDelivery is not null) stop.PlannedArrivalUtc = masterDelivery;
+            if (masterDelivery is not null)
+            {
+                stop.PlannedArrivalUtc = masterDelivery;
+            }
+            else if (rule is not null)
+            {
+                // Rule matched but has no usable time fields — surface this so ops can fill the gap.
+                logger?.LogWarning("Timing rule {Route} matched stop {Stop} on {Load} but has no usable time fields (lastDespatch={LastDespatch}, collectFrom={CollectFrom}, collectTo={CollectTo}, depotDeadline={DepotDeadline}). Fill these in Master Data.",
+                    rule.RouteCombination, stop.Name, load.Reference, rule.LastDespatch, rule.CollectFrom, rule.CollectTo, rule.DepotDeadline);
+            }
         }
     }
 
