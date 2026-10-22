@@ -964,7 +964,7 @@ public sealed class SamsaraDispatchController(
 
             var samsaraStops = new List<SamsaraRouteStopRequest>();
             var missingLocations = new List<string>();
-            var missingSchedule = new List<string>();
+            
 
             var missingSamsaraLocations = new List<string>();
             var departFirstStop = !string.Equals(options.RouteStartingCondition, "arriveFirstStop", StringComparison.OrdinalIgnoreCase);
@@ -992,11 +992,7 @@ public sealed class SamsaraDispatchController(
                         .Where(time => time.HasValue)
                         .OrderBy(time => time)
                         .FirstOrDefault();
-                // SLH TMS owns the schedule (recomputeScheduledTimes=false). A stop with no planned
-                // arrival is given a derived strictly-increasing fallback below rather than dropped,
-                // so an incomplete plan can never silently remove a stop or block the whole export.
-                if (!isFirst && plannedArrival is null)
-                    missingSchedule.Add(physicalStopName);
+                // Missing optional stop timings must not prevent route export.
                 if (string.IsNullOrWhiteSpace(representative.Address))
                 {
                     missingLocations.Add(physicalStopName);
@@ -1021,7 +1017,7 @@ public sealed class SamsaraDispatchController(
                 var stopNotes = BuildStopNotes(physicalStop.Group, orderedStops, orders, options.DefaultStopDwellMinutes);
                 DateTimeOffset? scheduledArrival = isFirst && departFirstStop
                     ? null
-                    : plannedArrival ?? firstScheduled;
+                    : plannedArrival;
                 var earliestFirstDeparture = firstScheduled.AddMinutes(Math.Max(0, options.WalkaroundMinutes));
                 var scheduledDeparture = isFirst && departFirstStop
                     ? plannedArrival is DateTimeOffset plannedFirstDeparture && plannedFirstDeparture > earliestFirstDeparture
@@ -1051,12 +1047,6 @@ public sealed class SamsaraDispatchController(
             // that share a scheduled arrival time when stop external IDs are attached, and a stop may
             // never depart before it arrives. Normalise the outgoing payload so neither can happen,
             // regardless of plan completeness.
-            if (missingSchedule.Count > 0)
-                return BadRequest(new
-                {
-                    message = "Samsara export blocked because these stops lack planned times or delivery window starts. Add times in Dispatch before exporting; estimated ETAs cannot be based on fabricated times.",
-                    missingStops = missingSchedule.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
-                });
             EnsureStrictlyIncreasingArrivals(samsaraStops);
             foreach (var builtStop in samsaraStops)
                 if (!string.IsNullOrWhiteSpace(builtStop.AddressId))
