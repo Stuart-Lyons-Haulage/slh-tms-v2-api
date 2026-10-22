@@ -35,6 +35,8 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
                 claims.Add(new Claim("roles", role));
             }
         }
+        if (Request.Headers.TryGetValue("X-Test-Auth-Source", out var authSource))
+            claims.Add(new Claim("auth_source", authSource.ToString()));
         if (Request.Headers.TryGetValue("X-Test-Oid", out var oid)) claims.Add(new Claim("oid", oid.ToString()));
 
         var identity = new ClaimsIdentity(claims, SchemeName);

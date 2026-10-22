@@ -28,7 +28,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
     [Fact]
     public async Task Nwf_repair_endpoint_responds_ok()
     {
-        var client = factory.CreateClientWithUser("planner@test.com", "Tms.Write,Tms.Approve");
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write,Tms.Approve");
         var response = await PostJson(client, "/api/v1/staging/orders/repair-nwf-references", new { });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
@@ -40,7 +40,9 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
     public async Task Confirm_endpoint_requires_tms_approve_policy()
     {
         // No TmsApprove scope → should be forbidden
-        var client = factory.CreateClientWithUser("planner@test.com", "Tms.Write");
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        client.DefaultRequestHeaders.Add("X-Test-Auth-Source", "local");
+        client.DefaultRequestHeaders.Add("X-Test-Roles", "TMS.Warehouse");
         var response = await PostJson(client, "/api/v1/orders/confirm", new { ids = new[] { Guid.NewGuid() } });
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
@@ -64,7 +66,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             orderId = order.Id;
         }
 
-        var client = factory.CreateClientWithUser("approver@test.com", "Tms.Write,Tms.Approve");
+        var client = factory.CreateClientWithUser("approver@lyonshaulage.com", "Tms.Write,Tms.Approve");
         var response = await PostJson(client, "/api/v1/orders/confirm", new { ids = new[] { orderId } });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
@@ -77,7 +79,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
         var updated = await verifyDb.TransportOrders.SingleAsync(o => o.Id == orderId);
         Assert.Equal(ConfirmationStatus.Confirmed, updated.ConfirmationStatus);
         Assert.NotNull(updated.ConfirmedAtUtc);
-        Assert.Equal("approver@test.com", updated.ConfirmedBy);
+        Assert.Equal("approver@lyonshaulage.com", updated.ConfirmedBy);
     }
 
     [Fact]
@@ -99,7 +101,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             orderId = order.Id;
         }
 
-        var client = factory.CreateClientWithUser("approver@test.com", "Tms.Write,Tms.Approve");
+        var client = factory.CreateClientWithUser("approver@lyonshaulage.com", "Tms.Write,Tms.Approve");
         var response = await PostJson(client, "/api/v1/orders/reject", new { ids = new[] { orderId } });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
@@ -126,7 +128,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             await db.SaveChangesAsync();
         }
 
-        var client = factory.CreateClientWithUser("planner@test.com", "Tms.Write");
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
         var response = await client.GetAsync($"/api/v1/orders/awaiting-review?date={today:yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
@@ -156,7 +158,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             {
                 Reference = $"SMOKE-RUN-{Guid.NewGuid():N}",
                 Status = LoadStatus.Draft,
-                Date = DateOnly.FromDateTime(DateTime.UtcNow),
+                PlanningDate = DateOnly.FromDateTime(DateTime.UtcNow),
                 Stops = new List<LoadStop>()
             };
             db.TransportOrders.Add(order);
@@ -166,7 +168,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             loadId = load.Id;
         }
 
-        var client = factory.CreateClientWithUser("planner@test.com", "Tms.Write");
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
         var response = await client.PutAsync(
             $"/api/v1/planning-control/runs/{loadId}/stops",
             new StringContent(JsonSerializer.Serialize(new[]
@@ -199,7 +201,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             {
                 Reference = $"SMOKE-RUN-{Guid.NewGuid():N}",
                 Status = LoadStatus.Draft,
-                Date = DateOnly.FromDateTime(DateTime.UtcNow),
+                PlanningDate = DateOnly.FromDateTime(DateTime.UtcNow),
                 Stops = new List<LoadStop>()
             };
             db.TransportOrders.Add(order);
@@ -209,7 +211,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
             loadId = load.Id;
         }
 
-        var client = factory.CreateClientWithUser("planner@test.com", "Tms.Write");
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
         var response = await client.PutAsync(
             $"/api/v1/planning-control/runs/{loadId}/stops",
             new StringContent(JsonSerializer.Serialize(new[]
@@ -226,7 +228,7 @@ public sealed class ConfirmationWorkflowSmokeTests : IClassFixture<CustomWebFact
     [Fact]
     public async Task Planning_events_stream_connects_successfully()
     {
-        var client = factory.CreateClientWithUser("planner@test.com", "Tms.Write");
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
         client.Timeout = TimeSpan.FromSeconds(5);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
