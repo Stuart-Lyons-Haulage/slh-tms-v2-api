@@ -544,9 +544,11 @@ public sealed class EmailOrderIntakeService
 
         var address = ExtractLabelBlock(body, "addressofdelivery", "adressofdelivery", "deliveryaddress", "deliverto", "destination", "shipto");
         var masterSiteMention = FindMasterSiteMention($"{request.Subject}\n{body}", masterSiteNames);
-        var explicitDestination = CleanDeliveryAddressForSite(address)
-            ?? DeliverySiteName(ExtractMatch(DeliveryToRegex, body, "site"))
-            ?? masterSiteMention;
+        var explicitDestination = order.SourceKey.StartsWith("vitacress-waitrose-", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : CleanDeliveryAddressForSite(address)
+              ?? DeliverySiteName(ExtractMatch(DeliveryToRegex, body, "site"))
+              ?? masterSiteMention;
         if (!string.IsNullOrWhiteSpace(explicitDestination))
         {
             payload["stallNumber"] = explicitDestination;
@@ -635,6 +637,12 @@ public sealed class EmailOrderIntakeService
         var hallHunter = ParseHallHunterDirectDepot(request, rawPo, body, sourceText, receivedAt);
         if (hallHunter.Count > 0) return hallHunter;
 
+        // Vitacress transshipment wording is more specific than the generic labelled
+        // body parser. Run it before that parser so a subject such as "Leyland" cannot
+        // cause the delivery depot to be captured as the unnormalised subject value.
+        var vitacressLeyland = ParseVitacressWaitroseLeyland(request, rawPo, body, receivedAt);
+        if (vitacressLeyland.Count > 0) return vitacressLeyland;
+
         var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);
         if (barfootsWaitrose.Count > 0) return barfootsWaitrose;
 
@@ -661,9 +669,6 @@ public sealed class EmailOrderIntakeService
 
         var internalMorrisons = ParseInternalMorrisonsCollections(request, rawPo, body, receivedAt);
         if (internalMorrisons.Count > 0) return internalMorrisons;
-
-        var vitacressLeyland = ParseVitacressWaitroseLeyland(request, rawPo, body, receivedAt);
-        if (vitacressLeyland.Count > 0) return vitacressLeyland;
 
         var additionalMarket = ParsePmTransportAdditionalMarket(request, rawPo, body, receivedAt);
         if (additionalMarket.Count > 0) return additionalMarket;
