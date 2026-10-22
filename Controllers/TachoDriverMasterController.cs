@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -14,7 +15,8 @@ public sealed class TachoDriverMasterController(
     TmsDbContext db,
     TachoDriverMasterSyncJobService jobs,
     TachoDriverMasterSyncService sync,
-    TachoDriverHoursRefreshService hoursRefresh) : ControllerBase
+    TachoDriverHoursRefreshService hoursRefresh,
+    IMemoryCache cache) : ControllerBase
 {
     [HttpPost("tachomaster/sync")]
     [Authorize(Policy = "TmsApprove")]
@@ -23,6 +25,18 @@ public sealed class TachoDriverMasterController(
         var actor = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "TMS user";
         var recovered = await jobs.RecoverInterruptedAsync($"manual:{actor}", ct);
         var job = await jobs.EnqueueAsync(actor, ct);
+
+        // Clear dispatch snapshot caches for the current and surrounding days
+        // so the UI gets fresh data when it refreshes after sync completes.
+        var london = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, london).DateTime);
+        for (int dayOffset = -1; dayOffset <= 1; dayOffset++)
+        {
+            var date = today.AddDays(dayOffset);
+            var cacheKey = $"driver-dispatch-snapshot:{date:yyyy-MM-dd}";
+            cache.Remove(cacheKey);
+        }
+
         var response = new
         {
             job.JobId,
