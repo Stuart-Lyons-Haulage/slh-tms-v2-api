@@ -85,6 +85,24 @@ public sealed class SamsaraDispatchStopTimingTests
     }
 
     [Fact]
+    public void Missing_stop_arrival_times_remain_null_while_valid_times_are_preserved()
+    {
+        var stops = new List<SamsaraRouteStopRequest>
+        {
+            Stop(1, null, Base),
+            Stop(2, null, null),
+            Stop(3, Base.AddMinutes(45), null)
+        };
+
+        SamsaraDispatchController.EnsureStrictlyIncreasingArrivals(stops);
+
+        Assert.Null(stops[0].ScheduledArrivalTime);
+        Assert.Null(stops[1].ScheduledArrivalTime);
+        Assert.Null(stops[1].ScheduledDepartureTime);
+        Assert.Equal(Base.AddMinutes(45), stops[2].ScheduledArrivalTime);
+    }
+
+    [Fact]
     public void Already_valid_times_are_left_unchanged()
     {
         var stops = new List<SamsaraRouteStopRequest>
