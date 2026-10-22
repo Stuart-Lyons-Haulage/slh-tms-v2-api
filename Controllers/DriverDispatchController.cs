@@ -106,18 +106,38 @@ public sealed class DriverDispatchController(
 
         // One bounded SQL history query still supplies yesterday/previous-run context and the
         // emergency fallback. Day number itself is calculated from TachoMaster duty history below.
-        var history = loads.Count == 0
-            ? new List<Load>()
-            : await db.Loads.AsNoTracking()
-                .Include(load => load.Stops)
-                .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-14) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
-                .OrderByDescending(load => load.PlanningDate)
-                .ThenByDescending(load => load.CreatedAtUtc)
-                .ToListAsync(ct);
+        List<Load> history;
+        try
+        {
+            history = loads.Count == 0
+                ? []
+                : await db.Loads.AsNoTracking()
+                    .Include(load => load.Stops)
+                    .Where(load => load.DriverId != null && load.PlanningDate >= planningDate.AddDays(-14) && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
+                    .OrderByDescending(load => load.PlanningDate)
+                    .ThenByDescending(load => load.CreatedAtUtc)
+                    .ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch history was unavailable; continuing without historical route context.");
+            db.ChangeTracker.Clear();
+            history = [];
+        }
 
-        var roster = loads.Count == 0
-            ? new Dictionary<Guid, DriverDispatchAgencyRosterEntry>()
-            : await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
+        IReadOnlyDictionary<Guid, DriverDispatchAgencyRosterEntry> roster;
+        try
+        {
+            roster = loads.Count == 0
+                ? new Dictionary<Guid, DriverDispatchAgencyRosterEntry>()
+                : await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch agency roster was unavailable; continuing without roster context.");
+            db.ChangeTracker.Clear();
+            roster = new Dictionary<Guid, DriverDispatchAgencyRosterEntry>();
+        }
         var relevantDriverIds = loads.Concat(history)
             .Where(load => load.DriverId is not null)
             .Select(load => load.DriverId!.Value)
@@ -140,12 +160,24 @@ public sealed class DriverDispatchController(
                 DriverAvailabilityService.CanonicalEmploymentType(driver.DriverType, driver.DriverGroup) != "Unknown")
             .OrderBy(driver => driver.DisplayName)
             .ToList();
-        var vehicles = loads.Count == 0
-            ? new List<Vehicle>()
-            : await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
-        var trailers = loads.Count == 0
-            ? new List<Trailer>()
-            : await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
+        List<Vehicle> vehicles;
+        List<Trailer> trailers;
+        try
+        {
+            vehicles = loads.Count == 0
+                ? []
+                : await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
+            trailers = loads.Count == 0
+                ? []
+                : await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch equipment was unavailable; continuing with routes and drivers.");
+            db.ChangeTracker.Clear();
+            vehicles = [];
+            trailers = [];
+        }
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         // Read the same cached Staffing availability snapshot consumed by Dispatch and
         // the availability calendar. This avoids a second full Sage HR read on this path.
@@ -165,9 +197,21 @@ public sealed class DriverDispatchController(
         if (loads.Count > 0)
             await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
 
-        var timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct);
+        var timingSites = new List<Site>();
+        try { timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch timing sites were unavailable; returning route data without site timing enrichment.");
+            db.ChangeTracker.Clear();
+        }
         try { await MasterDetailStore.EnrichSitesAsync(db, timingSites, ct); } catch { }
-        var timingRules = await timingRuleStore.ReadAsync(ct);
+        IReadOnlyList<SiteTimingRule> timingRules;
+        try { timingRules = await timingRuleStore.ReadAsync(ct); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch timing rules were unavailable; returning route data without timing rules.");
+            timingRules = [];
+        }
 
         // Detail enrichment supplies agency name, coding and skills, but does not
         // change the Master Data employment classification.
@@ -180,25 +224,45 @@ public sealed class DriverDispatchController(
         var tachoDayTask = loads.Count == 0
             ? Task.FromResult(TachoDayNumberState.Unavailable)
             : ReadTachoDayNumbersAsync(selectedDrivers, planningDate, ct);
-        var dispatchStates = loads.Count == 0
-            ? new Dictionary<Guid, DriverDispatchState>()
-            : await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
+        IReadOnlyDictionary<Guid, DriverDispatchState> dispatchStates;
+        try
+        {
+            dispatchStates = loads.Count == 0
+                ? new Dictionary<Guid, DriverDispatchState>()
+                : await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch state was unavailable; returning routes without persisted timing state.");
+            db.ChangeTracker.Clear();
+            dispatchStates = new Dictionary<Guid, DriverDispatchState>();
+        }
         var unavailableDriverIds = selectedDrivers
             .Where(driver => sage.Leave.ContainsKey(Normalise(driver.EmployeeNumber)))
             .Select(driver => driver.Id)
             .ToHashSet();
-        var assistedPlan = loads.Count == 0
-            ? new Dictionary<Guid, DriverDispatchAssistantSuggestion>()
-            : await DriverDispatchAssistantService.BuildAsync(
-                db,
-                planningDate,
-                selectedDrivers,
-                loads,
-                history,
-                vehicles,
-                trailers,
-                unavailableDriverIds,
-                ct);
+        IReadOnlyDictionary<Guid, DriverDispatchAssistantSuggestion> assistedPlan;
+        try
+        {
+            assistedPlan = loads.Count == 0
+                ? new Dictionary<Guid, DriverDispatchAssistantSuggestion>()
+                : await DriverDispatchAssistantService.BuildAsync(
+                    db,
+                    planningDate,
+                    selectedDrivers,
+                    loads,
+                    history,
+                    vehicles,
+                    trailers,
+                    unavailableDriverIds,
+                    ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch assistant enrichment was unavailable; returning the operational board without assistant suggestions.");
+            db.ChangeTracker.Clear();
+            assistedPlan = new Dictionary<Guid, DriverDispatchAssistantSuggestion>();
+        }
         var tachoDays = await tachoDayTask;
 
         var rows = new List<DriverDispatchDriver>();
