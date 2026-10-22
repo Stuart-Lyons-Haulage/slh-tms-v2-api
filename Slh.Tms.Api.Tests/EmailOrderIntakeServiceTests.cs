@@ -558,6 +558,32 @@ BARBOG Nisa Retail Ltd Nisa Retail Ltd (Stoke) 30/09/2026 5168878/3565163 15 1
     }
 
     [Fact]
+    public void VitacressTransshipmentWithWaitrosePrefixedDepots_StagesCorrectly()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-vitacress-waitrose-prefixed", null, "info@lyonshaulage.com", "Maciej.Rybitwa@vitacress.com", "Maciej Rybitwa",
+            "Leyland", DateTimeOffset.Parse("2026-08-26T07:03:22Z"),
+            """
+            Morning
+
+            From: Maciej Rybitwa <Maciej.Rybitwa@vitacress.com>
+            To: Waitrose Primary Transport; info <info@lyonshaulage.com>
+            Subject: Leyland
+
+            Morning
+            We will drop 6 plts into Waitrose Bracknell Chill tomorrow 27/08/26 around 09.00 for your onward delivery to Waitrose Leyland.
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Bracknell", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leyland", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(6, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("09:00", order.Payload.GetProperty("requestedTime").GetString());
+    }
+
+    [Fact]
     public void PmTransportAdditionalMarketEmail_StagesShortMarketAmendmentForReview()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

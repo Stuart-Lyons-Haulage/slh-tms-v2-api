@@ -1199,9 +1199,10 @@ public sealed class EmailOrderIntakeService
             !sourceText.Contains("Leyland", StringComparison.OrdinalIgnoreCase))
             return [];
 
-        // Depot names may carry a temperature suffix (e.g. "Bracknell Chill", "Brinklow Ambient").
+        // Depot names may carry an optional "Waitrose" prefix (e.g. "Waitrose Bracknell Chill")
+        // and/or a temperature suffix (e.g. "Bracknell Chill", "Brinklow Ambient").
         // Capture the full label and normalise to the canonical depot name below.
-        const string depotPattern = @"(?:Bracknell|Aylesford|Brinklow|Leyland)(?:\s+(?:Chill(?:ed)?|Ambient|Frozen|FRV|Mix))?";
+        const string depotPattern = @"(?:Waitrose\s+)?(?:Bracknell|Aylesford|Brinklow|Leyland)(?:\s+(?:Chill(?:ed)?|Ambient|Frozen|FRV|Mix))?";
         var match = Regex.Match(
             sourceText,
             $@"drop\s+(?<qty>\d{{1,3}})\s*(?:plts?|pallets?)\s+into\s+(?<collection>{depotPattern})\s+(?<dateText>tomorrow\s+)?(?<date>\d{{1,2}}[./-]\d{{1,2}}(?:[./-]\d{{2,4}})?)?(?:[^.\r\n]*?\baround\s+(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{{2}})?))?[^.\r\n]*?onward\s+delivery\s+to\s+(?<destination>{depotPattern})",
@@ -2912,12 +2913,17 @@ public sealed class EmailOrderIntakeService
     }
 
     /// <summary>
-    /// Strips temperature/type suffixes (Chill, Chilled, Ambient, Frozen, FRV, Mix) from a
-    /// Waitrose depot label captured by regex, returning the canonical depot name only.
-    /// "Bracknell Chill" → "Bracknell", "Leyland" → "Leyland".
+    /// Strips an optional "Waitrose" prefix and temperature/type suffixes (Chill, Chilled,
+    /// Ambient, Frozen, FRV, Mix) from a Waitrose depot label captured by regex, returning
+    /// the canonical depot name only.
+    /// "Waitrose Bracknell Chill" → "Bracknell", "Bracknell Chill" → "Bracknell", "Leyland" → "Leyland".
     /// </summary>
-    private static string NormaliseDepotName(string raw) =>
-        Regex.Replace(raw.Trim(), @"\s+(?:Chill(?:ed)?|Ambient|Frozen|FRV|Mix)$", "", RegexOptions.IgnoreCase).Trim();
+    private static string NormaliseDepotName(string raw)
+    {
+        var trimmed = raw.Trim();
+        trimmed = Regex.Replace(trimmed, @"^Waitrose\s+", "", RegexOptions.IgnoreCase);
+        return Regex.Replace(trimmed, @"\s+(?:Chill(?:ed)?|Ambient|Frozen|FRV|Mix)$", "", RegexOptions.IgnoreCase).Trim();
+    }
 
     private static byte[] DecodeBase64(string value)
     {
