@@ -50,7 +50,7 @@ public sealed class SharePointDriverRegisterJob(
         await EnsureColumnsAsync(http, siteId, listId, employeeField, statusField, ct);
         var listItems = await ReadListItemsAsync(http, siteId, listId, ct);
         var indexed = listItems
-            .Select(item => new { item.Id, EmployeeNumber = ReadField(item.Fields, employeeField) })
+            .Select(item => new ListMatch(item.Id, ReadField(item.Fields, employeeField)))
             .Where(item => !string.IsNullOrWhiteSpace(item.EmployeeNumber))
             .GroupBy(item => Normalise(item.EmployeeNumber), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
@@ -92,7 +92,7 @@ public sealed class SharePointDriverRegisterJob(
             else
             {
                 var itemId = await CreateItemAsync(http, siteId, listId, fields, ct);
-                indexed[key] = [new ListItem(itemId, new Dictionary<string, JsonElement>())];
+                indexed[key] = [new ListMatch(itemId, employeeNumber)];
                 created++;
             }
         }
@@ -194,4 +194,5 @@ public sealed class SharePointDriverRegisterJob(
         string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().Length <= 300 ? value.Trim() : value.Trim()[..300];
 
     private sealed record ListItem(string Id, Dictionary<string, JsonElement> Fields);
+    private sealed record ListMatch(string Id, string? EmployeeNumber);
 }
