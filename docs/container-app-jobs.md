@@ -1,6 +1,6 @@
 # Scheduled integration jobs
 
-The API no longer owns the TachoMaster, Fleetio or Sage HR timers. `Slh.Tms.Jobs` is a dedicated console host used by four independently scheduled Azure Container Apps Jobs:
+The API no longer owns the TachoMaster, Fleetio or Sage HR timers. `Slh.Tms.Jobs` is a dedicated console host used by four independently scheduled Azure Container Apps Jobs, with the optional SharePoint driver register job available when explicitly enabled:
 
 | Job kind | Example cron (UTC) | Purpose |
 | --- | --- | --- |
@@ -8,6 +8,7 @@ The API no longer owns the TachoMaster, Fleetio or Sage HR timers. `Slh.Tms.Jobs
 | `fleetio` | `5 * * * *` | Hourly canonical fleet/trailer sync. |
 | `sagehr` | `30 4,5 * * *` | Fires at both possible UTC equivalents of 05:30 Europe/London. The job checks the durable `sagehrsync` ledger and executes only once per London date, preserving the 05:30 local schedule across BST/GMT. |
 | `eta` | `*/5 * * * *` | Recalculate delivery ETAs through the existing live ETA engine and persist precision snapshots. |
+| `sharepoint-drivers` | `0 6 * * *` | Optional daily projection of TMS driver name, employee number and active status into the SLH Driver Register. Disabled by default. |
 
 Every execution first acquires a SQL row in `dbo.DistributedLease`. The row contains `LeaseId`, `AcquiredAt`, `ExpiresAt` and `InstanceId`. Acquisition uses a serializable transaction and `UPDLOCK/HOLDLOCK`; a crashed execution becomes eligible after `ExpiresAt`. Normal completion and failure release only the row owned by that instance.
 
@@ -28,3 +29,14 @@ docker build -f Slh.Tms.Jobs/Dockerfile -t slhtmsacrprod.azurecr.io/slh-tms-jobs
 ```
 
 Deploy the four scheduled resources with `infra/container-app-jobs.bicep`. Production deployment should use an immutable image tag and ensure `Database/041_Distributed_Integration_Lease.sql` has been applied before enabling schedules.
+
+
+## Optional SharePoint driver register job
+
+The Bicep template can create `slh-tms-job-sharepoint-drivers`, scheduled daily at 06:00 UTC. It is disabled unless the deployment parameter `sharePointDriverRegisterEnabled` is explicitly set to `true`. The default is false, so normal deployments do not create or run it.
+
+Before enabling it, supply the Microsoft Entra tenant ID, Graph app client ID, and Key Vault secret URI for that app's client secret. The app identity must already have the required list-scoped Microsoft Graph permission assigned to the SLH Driver Register. The existing user-assigned Container Apps identity must be able to resolve the Key Vault secret.
+
+The job reads driver records from TMS SQL and writes only Title, Employee Number, and Driver Status. It leaves Work Email alone and does not delete rows. The list IDs are prefilled with the known SLH site and SLH Driver Register IDs, but can be overridden at deployment. Confirm the field internal names and the Active/Inactive choice values before the first enabled run.
+
+The API's GitHub deployment workflow deploys the API App Service; it does not create or schedule this Container Apps Job. Deploy the Jobs image and Bicep template through the existing Container Apps deployment process. Keep the parameter disabled until the Graph permission, Key Vault value, and controlled first run are confirmed.
