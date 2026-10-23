@@ -1,4 +1,5 @@
-using System.Net.Http.Headers;
+using Azure.Core;
+using Azure.Identity;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -26,9 +27,7 @@ public sealed class SharePointDriverRegisterJob(
         if (!bool.TryParse(configuration["SharePoint:DriverRegister:Enabled"], out var enabled) || !enabled)
             return new JobExecutionResult(true, "SharePoint driver-register sync is disabled.");
 
-        var tenantId = Required("SharePoint:DriverRegister:TenantId");
-        var clientId = Required("SharePoint:DriverRegister:ClientId");
-        var clientSecret = Required("SharePoint:DriverRegister:ClientSecret");
+        var managedIdentityClientId = Required("SharePoint:DriverRegister:ManagedIdentityClientId");
         var siteId = Required("SharePoint:DriverRegister:SiteId");
         var listId = Required("SharePoint:DriverRegister:ListId");
         var employeeField = configuration["SharePoint:DriverRegister:EmployeeNumberField"] ?? "Employee_x0020_Number";
@@ -43,8 +42,9 @@ public sealed class SharePointDriverRegisterJob(
             return new JobExecutionResult(false, "TMS returned no driver records; SharePoint was not changed.");
 
         var http = clients.CreateClient(nameof(SharePointDriverRegisterJob));
-        var token = await GetTokenAsync(http, tenantId, clientId, clientSecret, ct);
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var credential = new ManagedIdentityCredential(managedIdentityClientId);
+        var token = await credential.GetTokenAsync(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }), ct);
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
 
         // Fail closed if the SharePoint internal names differ from the configured mapping.
         await EnsureColumnsAsync(http, siteId, listId, employeeField, statusField, ct);
@@ -106,28 +106,6 @@ public sealed class SharePointDriverRegisterJob(
         string.IsNullOrWhiteSpace(configuration[key])
             ? throw new InvalidOperationException($"Required setting {key} is missing.")
             : configuration[key]!.Trim();
-
-    private static async Task<string> GetTokenAsync(HttpClient http, string tenantId, string clientId, string clientSecret, CancellationToken ct)
-    {
-        using var response = await http.PostAsync(
-            $"https://login.microsoftonline.com/{Uri.EscapeDataString(tenantId)}/oauth2/v2.0/token",
-            new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["client_id"] = clientId,
-                ["client_secret"] = clientSecret,
-                ["scope"] = "https://graph.microsoft.com/.default",
-                ["grant_type"] = "client_credentials"
-            }),
-            ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"Microsoft identity token request failed with HTTP {(int)response.StatusCode}. {Clip(body)}", null, response.StatusCode);
-
-        using var document = JsonDocument.Parse(body);
-        return document.RootElement.TryGetProperty("access_token", out var token)
-            ? token.GetString() ?? throw new InvalidOperationException("Microsoft identity returned an empty access token.")
-            : throw new InvalidOperationException("Microsoft identity response did not contain an access token.");
-    }
 
     private static async Task EnsureColumnsAsync(HttpClient http, string siteId, string listId, string employeeField, string statusField, CancellationToken ct)
     {

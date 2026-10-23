@@ -4,28 +4,26 @@ This optional scheduled job projects the TMS driver master into the SharePoint S
 
 ## Data mapping
 
-| TMS driver field | SharePoint field | Sync behavior |
+| TMS driver field | SharePoint field | Sync behaviour |
 | --- | --- | --- |
 | DisplayName | Title | Create or update |
 | EmployeeNumber | Employee Number | Match key; create or update |
 | Active | Driver Status | Writes the configured Active or Inactive label |
 | — | Work Email | Never written; remains managed in SharePoint |
 
-Only drivers with both an employee number and display name are considered. Existing rows are matched by normalized employee number. If more than one SharePoint row matches, that driver is skipped and reported in the job summary. No driver rows in SharePoint are deleted.
+Only drivers with both an employee number and display name are considered. Existing rows are matched by normalised employee number. If more than one SharePoint row matches, that driver is skipped. No SharePoint rows are deleted.
 
-Before writing any item, the job checks that the configured list contains the required columns and reads the current list. If TMS returns zero drivers, the job fails closed without changing SharePoint.
+Before writing items, the job checks that the configured list contains the required columns and reads the current list. If TMS returns zero drivers, it fails closed without changing SharePoint.
 
 ## Configuration
 
-Set these values in the job's Azure Container Apps configuration or Key Vault references. Do not put credentials in source control.
+The Container Apps Bicep template creates the optional job and dedicated Graph managed identity. It defaults to disabled. Do not put credentials in source control.
 
-| Key | Purpose |
+| Setting | Purpose |
 | --- | --- |
-| TMS_JOB_KIND | Set to sharepoint-drivers for the job container |
-| SharePoint:DriverRegister:Enabled | Explicit opt-in. Must be true; defaults to disabled |
-| SharePoint:DriverRegister:TenantId | Microsoft Entra tenant ID |
-| SharePoint:DriverRegister:ClientId | App registration client ID |
-| SharePoint:DriverRegister:ClientSecret | Secret reference for the app registration |
+| sharePointDriverRegisterEnabled | Deployment parameter; must be true to create the scheduled job |
+| SharePoint:DriverRegister:Enabled | Runtime opt-in; set by Bicep for the job |
+| SharePoint:DriverRegister:ManagedIdentityClientId | Client ID of the dedicated user-assigned identity; set by Bicep |
 | SharePoint:DriverRegister:SiteId | SharePoint site ID |
 | SharePoint:DriverRegister:ListId | SLH Driver Register list ID |
 | SharePoint:DriverRegister:EmployeeNumberField | Internal name for Employee Number; defaults to Employee_x0020_Number |
@@ -33,24 +31,24 @@ Set these values in the job's Azure Container Apps configuration or Key Vault re
 | SharePoint:DriverRegister:ActiveStatusValue | Status choice for active drivers; defaults to Active |
 | SharePoint:DriverRegister:InactiveStatusValue | Status choice for inactive drivers; defaults to Inactive |
 
-Known SharePoint target IDs at implementation time:
+Known SharePoint target IDs:
 
 - Site: stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f
 - List: 13f444a7-9b8f-4445-93db-cad93804a1e8
 
-The job verifies configured column internal names at runtime before writing. Confirm them against the list schema during deployment, since displayed column labels do not always match Graph internal names.
+The job verifies configured column internal names at runtime before writing. Confirm them against the live list schema and confirm that Driver Status accepts Active and Inactive before the first enabled run.
 
 ## Microsoft Graph access
 
-Use an application identity with the narrowest supported list-scoped Graph permission, assigned only to the SLH Driver Register list. Do not grant broad tenant-wide SharePoint write access for this job. The tenant administrator must grant required consent and resource-specific list assignment before enabling the job.
+The job uses a dedicated Azure user-assigned managed identity, separate from the mailbox polling app and the shared TMS jobs identity. Grant that identity only the required list-scoped Microsoft Graph access to the SLH Driver Register. It needs to read list columns/items and create or update list items. Do not grant broad tenant-wide SharePoint write access.
 
-The job requires read access to list columns/items and write access to list items. It requests a client-credentials token for Microsoft Graph; its application secret should be held in Key Vault and injected into the job environment. If the existing TMS Graph identity already has a suitable list-scoped grant, it can be reused after confirming the grant and access model.
+No Graph client secret is required. Do not reuse the INFO_MAILBOX Graph app for this feed; its access is intended for mailbox polling.
 
 ## Rollout
 
-1. Confirm the SharePoint internal column names and that Driver Status accepts the configured Active and Inactive values.
-2. Confirm the selected app identity has only the required list-scoped access and its secret is available through Key Vault.
-3. Build and deploy the Slh.Tms.Jobs image with TMS_JOB_KIND=sharepoint-drivers; keep SharePoint:DriverRegister:Enabled=false.
-4. Run once in a controlled environment, review the job summary and rows, then enable the scheduled job through the normal deployment process.
+1. Verify the dedicated identity has the list-scoped Graph permission.
+2. Verify the shared TMS job identity can retrieve the SQL connection string from Key Vault.
+3. Build and deploy the Slh.Tms.Jobs image and Bicep template. Keep sharePointDriverRegisterEnabled false until access and field mappings are checked.
+4. Enable the job for a controlled first run, review the summary and resulting list rows, then leave the daily schedule enabled only after validation.
 
-The code change alone does not create an Azure job, grant Graph permissions, enable execution, or write SharePoint data.
+The existing GitHub API deployment workflow deploys the API App Service; it does not deploy this Container Apps Job. No Azure job, Graph permission, or SharePoint data is changed by the code PR alone.

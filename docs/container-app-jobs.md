@@ -39,4 +39,4 @@ Before enabling it, supply the Microsoft Entra tenant ID, Graph app client ID, a
 
 The job reads driver records from TMS SQL and writes only Title, Employee Number, and Driver Status. It leaves Work Email alone and does not delete rows. The list IDs are prefilled with the known SLH site and SLH Driver Register IDs, but can be overridden at deployment. Confirm the field internal names and the Active/Inactive choice values before the first enabled run.
 
-The API's GitHub deployment workflow deploys the API App Service; it does not create or schedule this Container Apps Job. Deploy the Jobs image and Bicep template through the existing Container Apps deployment process. Keep the parameter disabled until the Graph permission, Key Vault value, and controlled first run are confirmed.
+The API's GitHub deployment workflow deploys the API App Service; it does not create or schedule this Container Apps Job. Deploy the Jobs image and Bicep template through the existing Container Apps deployment process. Keep the parameter disabled until the Graph list assignment and SQL Key Vault access are confirmed and a controlled first run has been completed.

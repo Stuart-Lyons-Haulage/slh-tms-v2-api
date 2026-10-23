@@ -35,16 +35,16 @@ param tmsApiBaseUrl string = 'https://slh-tms-api-prod.gentlepond-08dba66b.uksou
 
 @description('Enable the optional SLH Driver Register Graph sync job. Leave false until Graph access and Key Vault settings are in place.')
 param sharePointDriverRegisterEnabled bool = false
-@description('Microsoft Entra tenant ID used for the Graph client-credentials token')
-param sharePointTenantId string = ''
-@description('App registration client ID with list-scoped access to SLH Driver Register')
-param sharePointClientId string = ''
-@description('Key Vault secret URI for the Graph app registration client secret')
-param sharePointClientSecretUri string = ''
 @description('SharePoint site ID')
 param sharePointSiteId string = 'stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f'
 @description('SLH Driver Register list ID')
 param sharePointListId string = '13f444a7-9b8f-4445-93db-cad93804a1e8'
+
+// Dedicated identity for Microsoft Graph access; keep it separate from the shared TMS job identity.
+resource sharePointGraphIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: 'slh-tms-sharepoint-driver-sync'
+  location: resourceGroup().location
+}
 
 var jobs = [
   { name: 'slh-tms-job-tachomaster', kind: 'tachomaster', cron: '*/5 * * * *', timeout: 4200 }
@@ -134,7 +134,10 @@ resource sharePointDriverRegisterJob 'Microsoft.App/jobs@2024-03-01' = if (share
   location: resourceGroup().location
   identity: {
     type: 'UserAssigned'
-    userAssignedIdentities: { '${jobIdentityResourceId}': {} }
+    userAssignedIdentities: {
+      '${jobIdentityResourceId}': {}
+      '${sharePointGraphIdentity.id}': {}
+    }
   }
   properties: {
     environmentId: containerAppsEnvironmentId
@@ -153,7 +156,6 @@ resource sharePointDriverRegisterJob 'Microsoft.App/jobs@2024-03-01' = if (share
       ]
       secrets: [
         { name: 'tms-db', keyVaultUrl: tmsDbSecretUri, identity: jobIdentityResourceId }
-        { name: 'sharepoint-client-secret', keyVaultUrl: sharePointClientSecretUri, identity: jobIdentityResourceId }
       ]
     }
     template: {
@@ -165,9 +167,7 @@ resource sharePointDriverRegisterJob 'Microsoft.App/jobs@2024-03-01' = if (share
             { name: 'TMS_JOB_KIND', value: 'sharepoint-drivers' }
             { name: 'ConnectionStrings__TmsDb', secretRef: 'tms-db' }
             { name: 'SharePoint__DriverRegister__Enabled', value: 'true' }
-            { name: 'SharePoint__DriverRegister__TenantId', value: sharePointTenantId }
-            { name: 'SharePoint__DriverRegister__ClientId', value: sharePointClientId }
-            { name: 'SharePoint__DriverRegister__ClientSecret', secretRef: 'sharepoint-client-secret' }
+            { name: 'SharePoint__DriverRegister__ManagedIdentityClientId', value: sharePointGraphIdentity.properties.clientId }
             { name: 'SharePoint__DriverRegister__SiteId', value: sharePointSiteId }
             { name: 'SharePoint__DriverRegister__ListId', value: sharePointListId }
           ]
