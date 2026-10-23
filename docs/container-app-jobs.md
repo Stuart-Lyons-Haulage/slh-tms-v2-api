@@ -35,7 +35,7 @@ Deploy the four scheduled resources with `infra/container-app-jobs.bicep`. Produ
 
 The Bicep template can create `slh-tms-job-sharepoint-drivers`, scheduled daily at 06:00 UTC. It is disabled unless the deployment parameter `sharePointDriverRegisterEnabled` is explicitly set to `true`. The default is false, so normal deployments do not create or run it.
 
-Before enabling it, supply the Microsoft Entra tenant ID, Graph app client ID, and Key Vault secret URI for that app's client secret. The app identity must already have the required list-scoped Microsoft Graph permission assigned to the SLH Driver Register. The existing user-assigned Container Apps identity must be able to resolve the Key Vault secret.
+Before enabling it, assign the required list-scoped Microsoft Graph permission to the dedicated user-assigned managed identity created by the Bicep template. The shared TMS job identity must be able to resolve the SQL connection string from Key Vault. No Graph client secret or mailbox app credentials are used.
 
 The job reads driver records from TMS SQL and writes only Title, Employee Number, and Driver Status. It leaves Work Email alone and does not delete rows. The list IDs are prefilled with the known SLH site and SLH Driver Register IDs, but can be overridden at deployment. Confirm the field internal names and the Active/Inactive choice values before the first enabled run.
 
