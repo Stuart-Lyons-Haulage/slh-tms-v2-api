@@ -33,6 +33,19 @@ param tvWallboardKeySecretUri string
 @description('Production API base URL')
 param tmsApiBaseUrl string = 'https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io'
 
+@description('Enable the optional SLH Driver Register Graph sync job. Leave false until Graph access and Key Vault settings are in place.')
+param sharePointDriverRegisterEnabled bool = false
+@description('SharePoint site ID')
+param sharePointSiteId string = 'stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f'
+@description('SLH Driver Register list ID')
+param sharePointListId string = '13f444a7-9b8f-4445-93db-cad93804a1e8'
+
+// Dedicated identity for Microsoft Graph access; keep it separate from the shared TMS job identity.
+resource sharePointGraphIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: 'slh-tms-sharepoint-driver-sync'
+  location: resourceGroup().location
+}
+
 var jobs = [
   { name: 'slh-tms-job-tachomaster', kind: 'tachomaster', cron: '*/5 * * * *', timeout: 4200 }
   { name: 'slh-tms-job-fleetio', kind: 'fleetio', cron: '5 * * * *', timeout: 3300 }
@@ -115,3 +128,52 @@ resource scheduledJobs 'Microsoft.App/jobs@2024-03-01' = [for job in jobs: {
     }
   }
 }]
+
+resource sharePointDriverRegisterJob 'Microsoft.App/jobs@2024-03-01' = if (sharePointDriverRegisterEnabled) {
+  name: 'slh-tms-job-sharepoint-drivers'
+  location: resourceGroup().location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${jobIdentityResourceId}': {}
+      '${sharePointGraphIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnvironmentId
+    configuration: {
+      triggerType: 'Schedule'
+      replicaTimeout: 900
+      replicaRetryLimit: 1
+      scheduleTriggerConfig: {
+        // ACA schedules use UTC. 06:00 UTC is after the daily Sage sync in both GMT and BST.
+        cronExpression: '0 6 * * *'
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        { server: registryServer, identity: jobIdentityResourceId }
+      ]
+      secrets: [
+        { name: 'tms-db', keyVaultUrl: tmsDbSecretUri, identity: jobIdentityResourceId }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'tms-job'
+          image: jobImage
+          env: [
+            { name: 'TMS_JOB_KIND', value: 'sharepoint-drivers' }
+            { name: 'ConnectionStrings__TmsDb', secretRef: 'tms-db' }
+            { name: 'SharePoint__DriverRegister__Enabled', value: 'true' }
+            { name: 'SharePoint__DriverRegister__ManagedIdentityClientId', value: sharePointGraphIdentity.properties.clientId }
+            { name: 'SharePoint__DriverRegister__SiteId', value: sharePointSiteId }
+            { name: 'SharePoint__DriverRegister__ListId', value: sharePointListId }
+          ]
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        }
+      ]
+    }
+  }
+}
