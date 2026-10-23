@@ -42,7 +42,7 @@ public sealed class SharePointDriverRegisterJob(
             return new JobExecutionResult(false, "TMS returned no driver records; SharePoint was not changed.");
 
         var http = clients.CreateClient(nameof(SharePointDriverRegisterJob));
-        using var credential = new ManagedIdentityCredential(managedIdentityClientId);
+        var credential = new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(managedIdentityClientId));
         var token = await credential.GetTokenAsync(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }), ct);
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
 
