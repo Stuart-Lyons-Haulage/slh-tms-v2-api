@@ -22,3 +22,7 @@ def test_blanks_do_not_overwrite(): assert m.delta({"x":"valid"},{"x":None})=={}
 def test_sage_role_filter():
  assert m.sage_driver({"position":"HGV Driver"})
  assert not m.sage_driver({"position":"Administrator"})
+def test_trailer_identifier():
+ assert m.trailer_id({"name":"SLH03"})=="3"
+ assert m.trailer_id({"name":"SLH46DD NEW"})=="46DD"
+ assert m.trailer_norm("03")=="3"
