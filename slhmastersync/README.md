@@ -28,7 +28,7 @@ The supplied `/sites/slhtms` URL returned 404. Existing masters reside on the ro
 
 All four timers have `AzureWebJobs.<function>.Disabled=true`; provider enable flags are false; `SLH_SYNC_MODE=validate`; `SLH_WRITES_VERIFIED=false`. Production upserts are locked, automatic column creation is blocked, and no records were written or deleted during this deployment. The reconciliation code is inherited from the earlier isolated implementation and still requires complete column/type/ownership review, concurrency/idempotency verification and controlled live tests. Missing fields, maintenance/inspection details, HR leave/leaving dates, driver telemetry, dispatch/geofence events and complete workbook integration remain unresolved. Do not enable writes merely because preflight succeeds.
 
-Configured timer expressions (all disabled): Fleetio `0 */30 * * * *`; RoadTech `0 */15 * * * *`; Sage `0 5 */4 * * *`; Samsara `0 7,22,37,52 * * * *` (UTC).
+Updated timings requested on 28 October: Fleetio and Sage HR at 06:00 and 16:00 Europe/London (GMT/BST); RoadTech every 30 minutes; Samsara unchanged at 15-minute intervals. Fleetio/Sage timer expression `0 0 5,6,15,16 * * *` uses an in-code Europe/London hour guard to make exactly two API sync attempts each day across GMT/BST. RoadTech uses `0 */30 * * * *`. All timers remain disabled pending the site grant and live verification. Eight safety tests now pass, including winter/summer schedule checks.
 
 Registered functions: `Health`, `IntegrationPreflight`, `ManualMasterDataSync`, `ScheduledFleetioSync`, `ScheduledRoadTechSync`, `ScheduledSageSync`, `ScheduledSamsaraSync`.
 
@@ -41,3 +41,7 @@ No existing resources were deleted. The old TMS and SQL databases were untouched
 `python -m unittest discover -s slhmastersync/tests -v`
 
 Deploy package root contains `function_app.py`, `host.json` and `requirements.txt`; remote build is required. Secrets are retrieved with `ManagedIdentityCredential` and `SecretClient`. Never put API secret values into code, deployment output or configuration.
+
+## Administrator access follow-up
+
+The user approved administrator tooling on 28 October. Requesting a Sites.FullControl.All token through the existing Cloud Shell session still returned HTTP 403 for the root permission endpoint. Microsoft Graph Explorer was signed in to the correct SLH tenant; its Modify Permissions panel requires delegated Sites.FullControl.All. Automated review rejected clicking Consent because Graph Explorer consent spans all site collections. No Graph Explorer consent or site grant was applied. This consent is distinct from the Function identity's Sites.Selected permission and can persist beyond a session. No broader application role was assigned to slhmastersync.
