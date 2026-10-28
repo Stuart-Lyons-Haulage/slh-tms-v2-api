@@ -1,0 +1,1 @@
+OIDC federation verification retry after Entra credential creation. No production writes.
