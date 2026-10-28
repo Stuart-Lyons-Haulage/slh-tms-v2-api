@@ -101,3 +101,11 @@ class SafetyTests(unittest.TestCase):
         assert calls[1][1]['headers']=={'If-Match':'original-version'}
         assert g.evidence[0]['manual_fields_preserved']
         assert g.writes==1
+
+    def test_sage_total_pages_are_fully_read(self):
+        class Response:
+            def __init__(self,page):self.page=page
+            def json(self):return {'data':[{'id':self.page}],'meta':{'current_page':self.page,'total_pages':3}}
+        pages=iter([1,2,3])
+        with patch.object(m,'secret',return_value='fake'),patch.object(m.Http,'request',side_effect=lambda *a,**kw:Response(next(pages))):
+            assert m.sage_people()==[{'id':1},{'id':2},{'id':3}]
