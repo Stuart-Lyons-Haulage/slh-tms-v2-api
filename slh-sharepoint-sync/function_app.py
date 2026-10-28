@@ -205,9 +205,15 @@ def execute(source="all",dry=None):
         if not dry:log_result(g,source,"failed",started,reports,e)
         raise
 
-@app.function_name(name="ScheduledMasterDataSync")
+@app.function_name(name="ScheduledFleetioSync")
 @app.schedule(schedule="0 15 3 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
-def scheduled(timer:func.TimerRequest): execute()
+def scheduled_fleetio(timer:func.TimerRequest): execute("fleetio")
+
+@app.function_name(name="ScheduledSageSync")
+@app.schedule(schedule="0 45 3 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+def scheduled_sage(timer:func.TimerRequest):
+    if os.getenv("SAGE_SYNC_ENABLED","false").lower()=="true": execute("sage")
+    else: logging.warning("Sage HR schedule disabled: credential validation required")
 
 @app.function_name(name="ManualMasterDataSync")
 @app.route(route="sync",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
