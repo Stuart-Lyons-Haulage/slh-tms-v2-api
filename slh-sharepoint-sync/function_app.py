@@ -79,6 +79,18 @@ def sage_driver(p):
     s=" ".join(str(p.get(k) or "") for k in ("team","team_name","position","position_name","job_title")).lower()
     return any(x in s for x in ("driver","hgv","class 1","class 2"))
 
+def trailer_id(a):
+    value=norm(a.get("name") or a.get("license_plate"))
+    value=re.sub(r"^SLH", "", value)
+    value=re.sub(r"NEW$", "", value)
+    return value.lstrip("0") or "0"
+
+def trailer_norm(v):
+    value=norm(v)
+    value=re.sub(r"^SLH", "", value)
+    value=re.sub(r"NEW$", "", value)
+    return value.lstrip("0") or "0"
+
 COLS={
  "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
@@ -112,13 +124,17 @@ def delta(old, desired):
 def run_fleet(g,dry):
     assets=fleetio_assets(); reports=[]
     for key in ("vehicles","trailers"):
-        names=field_names(g,key,dry); items=g.items(LISTS[key]); stats={"source":key,"retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0}
+        names=field_names(g,key,dry); items=g.items(LISTS[key]); stats={"source":key,"retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
         sid=names["FleetioId"]; fallback="field_1"
         for a in assets:
             if fleet_kind(a)!=key: continue
-            stats["retrieved"]+=1; aid=str(a.get("id") or ""); ident=clean(a.get("license_plate") or a.get("name"))
-            item,why=choose(items,sid,aid,fallback,ident)
-            if why=="ambiguous": stats["ambiguous"]+=1; continue
+            stats["retrieved"]+=1; aid=str(a.get("id") or ""); ident=trailer_id(a) if key=="trailers" else clean(a.get("license_plate") or a.get("name"))
+            if key=="trailers":
+                exact=[x for x in items if norm(x["fields"].get(sid))==norm(aid)]
+                fb=[x for x in items if trailer_norm(x["fields"].get(fallback))==trailer_norm(ident)]
+                item,why=(exact[0],"source") if len(exact)==1 else ((None,"ambiguous") if len(exact)>1 or len(fb)>1 else ((fb[0],"fallback") if len(fb)==1 else (None,"new")))
+            else: item,why=choose(items,sid,aid,fallback,ident)
+            if why=="ambiguous": stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":aid,"identifier":ident,"name":clean(a.get("name"))}); continue
             desired={sid:aid,names["FleetioName"]:clean(a.get("name")),names["FleetioVIN"]:clean(a.get("vin")),names["FleetioMake"]:clean(a.get("make_name") or a.get("make")),names["FleetioModel"]:clean(a.get("model_name") or a.get("model")),names["FleetioType"]:clean(a.get("vehicle_type_name") or a.get("type_name")),fallback:ident}
             if item:
                 stats["matched"]+=1; changes=delta(item["fields"],desired)
@@ -127,6 +143,7 @@ def run_fleet(g,dry):
                     if not dry:g.update(LISTS[key],item["id"],changes)
             else:
                 desired["Title"]=clean(a.get("name")) or ident or aid; desired[names["FleetioLastSync"]]=now(); stats["created"]+=1
+                stats["new_candidates"].append({"id":aid,"identifier":ident,"name":clean(a.get("name"))})
                 if not dry:g.create(LISTS[key],desired)
         reports.append(stats)
     return reports
@@ -136,7 +153,7 @@ def display_name(p):
     return (f"{last}, {first}" if last else first).strip(", ")
 
 def run_sage(g,dry):
-    names=field_names(g,"drivers",dry); items=g.items(LISTS["drivers"]); stats={"source":"sage","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0}
+    names=field_names(g,"drivers",dry); items=g.items(LISTS["drivers"]); stats={"source":"sage","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
     sid=names["SageHrId"]
     for p in sage_people():
         if not sage_driver(p):continue
@@ -146,7 +163,7 @@ def run_sage(g,dry):
             matches=[x for x in items if norm(x["fields"].get("field_1"))==norm(name)]
             if len(matches)==1:item,why=matches[0],"name"
             elif len(matches)>1:why="ambiguous"
-        if why=="ambiguous":stats["ambiguous"]+=1;continue
+        if why=="ambiguous":stats["ambiguous"]+=1;stats["ambiguous_candidates"].append({"id":pid,"employee_number":emp,"name":name});continue
         desired={sid:pid,names["SageEmployeeNumber"]:emp,names["SageEmploymentStatus"]:clean(p.get("employment_status")),names["SageEmail"]:clean(p.get("email")),names["SageMobile"]:clean(p.get("mobile")),"field_1":name}
         if item:
             stats["matched"]+=1; changes=delta(item["fields"],desired)
@@ -155,6 +172,7 @@ def run_sage(g,dry):
                 if not dry:g.update(LISTS["drivers"],item["id"],changes)
         else:
             desired["Title"]=title; desired[names["SageLastSync"]]=now();stats["created"]+=1
+            stats["new_candidates"].append({"id":pid,"employee_number":emp,"name":name})
             if not dry:g.create(LISTS["drivers"],desired)
     return [stats]
 
