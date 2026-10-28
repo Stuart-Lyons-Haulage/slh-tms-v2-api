@@ -91,6 +91,11 @@ def trailer_norm(v):
     value=re.sub(r"NEW$", "", value)
     return value.lstrip("0") or "0"
 
+def fleet_status(a): return clean(a.get("vehicle_status_name") or a.get("status_name") or a.get("status"))
+def fleet_active(status):
+    if not status: return None
+    return "No" if any(x in status.lower() for x in ("inactive","sold","disposed","retired","decommission")) else "Yes"
+
 COLS={
  "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
@@ -135,7 +140,10 @@ def run_fleet(g,dry):
                 item,why=(exact[0],"source") if len(exact)==1 else ((None,"ambiguous") if len(exact)>1 or len(fb)>1 else ((fb[0],"fallback") if len(fb)==1 else (None,"new")))
             else: item,why=choose(items,sid,aid,fallback,ident)
             if why=="ambiguous": stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":aid,"identifier":ident,"name":clean(a.get("name"))}); continue
+            status=fleet_status(a)
             desired={sid:aid,names["FleetioName"]:clean(a.get("name")),names["FleetioVIN"]:clean(a.get("vin")),names["FleetioMake"]:clean(a.get("make_name") or a.get("make")),names["FleetioModel"]:clean(a.get("model_name") or a.get("model")),names["FleetioType"]:clean(a.get("vehicle_type_name") or a.get("type_name")),fallback:ident}
+            if key=="vehicles": desired.update({"field_10":status,"field_6":fleet_active(status)})
+            else: desired.update({"field_7":status,"field_5":fleet_active(status)})
             if item:
                 stats["matched"]+=1; changes=delta(item["fields"],desired)
                 if changes:
