@@ -208,8 +208,8 @@ def fleet_active(status):
     return "No" if any(x in status.lower() for x in ("inactive","sold","disposed","retired","decommission")) else "Yes"
 
 COLS={
- "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","FleetioIssuesCount"],
- "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","FleetioIssuesCount"],
+ "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
+ "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync","SageStartDate"],
  "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync","SamsaraSiteRef","SamsaraRadiusMeters"],
  "roadtech":["RoadTechVehicleCode","RoadTechLastTelemetryUtc","RoadTechIgnition","RoadTechMoving","RoadTechOdometerKm","RoadTechLatitude","RoadTechLongitude","RoadTechLocation","RoadTechSpeedKmh","RoadTechLastSync"],
@@ -260,7 +260,7 @@ def run_fleet(g,dry):
             if item and item["fields"].get(sid) and norm(item["fields"][sid])!=norm(aid): item,why=None,"ambiguous"
             if why=="ambiguous": stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":aid,"identifier":ident,"name":clean(a.get("name"))}); continue
             status=fleet_status(a)
-            desired={sid:aid,names["FleetioName"]:clean(a.get("name")),names["FleetioVIN"]:clean(a.get("vin")),names["FleetioMake"]:clean(a.get("make_name") or a.get("make")),names["FleetioModel"]:clean(a.get("model_name") or a.get("model")),names["FleetioType"]:clean(a.get("vehicle_type_name") or a.get("type_name")),fallback:ident,names["FleetioIssuesCount"]:clean(a.get("issues_count"))}
+            desired={sid:aid,names["FleetioName"]:clean(a.get("name")),names["FleetioVIN"]:clean(a.get("vin")),names["FleetioMake"]:clean(a.get("make_name") or a.get("make")),names["FleetioModel"]:clean(a.get("model_name") or a.get("model")),names["FleetioType"]:clean(a.get("vehicle_type_name") or a.get("type_name")),fallback:ident}
             if key=="vehicles": desired.update({"field_10":status})
             else: desired.update({"field_7":status})
             if item:
