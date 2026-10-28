@@ -38,3 +38,5 @@ def test_fleet_status_ownership():
 def test_roadtech_time():
  assert m.roadtech_time({"dataGps":{"Time":"2026-10-28T12:00:00Z"}})=="2026-10-28T12:00:00Z"
  assert m.roadtech_time({}) is None
+def test_samsara_blanks_do_not_erase():
+ assert m.delta({"SamsaraId":"123"},{"SamsaraId":"123","other":None})=={}
