@@ -187,7 +187,9 @@ def run_sage(g,dry):
 def log_result(g,source,status,started,reports,error=None):
     try:
         names=ensure_columns(g,"log"); totals=lambda k:sum(x.get(k,0) for x in reports)
-        fields={"Title":f"{source} {started}",names["Source"]:source,names["Status"]:status,names["StartedAt"]:started,names["FinishedAt"]:now(),names["Matched"]:totals("matched"),names["CreatedCount"]:totals("created"),names["UpdatedCount"]:totals("updated"),names["Ambiguous"]:totals("ambiguous"),names["ErrorCount"]:1 if error else totals("errors"),names["Details"]:json.dumps(reports if not error else {"reports":reports,"error":str(error)[:1500]})[:8000]}
+        summary=[{k:r.get(k,0) for k in ("source","retrieved","matched","created","updated","ambiguous","errors")} for r in reports]
+        detail=json.dumps(summary if not error else {"summary":summary,"error":str(error)[:100]},separators=(",",":"))[:240]
+        fields={"Title":f"{source} {started}",names["Source"]:source,names["Status"]:status,names["StartedAt"]:started,names["FinishedAt"]:now(),names["Matched"]:str(totals("matched")),names["CreatedCount"]:str(totals("created")),names["UpdatedCount"]:str(totals("updated")),names["Ambiguous"]:str(totals("ambiguous")),names["ErrorCount"]:str(1 if error else totals("errors")),names["Details"]:detail}
         g.create(LISTS["log"],fields)
     except Exception: logging.exception("Sync_Log write failed")
 
