@@ -141,7 +141,7 @@ def sage_people():
         data=h.request("GET",f"{base}/employees?page={page}").json()
         rows=data.get("data",data.get("employees",[])) if isinstance(data,dict) else data
         out+=rows
-        if not rows or (isinstance(data,dict) and page>=int(data.get("meta",{}).get("last_page",page))): break
+        if not rows or (isinstance(data,dict) and page>=int(data.get("meta",{}).get("total_pages",data.get("meta",{}).get("last_page",page)))): break
         page+=1
     return out
 
@@ -211,7 +211,7 @@ COLS={
  "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","FleetioIssuesCount"],
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","FleetioIssuesCount"],
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync","SageStartDate"],
- "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
+ "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync","SamsaraSiteRef","SamsaraRadiusMeters"],
  "roadtech":["RoadTechVehicleCode","RoadTechLastTelemetryUtc","RoadTechIgnition","RoadTechMoving","RoadTechOdometerKm","RoadTechLatitude","RoadTechLongitude","RoadTechLocation","RoadTechSpeedKmh","RoadTechLastSync"],
  "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"]}
 
@@ -356,7 +356,8 @@ def run_samsara(g,dry):
         if not dry: sid=g.add_column(LISTS["vehicles"],"SamsaraId")["name"]
         else: sid="SamsaraId"
     for row in samsara_vehicles():
-        stats["retrieved"]+=1; rid=clean(row.get("id")); plate=clean(row.get("licensePlate"))
+        if not dry and not g.budget(): break
+        stats["retrieved"]+=1; rid=clean(row.get("id")); plate=clean(row.get("licensePlate") or row.get("name"))
         exact=[x for x in items if rid and norm(x["fields"].get(sid))==norm(rid)]
         fallback=[x for x in items if plate and norm(x["fields"].get("field_1"))==norm(plate)]
         if len(exact)>1 or (not exact and len(fallback)>1):
@@ -374,22 +375,28 @@ def run_samsara(g,dry):
     stats={"source":"samsara-geofences","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
     sid=names["SamsaraId"]
     for row in samsara_addresses():
+        if not dry and not g.budget(): break
         stats["retrieved"]+=1; rid=clean(row.get("id")); label=clean(row.get("name")) or clean(row.get("formattedAddress")) or rid
         exact=[x for x in items if rid and norm(x["fields"].get(sid))==norm(rid)]
         fallback=[x for x in items if label and norm(x["fields"].get("Title"))==norm(label)]
         if len(exact)>1 or (not exact and len(fallback)>1):
             stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":rid,"name":label}); continue
         item=exact[0] if len(exact)==1 else (fallback[0] if len(fallback)==1 else None)
-        desired={sid:rid,names["SamsaraName"]:clean(row.get("name")),names["SamsaraFormattedAddress"]:clean(row.get("formattedAddress")),names["SamsaraLatitude"]:clean(row.get("latitude")),names["SamsaraLongitude"]:clean(row.get("longitude")),names["SamsaraAddressTypes"]:clean(",".join(row.get("addressTypes") or []))}
+        desired={sid:rid,names["SamsaraName"]:clean(row.get("name")),names["SamsaraFormattedAddress"]:clean(row.get("formattedAddress")),names["SamsaraLatitude"]:clean(row.get("latitude")),names["SamsaraLongitude"]:clean(row.get("longitude")),names["SamsaraAddressTypes"]:clean(",".join(row.get("addressTypes") or [])),names["SamsaraSiteRef"]:clean((row.get("externalIds") or {}).get("slhTmsSite")),names["SamsaraRadiusMeters"]:clean(((row.get("geofence") or {}).get("circle") or {}).get("radiusMeters"))}
         if item:
             stats["matched"]+=1; changes=delta(item["fields"],desired)
             if changes:
                 changes[names["SamsaraLastSync"]]=now(); stats["updated"]+=1
                 if not dry:g.update(LISTS["geofences"],item["id"],changes)
         else:
+            if not dry and os.getenv('SLH_CREATES_VERIFIED','false')!='true':
+                stats['errors']+=1; continue
             desired["Title"]=label; desired[names["SamsaraLastSync"]]=now(); stats["created"]+=1
             stats["new_candidates"].append({"id":rid,"name":label})
-            if not dry:g.create(LISTS["geofences"],desired)
+            if not dry:
+                new=g.create(LISTS['geofences'],desired)
+                if new: items.append(new)
+            else: items.append({'id':'preview-'+rid,'fields':desired})
     reports.append(stats); return reports
 
 def log_result(g,source,status,started,reports,error=None):
