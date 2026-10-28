@@ -26,3 +26,7 @@ def test_trailer_identifier():
  assert m.trailer_id({"name":"SLH03"})=="3"
  assert m.trailer_id({"name":"SLH46DD NEW"})=="46DD"
  assert m.trailer_norm("03")=="3"
+def test_fleet_status_ownership():
+ assert m.fleet_active("Active")=="Yes"
+ assert m.fleet_active("VOR")=="Yes"
+ assert m.fleet_active("Sold")=="No"
