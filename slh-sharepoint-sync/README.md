@@ -1,4 +1,5 @@
-# SLH Microsoft Lists sync - isolated deployment staging
-This branch stages a **read-only** preflight, not a working API synchronisation. Do not mark it live.
-Existing site ID is prevalidated. Do not publish to the TMS App Service or the existing Node.js driver-register Function.
-The actual Fleetio/SageHR upserts require verified source responses, correct SharePoint internal column mapping and a source-specific immutable key. A timer that only runs preflight must not be mistaken for a successful data sync.
+# SLH SharePoint master-data sync
+
+Isolated Python Azure Function for duplicate-safe Fleetio vehicle/trailer and Sage HR driver synchronisation. It uses managed identity for Microsoft Graph and Key Vault, defaults to validation-only mode, refuses ambiguous matches, never deletes records, and does not blank manual fields.
+
+The timer runs daily at 03:15 UTC. `POST /api/sync?source=all&dry_run=true` performs a read-only reconciliation. Live writes require `SLH_SYNC_MODE=live` or an explicit `dry_run=false` invocation.
