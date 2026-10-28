@@ -9,7 +9,7 @@ app = func.FunctionApp()
 UTC = timezone.utc
 GRAPH = "https://graph.microsoft.com/v1.0"
 SITE = os.getenv("SHAREPOINT_SITE_ID", "stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f")
-LISTS = {"vehicles": os.getenv("VEHICLES_LIST_ID", "8d96865a-b7dc-40c0-9947-468542800bd4"), "trailers": os.getenv("TRAILERS_LIST_ID", "a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c"), "drivers": os.getenv("DRIVERS_LIST_ID", "2b89c3fc-d83e-424b-81b9-8e2546fabb78"), "log": os.getenv("SYNC_LOG_LIST_ID", "ff965828-ca04-4374-aec9-b8b500e234b1")}
+LISTS = {"vehicles": os.getenv("VEHICLES_LIST_ID", "8d96865a-b7dc-40c0-9947-468542800bd4"), "trailers": os.getenv("TRAILERS_LIST_ID", "a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c"), "drivers": os.getenv("DRIVERS_LIST_ID", "2b89c3fc-d83e-424b-81b9-8e2546fabb78"), "geofences": os.getenv("GEOFENCES_LIST_ID", "0d8cd682-0603-4224-9acb-db49ba289475"), "log": os.getenv("SYNC_LOG_LIST_ID", "ff965828-ca04-4374-aec9-b8b500e234b1")}
 cred = DefaultAzureCredential()
 
 def norm(v): return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
@@ -95,6 +95,19 @@ def roadtech_telemetry():
         offset+=len(batch)
     return rows
 
+def samsara_pages(path):
+    h=Http({"Authorization":"Bearer "+secret("samsara-api-token"),"Accept":"application/json"})
+    url="https://api.eu.samsara.com/"+path.lstrip("/"); out=[]
+    while url:
+        data=h.request("GET",url).json(); out.extend(data.get("data",[]))
+        page=data.get("pagination") or {}; cursor=page.get("endCursor")
+        if not page.get("hasNextPage") or not cursor: break
+        url="https://api.eu.samsara.com/"+path.lstrip("/")+(("&" if "?" in path else "?")+"after="+str(cursor))
+    return out
+
+def samsara_vehicles(): return samsara_pages("fleet/vehicles?limit=512")
+def samsara_addresses(): return samsara_pages("addresses?limit=512")
+
 def fleet_kind(a):
     t=" ".join(str(a.get(k) or "") for k in ("vehicle_type_name","type_name","name","group_name")).upper()
     if "TRAILER" in t: return "trailers"
@@ -126,6 +139,7 @@ COLS={
  "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","RoadTechVehicleId","RoadTechVehicleCode","RoadTechLastTelemetryUtc","RoadTechIgnition","RoadTechMoving","RoadTechOdometerKm","RoadTechLastSync"],
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
+ "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
  "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"]}
 
 def ensure_columns(g,key):
@@ -236,6 +250,51 @@ def run_roadtech(g,dry):
             if not dry:g.update(LISTS["vehicles"],item["id"],changes)
     return [stats]
 
+def run_samsara(g,dry):
+    reports=[]
+    names=field_names(g,"vehicles",dry); items=g.items(LISTS["vehicles"])
+    stats={"source":"samsara-vehicles","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"unmatched":0,"unmatched_candidates":[],"ambiguous_candidates":[]}
+    sid=names.get("SamsaraId")
+    if not sid:
+        if not dry: sid=g.add_column(LISTS["vehicles"],"SamsaraId")["name"]
+        else: sid="SamsaraId"
+    for row in samsara_vehicles():
+        stats["retrieved"]+=1; rid=clean(row.get("id")); plate=clean(row.get("licensePlate"))
+        exact=[x for x in items if rid and norm(x["fields"].get(sid))==norm(rid)]
+        fallback=[x for x in items if plate and norm(x["fields"].get("field_1"))==norm(plate)]
+        if len(exact)>1 or (not exact and len(fallback)>1):
+            stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":rid,"identifier":plate}); continue
+        item=exact[0] if len(exact)==1 else (fallback[0] if len(fallback)==1 else None)
+        if not item:
+            stats["unmatched"]+=1; stats["unmatched_candidates"].append({"id":rid,"identifier":plate}); continue
+        stats["matched"]+=1; changes=delta(item["fields"],{sid:rid})
+        if changes:
+            stats["updated"]+=1
+            if not dry:g.update(LISTS["vehicles"],item["id"],changes)
+    reports.append(stats)
+
+    names=field_names(g,"geofences",dry); items=g.items(LISTS["geofences"])
+    stats={"source":"samsara-geofences","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
+    sid=names["SamsaraId"]
+    for row in samsara_addresses():
+        stats["retrieved"]+=1; rid=clean(row.get("id")); label=clean(row.get("name")) or clean(row.get("formattedAddress")) or rid
+        exact=[x for x in items if rid and norm(x["fields"].get(sid))==norm(rid)]
+        fallback=[x for x in items if label and norm(x["fields"].get("Title"))==norm(label)]
+        if len(exact)>1 or (not exact and len(fallback)>1):
+            stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":rid,"name":label}); continue
+        item=exact[0] if len(exact)==1 else (fallback[0] if len(fallback)==1 else None)
+        desired={sid:rid,names["SamsaraName"]:clean(row.get("name")),names["SamsaraFormattedAddress"]:clean(row.get("formattedAddress")),names["SamsaraLatitude"]:clean(row.get("latitude")),names["SamsaraLongitude"]:clean(row.get("longitude")),names["SamsaraAddressTypes"]:clean(",".join(row.get("addressTypes") or []))}
+        if item:
+            stats["matched"]+=1; changes=delta(item["fields"],desired)
+            if changes:
+                changes[names["SamsaraLastSync"]]=now(); stats["updated"]+=1
+                if not dry:g.update(LISTS["geofences"],item["id"],changes)
+        else:
+            desired["Title"]=label; desired[names["SamsaraLastSync"]]=now(); stats["created"]+=1
+            stats["new_candidates"].append({"id":rid,"name":label})
+            if not dry:g.create(LISTS["geofences"],desired)
+    reports.append(stats); return reports
+
 def log_result(g,source,status,started,reports,error=None):
     try:
         names=ensure_columns(g,"log"); totals=lambda k:sum(x.get(k,0) for x in reports)
@@ -252,6 +311,7 @@ def execute(source="all",dry=None):
         if source in ("all","fleetio"): reports+=run_fleet(g,dry)
         if source in ("all","sage"): reports+=run_sage(g,dry)
         if source in ("all","roadtech"): reports+=run_roadtech(g,dry)
+        if source in ("all","samsara"): reports+=run_samsara(g,dry)
         status="dry-run" if dry else "success"
         if not dry: log_result(g,source,status,started,reports)
         return {"status":status,"started":started,"finished":now(),"reports":reports}
@@ -276,11 +336,17 @@ def scheduled_roadtech(timer:func.TimerRequest):
     if os.getenv("ROADTECH_SYNC_ENABLED","false").lower()=="true": execute("roadtech")
     else: logging.warning("RoadTech schedule disabled")
 
+@app.function_name(name="ScheduledSamsaraSync")
+@app.schedule(schedule="0 15 4 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+def scheduled_samsara(timer:func.TimerRequest):
+    if os.getenv("SAMSARA_SYNC_ENABLED","false").lower()=="true": execute("samsara")
+    else: logging.warning("Samsara schedule disabled")
+
 @app.function_name(name="ManualMasterDataSync")
 @app.route(route="sync",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
 def manual(req:func.HttpRequest):
     source=req.params.get("source","all").lower(); dry=req.params.get("dry_run")
-    if source not in ("all","fleetio","sage","roadtech"):return func.HttpResponse("invalid source",status_code=400)
+    if source not in ("all","fleetio","sage","roadtech","samsara"):return func.HttpResponse("invalid source",status_code=400)
     try:return func.HttpResponse(json.dumps(execute(source,None if dry is None else dry.lower()=="true")),mimetype="application/json")
     except Exception as e:return func.HttpResponse(json.dumps({"status":"failed","error":str(e)}),status_code=500,mimetype="application/json")
 
