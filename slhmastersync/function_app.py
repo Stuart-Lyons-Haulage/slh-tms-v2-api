@@ -1,6 +1,7 @@
 import hashlib, json, logging, os, re, time, random
 from urllib.parse import urlparse, urlencode
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import azure.functions as func
 import requests
 from azure.identity import ManagedIdentityCredential
@@ -18,6 +19,10 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 def norm(v): return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
 def clean(v): return None if v is None or str(v).strip() == "" else str(v).strip()
 def now(): return datetime.now(UTC).isoformat()
+
+def uk_master_sync_due(at=None):
+    local=(at or datetime.now(UTC)).astimezone(ZoneInfo('Europe/London'))
+    return local.hour in (6,16)
 
 class Http:
     def __init__(self, headers=None): self.s=requests.Session(); self.s.headers.update(headers or {})
@@ -338,18 +343,18 @@ def execute(source="all",dry=None):
         raise
 
 @app.function_name(name="ScheduledFleetioSync")
-@app.schedule(schedule="0 */30 * * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+@app.schedule(schedule="0 0 5,6,15,16 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
 def scheduled_fleetio(timer:func.TimerRequest):
-    if os.getenv('FLEETIO_SYNC_ENABLED','false')=='true': execute('fleetio')
+    if os.getenv('FLEETIO_SYNC_ENABLED','false')=='true' and uk_master_sync_due(): execute('fleetio')
 
 @app.function_name(name="ScheduledSageSync")
-@app.schedule(schedule="0 5 */4 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+@app.schedule(schedule="0 0 5,6,15,16 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
 def scheduled_sage(timer:func.TimerRequest):
-    if os.getenv("SAGE_SYNC_ENABLED","false").lower()=="true": execute("sage")
+    if os.getenv("SAGE_SYNC_ENABLED","false").lower()=="true" and uk_master_sync_due(): execute("sage")
     else: logging.warning("Sage HR schedule disabled: credential validation required")
 
 @app.function_name(name="ScheduledRoadTechSync")
-@app.schedule(schedule="0 */15 * * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+@app.schedule(schedule="0 */30 * * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
 def scheduled_roadtech(timer:func.TimerRequest):
     if os.getenv("ROADTECH_SYNC_ENABLED","false").lower()=="true": execute("roadtech")
     else: logging.warning("RoadTech schedule disabled")
