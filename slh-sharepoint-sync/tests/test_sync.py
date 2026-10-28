@@ -2,7 +2,12 @@ import importlib.util, pathlib, sys, types
 af=types.ModuleType("azure.functions"); af.FunctionApp=lambda:None
 class Dummy: pass
 af.TimerRequest=af.HttpRequest=Dummy; af.AuthLevel=types.SimpleNamespace(FUNCTION=1,ANONYMOUS=2)
-sys.modules.setdefault("azure.functions",af)
+az=types.ModuleType("azure"); az.functions=af
+sys.modules.setdefault("azure",az); sys.modules.setdefault("azure.functions",af)
+ai=types.ModuleType("azure.identity"); ai.DefaultAzureCredential=lambda:Dummy()
+ak=types.ModuleType("azure.keyvault.secrets"); ak.SecretClient=Dummy
+sys.modules.setdefault("azure.identity",ai); sys.modules.setdefault("azure.keyvault.secrets",ak)
+sys.modules.setdefault("requests",types.ModuleType("requests"))
 spec=importlib.util.spec_from_file_location("sync",pathlib.Path(__file__).parents[1]/"function_app.py")
 # Import helpers without evaluating decorators.
 src=(pathlib.Path(__file__).parents[1]/"function_app.py").read_text(); src=src.split("@app.function_name")[0]
@@ -30,3 +35,6 @@ def test_fleet_status_ownership():
  assert m.fleet_active("Active")=="Yes"
  assert m.fleet_active("VOR")=="Yes"
  assert m.fleet_active("Sold")=="No"
+def test_roadtech_time():
+ assert m.roadtech_time({"dataGps":{"Time":"2026-10-28T12:00:00Z"}})=="2026-10-28T12:00:00Z"
+ assert m.roadtech_time({}) is None
