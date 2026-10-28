@@ -73,3 +73,31 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as error:
             h.request('GET','https://secure.fleetio.com/api/v1/vehicles?secret=fake')
         assert str(error.exception) == 'HTTP 401 from secure.fleetio.com'
+
+    def test_registration_already_claimed_by_another_provider_id_is_refused(self):
+        row={'fields':{'FleetioId':'old-id','field_1':'AB12CDE'}}
+        assert m.choose([row],'FleetioId','new-id','field_1','AB12CDE') == (None,'ambiguous')
+
+    def test_zero_values_do_not_cause_repeated_updates(self):
+        assert m.delta({'speed':0},{'speed':'0'}) == {}
+
+    def test_lost_lease_stops_further_writes(self):
+        import threading
+        g=m.Graph();g.lock_lost=threading.Event();g.lock_lost.set()
+        with self.assertRaisesRegex(RuntimeError,'lease lost'):g.budget()
+
+    def test_patch_uses_etag_and_verifies_manual_fields(self):
+        class Response:
+            def __init__(self,d):self.d=d
+            def json(self):return self.d
+        before={'eTag':'original-version','fields':{'Title':'VEH01','field_14':'keep notes','FleetioName':'old'}}
+        after={'fields':{'Title':'VEH01','field_14':'keep notes','FleetioName':'new'}}
+        calls=[]
+        def req(method,path,**kw):
+            calls.append((method,kw))
+            return Response(before if len(calls)==1 else (after if len(calls)==3 else {}))
+        g=m.Graph();g.req=req
+        with patch.dict(os.environ,{'SLH_WRITES_VERIFIED':'true'}):g.update('vehicles','1',{'FleetioName':'new'})
+        assert calls[1][1]['headers']=={'If-Match':'original-version'}
+        assert g.evidence[0]['manual_fields_preserved']
+        assert g.writes==1
