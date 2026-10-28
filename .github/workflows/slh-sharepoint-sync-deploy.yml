@@ -1,0 +1,46 @@
+name: Deploy isolated SLH SharePoint sync Function
+on:
+  workflow_dispatch:
+  push:
+    branches: [slh-sharepoint-sync-preflight-20261028]
+    paths: ['.github/workflows/slh-sharepoint-sync-deploy.yml']
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Provision standalone Python Function infrastructure
+        shell: bash
+        env:
+          RG: slh-driver-register-sync-rg
+          APP: slh-sharepoint-sync-prod
+          STORAGE: slhsharepointsync26
+        run: |
+          set -euo pipefail
+          if ! az storage account show -g "$RG" -n "$STORAGE" >/dev/null 2>&1; then
+            az storage account create -g "$RG" -n "$STORAGE" -l uksouth --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 -o none
+          fi
+          if ! az functionapp show -g "$RG" -n "$APP" >/dev/null 2>&1; then
+            az functionapp create -g "$RG" -n "$APP" --storage-account "$STORAGE" --consumption-plan-location uksouth --runtime python --runtime-version 3.11 --functions-version 4 --os-type Linux -o none
+          fi
+          az functionapp config appsettings set -g "$RG" -n "$APP" --settings "SLH_SYNC_MODE=validate" "SHAREPOINT_SITE_ID=stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f" -o none
+          echo "Dedicated function exists, writes explicitly disabled."
+      - name: Zip standalone Azure Functions project
+        run: |
+          cd slh-sharepoint-sync
+          zip -r ../slh-function.zip function_app.py host.json requirements.txt
+      - name: Deploy Python Function (read-only preflight)
+        run: |
+          az functionapp deployment source config-zip -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --src slh-function.zip --build-remote true
+      - name: Confirm function provisioned
+        run: |
+          az functionapp show -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --query '{name:name,state:state,host:defaultHostName}' -o json
+          az functionapp function list -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --query '[].name' -o json
