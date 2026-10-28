@@ -1,4 +1,5 @@
-import hashlib, json, logging, os, re, time, random
+import hashlib, json, logging, os, re, time, random, threading
+from contextlib import contextmanager
 from urllib.parse import urlparse, urlencode
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -40,8 +41,39 @@ class Http:
             retry=r.headers.get('Retry-After','0')
             time.sleep(min(int(retry) if retry.isdigit() and int(retry)>0 else 2**attempt,60)+random.random())
 
+@contextmanager
+def sync_lock(source):
+    from azure.storage.blob import BlobServiceClient
+    from azure.core.exceptions import ResourceExistsError
+    connection=os.environ.get('AzureWebJobsStorage')
+    if not connection: raise RuntimeError('Existing host storage connection unavailable for sync lock')
+    service=BlobServiceClient.from_connection_string(connection)
+    container=service.get_container_client('slh-sync-locks')
+    try: container.create_container()
+    except ResourceExistsError: pass
+    blob=container.get_blob_client(source+'.lock')
+    try: blob.upload_blob(b'',overwrite=False)
+    except ResourceExistsError: pass
+    try: lease=blob.acquire_lease(lease_duration=60)
+    except Exception: raise RuntimeError('Another source synchronisation is running') from None
+    stop=threading.Event(); lost=threading.Event()
+    def renew():
+        while not stop.wait(20):
+            try: lease.renew()
+            except Exception: lost.set(); break
+    thread=threading.Thread(target=renew,daemon=True);thread.start()
+    try: yield lost
+    finally:
+        stop.set();thread.join(timeout=2)
+        try: lease.release()
+        except Exception: pass
+
 class Graph:
-    def __init__(self): self.h=Http()
+    def __init__(self, limit=None):
+        self.h=Http(); self.lock_lost=None; self.limit=limit; self.writes=0; self.evidence=[]
+    def budget(self):
+        if self.lock_lost and self.lock_lost.is_set(): raise RuntimeError('Sync lease lost; further writes stopped')
+        return self.limit is None or self.writes < self.limit
     def req(self, method, path, **kw):
         token=cred.get_token("https://graph.microsoft.com/.default").token
         headers=kw.pop("headers",{}); headers["Authorization"]="Bearer "+token
@@ -59,10 +91,28 @@ class Graph:
         raise RuntimeError('Automatic schema changes disabled; review existing columns first')
     def create(self,lid,fields):
         if os.getenv('SLH_WRITES_VERIFIED','false')!='true': raise RuntimeError('Production writes locked pending controlled verification')
-        return self.req("POST",f"/sites/{SITE}/lists/{lid}/items",json={"fields":fields}).json()
+        if not self.budget(): return None
+        # A Graph POST is deliberately not retried: an unknown outcome must be
+        # reconciled using the stable external ID on the next run.
+        token=cred.get_token("https://graph.microsoft.com/.default").token
+        try:
+            r=self.h.s.request("POST",GRAPH+f"/sites/{SITE}/lists/{lid}/items",headers={"Authorization":"Bearer "+token},json={"fields":fields},timeout=45)
+        except requests.RequestException: raise RuntimeError('Create outcome unknown; reconcile next run') from None
+        if not r.ok: raise RuntimeError(f'Graph create HTTP {r.status_code}')
+        row=r.json(); self.writes+=1; self.evidence.append({'list':lid,'item':row['id'],'operation':'insert','fields':sorted(fields)})
+        return row
     def update(self,lid,iid,fields):
         if os.getenv('SLH_WRITES_VERIFIED','false')!='true': raise RuntimeError('Production writes locked pending controlled verification')
-        return self.req("PATCH",f"/sites/{SITE}/lists/{lid}/items/{iid}/fields",json=fields).json()
+        if not self.budget(): return None
+        before=self.req('GET',f'/sites/{SITE}/lists/{lid}/items/{iid}?$expand=fields').json()
+        result=self.req("PATCH",f"/sites/{SITE}/lists/{lid}/items/{iid}/fields",headers={'If-Match':before['eTag']},json=fields).json()
+        check=self.req("GET",f"/sites/{SITE}/lists/{lid}/items/{iid}?$expand=fields").json()['fields']
+        if delta(check,fields): raise RuntimeError('SharePoint read-back mismatch')
+        manual={k:v for k,v in before['fields'].items() if (k=='Title' or k.startswith('field_')) and k not in fields}
+        preserved=all(check.get(k)==v for k,v in manual.items())
+        if not preserved: raise RuntimeError('Unrelated operational fields changed during write')
+        self.writes+=1; self.evidence.append({'list':lid,'item':iid,'operation':'update','fields':sorted(fields),'verified':True,'manual_fields_preserved':True})
+        return result
 
 def secret(name):
     vault=os.getenv("KEY_VAULT_URL","https://slh-lists-kv-261028.vault.azure.net/")
@@ -158,10 +208,11 @@ def fleet_active(status):
     return "No" if any(x in status.lower() for x in ("inactive","sold","disposed","retired","decommission")) else "Yes"
 
 COLS={
- "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","RoadTechVehicleId","RoadTechVehicleCode","RoadTechLastTelemetryUtc","RoadTechIgnition","RoadTechMoving","RoadTechOdometerKm","RoadTechLastSync"],
- "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
- "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
+ "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","FleetioIssuesCount"],
+ "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","FleetioIssuesCount"],
+ "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync","SageStartDate"],
  "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
+ "roadtech":["RoadTechVehicleCode","RoadTechLastTelemetryUtc","RoadTechIgnition","RoadTechMoving","RoadTechOdometerKm","RoadTechLatitude","RoadTechLongitude","RoadTechLocation","RoadTechSpeedKmh","RoadTechLastSync"],
  "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"]}
 
 def ensure_columns(g,key):
@@ -182,11 +233,14 @@ def choose(items, source_field, source_id, fallback_field, fallback):
     if len(exact)==1:return exact[0],"source"
     if len(exact)>1:return None,"ambiguous"
     fb=[x for x in items if norm(x["fields"].get(fallback_field))==norm(fallback)] if fallback else []
-    if len(fb)==1:return fb[0],"fallback"
+    if len(fb)==1:
+        assigned=fb[0]['fields'].get(source_field)
+        if assigned and norm(assigned)!=norm(source_id): return None,'ambiguous'
+        return fb[0],"fallback"
     return (None,"ambiguous") if len(fb)>1 else (None,"new")
 
 def delta(old, desired):
-    return {k:v for k,v in desired.items() if v is not None and str(old.get(k) or "")!=str(v)}
+    return {k:v for k,v in desired.items() if v is not None and str(old.get(k) if old.get(k) is not None else "")!=str(v)}
 
 def run_fleet(g,dry):
     assets=fleetio_assets(); reports=[]
@@ -194,6 +248,7 @@ def run_fleet(g,dry):
         names=field_names(g,key,dry); items=g.items(LISTS[key]); stats={"source":key,"retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
         sid=names["FleetioId"]; fallback="field_1"
         for a in assets:
+            if not dry and not g.budget(): break
             if fleet_kind(a)!=key: continue
             stats["retrieved"]+=1; aid=str(a.get("id") or ""); ident=trailer_id(a) if key=="trailers" else clean(a.get("license_plate") or a.get("name"))
             if key=="trailers":
@@ -201,20 +256,28 @@ def run_fleet(g,dry):
                 fb=[x for x in items if trailer_norm(x["fields"].get(fallback))==trailer_norm(ident)]
                 item,why=(exact[0],"source") if len(exact)==1 else ((None,"ambiguous") if len(exact)>1 or len(fb)>1 else ((fb[0],"fallback") if len(fb)==1 else (None,"new")))
             else: item,why=choose(items,sid,aid,fallback,ident)
+            if not aid: raise RuntimeError("Fleetio asset has no stable ID")
+            if item and item["fields"].get(sid) and norm(item["fields"][sid])!=norm(aid): item,why=None,"ambiguous"
             if why=="ambiguous": stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":aid,"identifier":ident,"name":clean(a.get("name"))}); continue
             status=fleet_status(a)
-            desired={sid:aid,names["FleetioName"]:clean(a.get("name")),names["FleetioVIN"]:clean(a.get("vin")),names["FleetioMake"]:clean(a.get("make_name") or a.get("make")),names["FleetioModel"]:clean(a.get("model_name") or a.get("model")),names["FleetioType"]:clean(a.get("vehicle_type_name") or a.get("type_name")),fallback:ident}
-            if key=="vehicles": desired.update({"field_10":status,"field_6":fleet_active(status)})
-            else: desired.update({"field_7":status,"field_5":fleet_active(status)})
+            desired={sid:aid,names["FleetioName"]:clean(a.get("name")),names["FleetioVIN"]:clean(a.get("vin")),names["FleetioMake"]:clean(a.get("make_name") or a.get("make")),names["FleetioModel"]:clean(a.get("model_name") or a.get("model")),names["FleetioType"]:clean(a.get("vehicle_type_name") or a.get("type_name")),fallback:ident,names["FleetioIssuesCount"]:clean(a.get("issues_count"))}
+            if key=="vehicles": desired.update({"field_10":status})
+            else: desired.update({"field_7":status})
             if item:
+                desired.pop(fallback,None)
                 stats["matched"]+=1; changes=delta(item["fields"],desired)
                 if changes:
                     changes[names["FleetioLastSync"]]=now(); stats["updated"]+=1
                     if not dry:g.update(LISTS[key],item["id"],changes)
             else:
-                desired["Title"]=clean(a.get("name")) or ident or aid; desired[names["FleetioLastSync"]]=now(); stats["created"]+=1
+                if not dry and os.getenv('SLH_CREATES_VERIFIED','false')!='true':
+                    stats['errors']+=1; continue
+                desired["Title"]="FLEETIO-"+aid; desired[names["FleetioLastSync"]]=now(); stats["created"]+=1
                 stats["new_candidates"].append({"id":aid,"identifier":ident,"name":clean(a.get("name"))})
-                if not dry:g.create(LISTS[key],desired)
+                if not dry:
+                    new=g.create(LISTS[key],desired)
+                    if new: items.append(new)
+                else: items.append({'id':'preview-'+aid,'fields':desired})
         reports.append(stats)
     return reports
 
@@ -226,24 +289,32 @@ def run_sage(g,dry):
     names=field_names(g,"drivers",dry); items=g.items(LISTS["drivers"]); stats={"source":"sage","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
     sid=names["SageHrId"]
     for p in sage_people():
+        if not dry and not g.budget(): break
         if not sage_driver(p):continue
-        stats["retrieved"]+=1; pid=str(p.get("id") or ""); emp=clean(p.get("employee_number")); title=emp or pid; name=display_name(p)
-        item,why=choose(items,sid,pid,"Title",title)
+        stats["retrieved"]+=1; pid=str(p.get("id") or ""); emp=clean(p.get("employee_number")); title="SAGE-"+pid; name=display_name(p)
+        item,why=choose(items,sid,pid,"SageEmployeeNumber",emp)
         if why=="new" and name:
             matches=[x for x in items if norm(x["fields"].get("field_1"))==norm(name)]
             if len(matches)==1:item,why=matches[0],"name"
             elif len(matches)>1:why="ambiguous"
+            if item and item["fields"].get(sid) and norm(item["fields"][sid])!=norm(pid): item,why=None,"ambiguous"
         if why=="ambiguous":stats["ambiguous"]+=1;stats["ambiguous_candidates"].append({"id":pid,"employee_number":emp,"name":name});continue
-        desired={sid:pid,names["SageEmployeeNumber"]:emp,names["SageEmploymentStatus"]:clean(p.get("employment_status")),names["SageEmail"]:clean(p.get("email")),names["SageMobile"]:clean(p.get("mobile")),"field_1":name}
+        desired={sid:pid,names["SageEmployeeNumber"]:emp,names["SageEmploymentStatus"]:clean(p.get("employment_status")),names["SageEmail"]:clean(p.get("email")),names["SageMobile"]:clean(p.get("mobile_phone")),names["SageStartDate"]:clean(p.get("employment_start_date")),"field_1":name}
         if item:
+            desired.pop("field_1",None)
             stats["matched"]+=1; changes=delta(item["fields"],desired)
             if changes:
                 changes[names["SageLastSync"]]=now();stats["updated"]+=1
                 if not dry:g.update(LISTS["drivers"],item["id"],changes)
         else:
+            if not dry and os.getenv('SLH_CREATES_VERIFIED','false')!='true':
+                stats['errors']+=1; continue
             desired["Title"]=title; desired[names["SageLastSync"]]=now();stats["created"]+=1
             stats["new_candidates"].append({"id":pid,"employee_number":emp,"name":name})
-            if not dry:g.create(LISTS["drivers"],desired)
+            if not dry:
+                new=g.create(LISTS['drivers'],desired)
+                if new: items.append(new)
+            else: items.append({'id':'preview-'+pid,'fields':desired})
     return [stats]
 
 def roadtech_time(row):
@@ -251,10 +322,14 @@ def roadtech_time(row):
     return clean(gps.get("Time") or gps.get("time"))
 
 def run_roadtech(g,dry):
-    names=field_names(g,"vehicles",dry); items=g.items(LISTS["vehicles"])
+    names={c['displayName']:c['name'] for c in g.columns(LISTS['vehicles'])}
+    for name in COLS['roadtech']:
+        if name not in names: raise RuntimeError('Reviewed RoadTech schema missing: '+name)
+    items=g.items(LISTS["vehicles"])
     stats={"source":"roadtech","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"unmatched":0,"unmatched_candidates":[],"ambiguous_candidates":[]}
-    sid=names["RoadTechVehicleId"]
+    sid=names["DotTrackingVehicleId"]
     for row in roadtech_telemetry():
+        if not dry and not g.budget(): break
         stats["retrieved"]+=1
         rid=clean(row.get("vehRtid")); code=clean(row.get("vehCode")); ident=norm(code)
         exact=[x for x in items if rid and norm(x["fields"].get(sid))==norm(rid)]
@@ -264,8 +339,8 @@ def run_roadtech(g,dry):
         item=exact[0] if len(exact)==1 else (fallback[0] if len(fallback)==1 else None)
         if not item:
             stats["unmatched"]+=1; stats["unmatched_candidates"].append({"id":rid,"identifier":code}); continue
-        stats["matched"]+=1; can=row.get("dataCan") or {}
-        desired={sid:rid,names["RoadTechVehicleCode"]:code,names["RoadTechLastTelemetryUtc"]:roadtech_time(row),names["RoadTechIgnition"]:clean(row.get("Ign")),names["RoadTechMoving"]:clean(can.get("Moving")),names["RoadTechOdometerKm"]:clean(can.get("OdoKm"))}
+        stats["matched"]+=1; can=row.get("dataCan") or {}; gps=row.get("dataGps") or {}; gaz=row.get("dataGaz") or {}
+        desired={sid:rid,names["RoadTechVehicleCode"]:code,names["RoadTechLastTelemetryUtc"]:roadtech_time(row),names["RoadTechIgnition"]:clean(row.get("Ign")),names["RoadTechMoving"]:clean(can.get("Moving")),names["RoadTechOdometerKm"]:clean(can.get("OdoKm")),names["RoadTechLatitude"]:clean(gps.get("Lat")),names["RoadTechLongitude"]:clean(gps.get("Long")),names["RoadTechSpeedKmh"]:clean(gps.get("KmH")),names["RoadTechLocation"]:clean(", ".join(str(gaz.get(k) or "") for k in ("Town","County","Country","PCode")).strip(", "))}
         changes=delta(item["fields"],desired)
         if changes:
             changes[names["RoadTechLastSync"]]=now(); stats["updated"]+=1
@@ -326,19 +401,29 @@ def log_result(g,source,status,started,reports,error=None):
         g.create(LISTS["log"],fields)
     except Exception: logging.exception("Sync_Log write failed")
 
-def execute(source="all",dry=None):
+def execute(source="all",dry=None,limit=None):
     dry=(os.getenv("SLH_SYNC_MODE","validate").lower()!="live") if dry is None else dry
-    g=Graph(); started=now(); reports=[]
+    if dry: return execute_inner(source,True,limit)
+    if source=='all': raise RuntimeError('Run one provider at a time for controlled source locking')
+    with sync_lock(source) as lost: return execute_inner(source,False,limit,lost)
+
+def execute_inner(source="all",dry=None,limit=None,lost=None):
+    dry=(os.getenv("SLH_SYNC_MODE","validate").lower()!="live") if dry is None else dry
+    g=Graph(limit); g.lock_lost=lost; started=now(); reports=[]
     try:
         if source in ("all","fleetio"): reports+=run_fleet(g,dry)
         if source in ("all","sage"): reports+=run_sage(g,dry)
         if source in ("all","roadtech"): reports+=run_roadtech(g,dry)
         if source in ("all","samsara"): reports+=run_samsara(g,dry)
         status="dry-run" if dry else "success"
-        if not dry: log_result(g,source,status,started,reports)
-        return {"status":status,"started":started,"finished":now(),"reports":reports}
+        if not dry:
+            limit_saved=g.limit; g.limit=None
+            log_result(g,source,status,started,reports)
+            g.limit=limit_saved
+        logging.info('SLH_SYNC_RESULT %s',json.dumps({'source':source,'status':status,'reports':[{k:v for k,v in r.items() if not isinstance(v,list)} for r in reports]}))
+        return {"status":status,"started":started,"finished":now(),"reports":reports,"writes":g.writes,"evidence":g.evidence}
     except Exception as e:
-        logging.exception("sync failed")
+        logging.error("SLH_SYNC_FAILURE source=%s error_type=%s",source,type(e).__name__)
         if not dry:log_result(g,source,"failed",started,reports,e)
         raise
 
@@ -370,7 +455,7 @@ def scheduled_samsara(timer:func.TimerRequest):
 def manual(req:func.HttpRequest):
     source=req.params.get("source","all").lower(); dry=req.params.get("dry_run")
     if source not in ("all","fleetio","sage","roadtech","samsara"):return func.HttpResponse("invalid source",status_code=400)
-    try:return func.HttpResponse(json.dumps(execute(source,None if dry is None else dry.lower()=="true")),mimetype="application/json")
+    try:return func.HttpResponse(json.dumps(execute(source,None if dry is None else dry.lower()=="true",int(req.params["max_writes"]) if req.params.get("max_writes") else None)),mimetype="application/json")
     except Exception as e:return func.HttpResponse(json.dumps({"status":"failed","error_type":type(e).__name__}),status_code=500,mimetype="application/json")
 
 @app.function_name(name="Health")
@@ -416,3 +501,18 @@ def preflight(req:func.HttpRequest):
         report.update(status='failed',error_type=type(e).__name__,error=str(e) if isinstance(e,RuntimeError) else 'Authentication or provider check failed')
         logging.warning('SLH_PREFLIGHT %s',json.dumps({'source':source,'status':'failed','error_type':type(e).__name__,'writes':0}))
         return func.HttpResponse(json.dumps(report),mimetype='application/json',status_code=502)
+
+
+@app.function_name(name="ProvisionReviewedSchema")
+@app.route(route="provision-schema",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
+def provision_schema(req:func.HttpRequest):
+    source=req.params.get('source')
+    if source not in ('roadtech','samsara','fleetio','sage'): return func.HttpResponse('invalid source',status_code=400)
+    g=Graph(); targets={'fleetio':{'vehicles':['FleetioIssuesCount'],'trailers':['FleetioIssuesCount']},'sage':{'drivers':['SageStartDate']},'roadtech':{'vehicles':COLS['roadtech']},'samsara':{'vehicles':['SamsaraId'],'geofences':COLS['geofences']}}[source]; report=[]
+    for key,fields in targets.items():
+        existing=g.columns(LISTS[key]); names={norm(c['name']) for c in existing}|{norm(c['displayName']) for c in existing}
+        for name in fields:
+            if norm(name) in names: continue
+            g.req('POST',f'/sites/{SITE}/lists/{LISTS[key]}/columns',json={'name':name,'text':{'maxLength':255}})
+            names.add(norm(name));report.append({'list':key,'field':name})
+    return func.HttpResponse(json.dumps({'created':report}),mimetype='application/json')
