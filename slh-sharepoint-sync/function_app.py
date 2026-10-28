@@ -1,4 +1,4 @@
-import json, logging, os, re, time
+import hashlib, json, logging, os, re, time
 from datetime import datetime, timezone
 import azure.functions as func
 import requests
@@ -69,6 +69,32 @@ def sage_people():
         page+=1
     return out
 
+def roadtech_telemetry():
+    """Retrieve Falcon current telemetry using the verified RoadTech API contract."""
+    base=os.getenv("ROADTECH_BASE_URL","").rstrip("/")
+    company=os.getenv("ROADTECH_COMPANY_CODE","")
+    if not base or not company: raise RuntimeError("RoadTech base URL/company code not configured")
+    api_key=secret("tacho-api-key"); username=secret("tacho-username"); password=secret("tacho-password")
+    h=Http({"APIKEY":api_key,"Accept":"application/json","Content-Type":"application/json"})
+    login={"User":username,"Pass":password,"OsVersion":"1.0","OsName":"Azure Function","PcName":"slh-sharepoint-sync-prod","AuthType":"password"}
+    r=h.request("POST",base+"/auth/login",json=login)
+    data=r.json(); sid=(data.get("SID") or data.get("sid")) if isinstance(data,dict) else None
+    if not sid:
+        login["Pass"]=hashlib.sha1(password.encode()).hexdigest()
+        data=h.request("POST",base+"/auth/login",json=login).json()
+        sid=(data.get("SID") or data.get("sid")) if isinstance(data,dict) else None
+    if not sid: raise RuntimeError("RoadTech authentication returned no session ID")
+    h.s.headers.update({"SID":str(sid)})
+    rows=[]; offset=0
+    while True:
+        body={"CompCode":company,"T":datetime.now(UTC).strftime("%Y-%m-%d"),"DataMask":5,"Offset":offset,"OnlyLive":1}
+        page=h.request("POST",base+"/Falcon/GetCurrentTelemetry",json=body).json()
+        batch=(page.get("Data") or page.get("data") or []) if isinstance(page,dict) else []
+        rows.extend(batch)
+        if not (page.get("MoreData") or page.get("moreData")) or not batch: break
+        offset+=len(batch)
+    return rows
+
 def fleet_kind(a):
     t=" ".join(str(a.get(k) or "") for k in ("vehicle_type_name","type_name","name","group_name")).upper()
     if "TRAILER" in t: return "trailers"
@@ -97,7 +123,7 @@ def fleet_active(status):
     return "No" if any(x in status.lower() for x in ("inactive","sold","disposed","retired","decommission")) else "Yes"
 
 COLS={
- "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
+ "vehicles":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync","RoadTechVehicleId","RoadTechVehicleCode","RoadTechLastTelemetryUtc","RoadTechIgnition","RoadTechMoving","RoadTechOdometerKm","RoadTechLastSync"],
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
  "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"]}
@@ -184,6 +210,32 @@ def run_sage(g,dry):
             if not dry:g.create(LISTS["drivers"],desired)
     return [stats]
 
+def roadtech_time(row):
+    gps=row.get("dataGps") or {}
+    return clean(gps.get("Time") or gps.get("time"))
+
+def run_roadtech(g,dry):
+    names=field_names(g,"vehicles",dry); items=g.items(LISTS["vehicles"])
+    stats={"source":"roadtech","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"unmatched":0,"unmatched_candidates":[],"ambiguous_candidates":[]}
+    sid=names["RoadTechVehicleId"]
+    for row in roadtech_telemetry():
+        stats["retrieved"]+=1
+        rid=clean(row.get("vehRtid")); code=clean(row.get("vehCode")); ident=norm(code)
+        exact=[x for x in items if rid and norm(x["fields"].get(sid))==norm(rid)]
+        fallback=[x for x in items if ident and norm(x["fields"].get("field_1"))==ident]
+        if len(exact)>1 or (not exact and len(fallback)>1):
+            stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"id":rid,"identifier":code}); continue
+        item=exact[0] if len(exact)==1 else (fallback[0] if len(fallback)==1 else None)
+        if not item:
+            stats["unmatched"]+=1; stats["unmatched_candidates"].append({"id":rid,"identifier":code}); continue
+        stats["matched"]+=1; can=row.get("dataCan") or {}
+        desired={sid:rid,names["RoadTechVehicleCode"]:code,names["RoadTechLastTelemetryUtc"]:roadtech_time(row),names["RoadTechIgnition"]:clean(row.get("Ign")),names["RoadTechMoving"]:clean(can.get("Moving")),names["RoadTechOdometerKm"]:clean(can.get("OdoKm"))}
+        changes=delta(item["fields"],desired)
+        if changes:
+            changes[names["RoadTechLastSync"]]=now(); stats["updated"]+=1
+            if not dry:g.update(LISTS["vehicles"],item["id"],changes)
+    return [stats]
+
 def log_result(g,source,status,started,reports,error=None):
     try:
         names=ensure_columns(g,"log"); totals=lambda k:sum(x.get(k,0) for x in reports)
@@ -199,6 +251,7 @@ def execute(source="all",dry=None):
     try:
         if source in ("all","fleetio"): reports+=run_fleet(g,dry)
         if source in ("all","sage"): reports+=run_sage(g,dry)
+        if source in ("all","roadtech"): reports+=run_roadtech(g,dry)
         status="dry-run" if dry else "success"
         if not dry: log_result(g,source,status,started,reports)
         return {"status":status,"started":started,"finished":now(),"reports":reports}
@@ -217,11 +270,17 @@ def scheduled_sage(timer:func.TimerRequest):
     if os.getenv("SAGE_SYNC_ENABLED","false").lower()=="true": execute("sage")
     else: logging.warning("Sage HR schedule disabled: credential validation required")
 
+@app.function_name(name="ScheduledRoadTechSync")
+@app.schedule(schedule="0 */15 * * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+def scheduled_roadtech(timer:func.TimerRequest):
+    if os.getenv("ROADTECH_SYNC_ENABLED","false").lower()=="true": execute("roadtech")
+    else: logging.warning("RoadTech schedule disabled")
+
 @app.function_name(name="ManualMasterDataSync")
 @app.route(route="sync",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
 def manual(req:func.HttpRequest):
     source=req.params.get("source","all").lower(); dry=req.params.get("dry_run")
-    if source not in ("all","fleetio","sage"):return func.HttpResponse("invalid source",status_code=400)
+    if source not in ("all","fleetio","sage","roadtech"):return func.HttpResponse("invalid source",status_code=400)
     try:return func.HttpResponse(json.dumps(execute(source,None if dry is None else dry.lower()=="true")),mimetype="application/json")
     except Exception as e:return func.HttpResponse(json.dumps({"status":"failed","error":str(e)}),status_code=500,mimetype="application/json")
 
