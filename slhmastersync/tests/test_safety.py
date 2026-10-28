@@ -24,6 +24,12 @@ with patch.dict(sys.modules, modules):
     exec(compile(src, 'function_app.py', 'exec'), m.__dict__)
 
 class SafetyTests(unittest.TestCase):
+    def test_uk_schedule_tracks_bst_and_gmt(self):
+        from datetime import datetime, timezone
+        for month, morning, afternoon in ((1,6,16),(7,5,15)):
+            assert m.uk_master_sync_due(datetime(2026,month,15,morning,tzinfo=timezone.utc))
+            assert m.uk_master_sync_due(datetime(2026,month,15,afternoon,tzinfo=timezone.utc))
+            assert not m.uk_master_sync_due(datetime(2026,month,15,morning+1,tzinfo=timezone.utc))
     def test_unverified_writes_are_locked(self):
         with patch.dict(os.environ, {'SLH_WRITES_VERIFIED':'false'}):
             g = m.Graph()
