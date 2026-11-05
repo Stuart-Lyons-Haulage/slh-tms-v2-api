@@ -403,7 +403,8 @@ def execute(source="all",dry=None):
     try:
         if source in ("all","fleetio"): reports+=run_fleet(g,dry)
         if source in ("all","tacho"): reports+=run_tacho(g,dry)
-        if source in ("all","sage"): reports+=run_sage(g,dry)\n        if source in ("all","sage_leave","sage"): reports+=sage_leave(g,dry)
+        if source in ("all","sage"): reports+=run_sage(g,dry)
+        if source in ("all","sage_leave","sage"): reports+=sage_leave(g,dry)
         if source in ("all","roadtech"): reports+=run_roadtech(g,dry)
         if source in ("all","samsara"): reports+=run_samsara(g,dry)
         status="dry-run" if dry else "success"
