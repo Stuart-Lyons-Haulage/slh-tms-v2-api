@@ -388,6 +388,12 @@ def execute(source="all",dry=None):
 @app.schedule(schedule="0 15 3 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
 def scheduled_fleetio(timer:func.TimerRequest): execute("fleetio")
 
+@app.function_name(name="ScheduledTachoSync")
+@app.schedule(schedule="0 30 3 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
+def scheduled_tacho(timer:func.TimerRequest):
+    if os.getenv("TACHO_SYNC_ENABLED","false").lower()=="true": execute("tacho")
+    else: logging.warning("TachoMaster schedule disabled")
+
 @app.function_name(name="ScheduledSageSync")
 @app.schedule(schedule="0 45 3 * * *",arg_name="timer",run_on_startup=False,use_monitor=True)
 def scheduled_sage(timer:func.TimerRequest):
