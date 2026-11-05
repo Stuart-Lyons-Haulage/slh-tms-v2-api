@@ -142,7 +142,7 @@ COLS={
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
  "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
- "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"]}
+ "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"],\n "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"]}
 
 def ensure_columns(g,key):
     existing={c["displayName"]:c["name"] for c in g.columns(LISTS[key])}
@@ -287,6 +287,35 @@ def run_sage(g,dry):
             if not dry:g.create(LISTS["drivers"],desired)
     return [stats]
 
+def sage_leave(g,dry):
+    names=field_names(g,"leave",dry); items=g.items(LISTS["leave"]); stats={"source":"sage-leave","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
+    people=sage_people(); drivers={str(p.get("id")):p for p in people if sage_driver(p)}
+    base=os.getenv("SAGE_BASE_URL","https://stuartlyonshaulage.sage.hr/api").rstrip("/")
+    h=Http({"X-Auth-Token":secret("sage-api-key"),"User-Agent":"SLH-SharePoint-Sync/1.0","Accept":"application/json"})
+    for offset in range(14):
+        date=(datetime.now(UTC).date()).fromordinal(datetime.now(UTC).date().toordinal()+offset).isoformat()
+        data=h.request("GET",f"{base}/leave-management/out-of-office-today?date={date}").json()
+        rows=data.get("data",[]) if isinstance(data,dict) else (data or [])
+        for leave in rows:
+            employee=drivers.get(str(leave.get("employee_id")))
+            if not employee: continue
+            stats["retrieved"]+=1
+            emp=clean(employee.get("employee_number")); name=display_name(employee); start=clean(leave.get("start_date")) or date; end=clean(leave.get("end_date")) or start
+            policy=clean((leave.get("policy") or {}).get("name")) if isinstance(leave.get("policy"),dict) else clean(leave.get("policy"))
+            key=f"{emp}|{start}|{policy or ''}"
+            exact=[x for x in items if norm(x["fields"].get(names["EmployeeNumber"]))==norm(emp) and str(x["fields"].get(names["LeaveDate"]) or "")[:10]==str(start)[:10] and norm(x["fields"].get(names["LeaveType"]))==norm(policy)]
+            desired={names["SageEmployeeId"]:str(leave.get("employee_id")),names["EmployeeNumber"]:emp,names["DriverName"]:name,names["LeaveDate"]:start,names["LeaveEndDate"]:end,names["LeaveType"]:policy,names["LeaveDetails"]:clean(leave.get("details")),names["IsPartDay"]:str(bool(leave.get("is_part_of_day"))),names["Hours"]:clean(leave.get("hours")),names["SageLastSync"]:now()}
+            if len(exact)>1: stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"key":key}); continue
+            if exact:
+                stats["matched"]+=1; changes=delta(exact[0]["fields"],desired)
+                if changes:
+                    stats["updated"]+=1
+                    if not dry:g.update(LISTS["leave"],exact[0]["id"],changes)
+            else:
+                desired["Title"]=key; stats["created"]+=1; stats["new_candidates"].append({"key":key})
+                if not dry:g.create(LISTS["leave"],desired)
+    return [stats]
+
 def roadtech_time(row):
     gps=row.get("dataGps") or {}
     return clean(gps.get("Time") or gps.get("time"))
@@ -373,7 +402,7 @@ def execute(source="all",dry=None):
     try:
         if source in ("all","fleetio"): reports+=run_fleet(g,dry)
         if source in ("all","tacho"): reports+=run_tacho(g,dry)
-        if source in ("all","sage"): reports+=run_sage(g,dry)
+        if source in ("all","sage"): reports+=run_sage(g,dry)\n        if source in ("all","sage_leave","sage"): reports+=sage_leave(g,dry)
         if source in ("all","roadtech"): reports+=run_roadtech(g,dry)
         if source in ("all","samsara"): reports+=run_samsara(g,dry)
         status="dry-run" if dry else "success"
@@ -416,7 +445,7 @@ def scheduled_samsara(timer:func.TimerRequest):
 @app.route(route="sync",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
 def manual(req:func.HttpRequest):
     source=req.params.get("source","all").lower(); dry=req.params.get("dry_run")
-    if source not in ("all","fleetio","sage","tacho","roadtech","samsara"):return func.HttpResponse("invalid source",status_code=400)
+    if source not in ("all","fleetio","sage","sage_leave","tacho","roadtech","samsara"):return func.HttpResponse("invalid source",status_code=400)
     try:return func.HttpResponse(json.dumps(execute(source,None if dry is None else dry.lower()=="true")),mimetype="application/json")
     except Exception as e:return func.HttpResponse(json.dumps({"status":"failed","error":str(e)}),status_code=500,mimetype="application/json")
 
