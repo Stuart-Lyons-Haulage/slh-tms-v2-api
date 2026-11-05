@@ -47,7 +47,7 @@ jobs:
         run: |
           cd slh-sharepoint-sync
           zip -r ../slh-function.zip function_app.py host.json requirements.txt
-          az functionapp deployment source config-zip -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --src ../slh-function.zip --build-remote true
+          az functionapp deployment source config-zip -g slh-tms-prod-rg -n slh-master-drivers-sync --src ../slh-function.zip --build-remote true
       - name: Verify registered functions
         run: |
           az functionapp function list -g slh-tms-prod-rg -n slh-master-drivers-sync --query '[].name' -o json
