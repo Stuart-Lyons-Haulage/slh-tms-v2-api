@@ -44,6 +44,7 @@ jobs:
             TRAILERS_LIST_ID=a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c \
             SITES_LIST_ID=362ecad6-71a2-45dd-8d8c-0af30d3dc945 \
             LEAVE_LIST_ID=c2ac0d5c-8337-44ff-bbbc-ea55f9133e31 \
+            CLAIMS_LIST_ID=56c2b084-79ce-411b-bab1-407905a75634 \
              -o none
       - name: Package and deploy
         run: |
