@@ -77,7 +77,7 @@ def fleetio_post_incident_match(payload):
     for item in claim_items:
         fields=item["fields"]; lookup=str(fields.get("VehicleLookupLookupId") or "")
         values=[str(v) for v in fields.values() if v is not None]
-        date_match=any(incident_date in v[:10] for v in values if re.match(r"^\\d{4}-\\d{2}-\\d{2}",v))
+        date_match=any(incident_date in v[:10] for v in values if re.match(r"^\d{4}-\d{2}-\d{2}",v))
         reg_match=vehicle_regs.get(lookup)==norm(registration) or any(norm(registration) in norm(v) for v in values)
         if date_match and reg_match: match=item; break
     if not match:
@@ -170,7 +170,8 @@ COLS={
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
  "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
  "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"],
- "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"],\n "claims":["FleetioInspectionId","FleetioVehicleId","FleetioRegistration","FleetioSubmittedAt","FleetioInspectionForm","PostIncidentStatus"]}
+ "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"],
+ "claims":["FleetioInspectionId","FleetioVehicleId","FleetioRegistration","FleetioSubmittedAt","FleetioInspectionForm","PostIncidentStatus"]}
 
 def ensure_columns(g,key):
     existing={c["displayName"]:c["name"] for c in g.columns(LISTS[key])}
