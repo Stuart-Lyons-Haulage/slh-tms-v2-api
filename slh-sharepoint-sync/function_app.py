@@ -9,7 +9,7 @@ app = func.FunctionApp()
 UTC = timezone.utc
 GRAPH = "https://graph.microsoft.com/v1.0"
 SITE = os.getenv("SHAREPOINT_SITE_ID", "stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f")
-LISTS = {"vehicles": os.getenv("VEHICLES_LIST_ID", "8d96865a-b7dc-40c0-9947-468542800bd4"), "trailers": os.getenv("TRAILERS_LIST_ID", "a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c"), "drivers": os.getenv("DRIVERS_LIST_ID", "2b89c3fc-d83e-424b-81b9-8e2546fabb78"), "geofences": os.getenv("GEOFENCES_LIST_ID", "0d8cd682-0603-4224-9acb-db49ba289475"), "log": os.getenv("SYNC_LOG_LIST_ID", "ff965828-ca04-4374-aec9-b8b500e234b1")}
+LISTS = {"vehicles": os.getenv("VEHICLES_LIST_ID", "8d96865a-b7dc-40c0-9947-468542800bd4"), "trailers": os.getenv("TRAILERS_LIST_ID", "a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c"), "drivers": os.getenv("DRIVERS_LIST_ID", "c8d1d700-a1ce-4920-b349-f2a3a6e09982"), "geofences": os.getenv("GEOFENCES_LIST_ID", "0d8cd682-0603-4224-9acb-db49ba289475"), "log": os.getenv("SYNC_LOG_LIST_ID", "b681f046-d299-4a1b-8a33-653f600752b8")}
 cred = DefaultAzureCredential()
 
 def norm(v): return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
@@ -116,6 +116,8 @@ def fleet_kind(a):
 
 def sage_driver(p):
     s=" ".join(str(p.get(k) or "") for k in ("team","team_name","position","position_name","job_title")).lower()
+    agency=" ".join(str(p.get(k) or "") for k in ("agency","agency_name","employment_type","worker_type")).lower()
+    if "agency" in agency or "agency" in s: return False
     return any(x in s for x in ("driver","hgv","class 1","class 2"))
 
 def trailer_id(a):
@@ -199,6 +201,67 @@ def run_fleet(g,dry):
 def display_name(p):
     first=clean(p.get("first_name")) or ""; last=clean(p.get("last_name")) or ""
     return (f"{last}, {first}" if last else first).strip(", ")
+
+
+def tacho_login():
+    base=os.getenv("TACHO_BASE_URL",os.getenv("ROADTECH_BASE_URL","")).rstrip("/")
+    if not base: raise RuntimeError("TachoMaster/RoadTech base URL not configured")
+    h=Http({"APIKEY":secret("tacho-api-key"),"Accept":"application/json","Content-Type":"application/json"})
+    username=secret("tacho-username"); password=secret("tacho-password")
+    body={"User":username,"Pass":password,"OsVersion":"1.0","OsName":"Azure Function","PcName":"slh-master-drivers-sync","AuthType":"password"}
+    data=h.request("POST",base+"/auth/login",json=body).json()
+    sid=(data.get("SID") or data.get("sid") or data.get("token") or data.get("Token")) if isinstance(data,dict) else None
+    if not sid:
+        body["Pass"]=hashlib.sha1(password.encode()).hexdigest()
+        data=h.request("POST",base+"/auth/login",json=body).json()
+        sid=(data.get("SID") or data.get("sid") or data.get("token") or data.get("Token")) if isinstance(data,dict) else None
+    if not sid: raise RuntimeError("TachoMaster login returned no SID")
+    h.s.headers.update({"SID":str(sid)})
+    return h,base
+
+def tacho_members():
+    h,base=tacho_login(); out=[]; offset=0
+    for _ in range(100):
+        data=h.request("POST",base+"/Member/GetMembersLong",json={"Offset":offset,"OnlyLiveMembers":False}).json()
+        page=data.get("Data") or data.get("data") or data.get("Members") or []
+        if isinstance(page,dict): page=page.get("Data",[])
+        out.extend(page)
+        more=bool(data.get("MoreData") or data.get("moreData"))
+        count=int(data.get("RecordCount") or data.get("recordCount") or len(page))
+        if not more or not page: break
+        offset+=count
+    return out
+
+def tacho_name(p):
+    given=clean(p.get("GivenNames") or p.get("givenNames") or p.get("CName") or p.get("cName"))
+    surname=clean(p.get("Surname") or p.get("surname") or p.get("SName") or p.get("sName"))
+    return " ".join(x for x in (given,surname) if x).strip()
+
+def run_tacho(g,dry):
+    items=g.items(LISTS["drivers"])
+    cols={c["displayName"]:c["name"] for c in g.columns(LISTS["drivers"])}
+    def col(name): return cols.get(name,name)
+    stats={"source":"tachomaster","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
+    for p in tacho_members():
+        member=clean(p.get("MemCode") or p.get("memCode") or p.get("MemberCode") or p.get("memberCode"))
+        name=tacho_name(p)
+        if not member or not name: continue
+        stats["retrieved"]+=1
+        exact=[x for x in items if norm(x["fields"].get(col("MemberCode")))==norm(member)]
+        fallback=[x for x in items if norm(x["fields"].get(col("Name")))==norm(name)]
+        if len(exact)>1 or (not exact and len(fallback)>1):
+            stats["ambiguous"]+=1; stats["ambiguous_candidates"].append({"memberCode":member,"name":name}); continue
+        item=exact[0] if len(exact)==1 else (fallback[0] if len(fallback)==1 else None)
+        desired={col("MemberCode"):member,col("Name"):name,col("CardNumber"):clean(p.get("CardNoShort") or p.get("cardNoShort") or p.get("CardNumber")),col("TachoLastSync"):now()}
+        if item:
+            stats["matched"]+=1; changes=delta(item["fields"],desired)
+            if changes:
+                stats["updated"]+=1
+                if not dry:g.update(LISTS["drivers"],item["id"],changes)
+        else:
+            desired["Title"]=name; stats["created"]+=1; stats["new_candidates"].append({"memberCode":member,"name":name})
+            if not dry:g.create(LISTS["drivers"],desired)
+    return [stats]
 
 def run_sage(g,dry):
     names=field_names(g,"drivers",dry); items=g.items(LISTS["drivers"]); stats={"source":"sage","retrieved":0,"matched":0,"created":0,"updated":0,"ambiguous":0,"errors":0,"new_candidates":[],"ambiguous_candidates":[]}
@@ -309,6 +372,7 @@ def execute(source="all",dry=None):
     g=Graph(); started=now(); reports=[]
     try:
         if source in ("all","fleetio"): reports+=run_fleet(g,dry)
+        if source in ("all","tacho"): reports+=run_tacho(g,dry)
         if source in ("all","sage"): reports+=run_sage(g,dry)
         if source in ("all","roadtech"): reports+=run_roadtech(g,dry)
         if source in ("all","samsara"): reports+=run_samsara(g,dry)
@@ -346,7 +410,7 @@ def scheduled_samsara(timer:func.TimerRequest):
 @app.route(route="sync",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
 def manual(req:func.HttpRequest):
     source=req.params.get("source","all").lower(); dry=req.params.get("dry_run")
-    if source not in ("all","fleetio","sage","roadtech","samsara"):return func.HttpResponse("invalid source",status_code=400)
+    if source not in ("all","fleetio","sage","tacho","roadtech","samsara"):return func.HttpResponse("invalid source",status_code=400)
     try:return func.HttpResponse(json.dumps(execute(source,None if dry is None else dry.lower()=="true")),mimetype="application/json")
     except Exception as e:return func.HttpResponse(json.dumps({"status":"failed","error":str(e)}),status_code=500,mimetype="application/json")
 
