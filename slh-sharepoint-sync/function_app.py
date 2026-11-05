@@ -59,6 +59,33 @@ def fleetio_assets():
         if not url and isinstance(data,dict): url=data.get("next_page_url")
     return out
 
+def fleetio_post_incident_match(payload):
+    body=payload.get("payload",payload) if isinstance(payload,dict) else {}
+    vehicle_id=str(body.get("vehicle_id") or "")
+    inspection_id=str(body.get("id") or "")
+    submitted=clean(body.get("submitted_at") or body.get("started_at")) or now()
+    if not vehicle_id or not inspection_id:
+        return {"status":"ignored","reason":"vehicle_id or inspection id missing"}
+    assets=fleetio_assets()
+    asset=next((a for a in assets if str(a.get("id") or "")==vehicle_id),None)
+    registration=clean((asset or {}).get("license_plate") or (asset or {}).get("name"))
+    if not registration: return {"status":"unmatched","reason":"Fleetio vehicle registration not found","vehicle_id":vehicle_id}
+    incident_date=str(submitted)[:10]
+    g=Graph(); claim_names=field_names(g,"claims",False); claim_items=g.items(LISTS["claims"]); vehicle_items=g.items(LISTS["vehicles"])
+    vehicle_regs={str(v["id"]):norm(v["fields"].get("field_1")) for v in vehicle_items}
+    match=None
+    for item in claim_items:
+        fields=item["fields"]; lookup=str(fields.get("VehicleLookupLookupId") or "")
+        values=[str(v) for v in fields.values() if v is not None]
+        date_match=any(incident_date in v[:10] for v in values if re.match(r"^\\d{4}-\\d{2}-\\d{2}",v))
+        reg_match=vehicle_regs.get(lookup)==norm(registration) or any(norm(registration) in norm(v) for v in values)
+        if date_match and reg_match: match=item; break
+    if not match:
+        return {"status":"unmatched","registration":registration,"incident_date":incident_date,"inspection_id":inspection_id}
+    updates={claim_names["FleetioInspectionId"]:inspection_id,claim_names["FleetioVehicleId"]:vehicle_id,claim_names["FleetioRegistration"]:registration,claim_names["FleetioSubmittedAt"]:submitted,claim_names["FleetioInspectionForm"]:clean((body.get("inspection_form") or {}).get("title")) if isinstance(body.get("inspection_form"),dict) else None,claim_names["PostIncidentStatus"]:"Matched"}
+    g.update(LISTS["claims"],match["id"],{k:v for k,v in updates.items() if v is not None})
+    return {"status":"matched","claim_item_id":match["id"],"registration":registration,"incident_date":incident_date,"inspection_id":inspection_id}
+
 def sage_people():
     h=Http({"X-Auth-Token":secret("sage-api-key"),"User-Agent":"SLH-SharePoint-Sync/1.0","Accept":"application/json"}); out=[]; page=1
     while True:
@@ -143,7 +170,7 @@ COLS={
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
  "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
  "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"],
- "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"]}
+ "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"],\n "claims":["FleetioInspectionId","FleetioVehicleId","FleetioRegistration","FleetioSubmittedAt","FleetioInspectionForm","PostIncidentStatus"]}
 
 def ensure_columns(g,key):
     existing={c["displayName"]:c["name"] for c in g.columns(LISTS[key])}
@@ -442,6 +469,16 @@ def scheduled_roadtech(timer:func.TimerRequest):
 def scheduled_samsara(timer:func.TimerRequest):
     if os.getenv("SAMSARA_SYNC_ENABLED","false").lower()=="true": execute("samsara")
     else: logging.warning("Samsara schedule disabled")
+
+@app.function_name(name="FleetioPostIncidentWebhook")
+@app.route(route="fleetio-post-incident",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
+def fleetio_post_incident(req:func.HttpRequest):
+    try:
+        payload=req.get_json()
+        return func.HttpResponse(json.dumps(fleetio_post_incident_match(payload)),mimetype="application/json",status_code=200)
+    except Exception as e:
+        logging.exception("Fleetio post-incident webhook failed")
+        return func.HttpResponse(json.dumps({"status":"failed","error":str(e)[:240]}),mimetype="application/json",status_code=500)
 
 @app.function_name(name="ManualMasterDataSync")
 @app.route(route="sync",methods=["POST"],auth_level=func.AuthLevel.FUNCTION)
