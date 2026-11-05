@@ -27,7 +27,7 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Configure dedicated Function
         run: |
-          az functionapp config appsettings set -g slh-tms-prod-rg -n slh-master-drivers-sync --settings \
+          az functionapp config appsettings set -g slh-tms-prod-rg -n slh-master-drivers-sync-v2 --settings \
             WEBSITE_RUN_FROM_PACKAGE=1 \
             KEY_VAULT_URL=https://kv-slh-tms-v3.vault.azure.net/ \
             SLH_SYNC_MODE=live \
@@ -48,7 +48,7 @@ jobs:
         run: |
           cd slh-sharepoint-sync
           zip -r ../slh-function.zip function_app.py host.json requirements.txt
-          az functionapp deployment source config-zip -g slh-tms-prod-rg -n slh-master-drivers-sync --src ../slh-function.zip --build-remote true
+          az functionapp deployment source config-zip -g slh-tms-prod-rg -n slh-master-drivers-sync-v2 --src ../slh-function.zip --build-remote true
       - name: Verify registered functions
         run: |
-          az functionapp function list -g slh-tms-prod-rg -n slh-master-drivers-sync --query '[].name' -o json
+          az functionapp function list -g slh-tms-prod-rg -n slh-master-drivers-sync-v2 --query '[].name' -o json
