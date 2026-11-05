@@ -28,6 +28,7 @@ jobs:
       - name: Configure dedicated Function
         run: |
           az functionapp config appsettings set -g slh-tms-prod-rg -n slh-master-drivers-sync --settings \
+            WEBSITE_RUN_FROM_PACKAGE=1 \
             KEY_VAULT_URL=https://kv-slh-tms-v3.vault.azure.net/ \
             SLH_SYNC_MODE=live \
             SAGE_SYNC_ENABLED=true \
