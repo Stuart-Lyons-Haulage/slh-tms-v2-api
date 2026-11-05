@@ -142,7 +142,8 @@ COLS={
  "trailers":["FleetioId","FleetioName","FleetioVIN","FleetioMake","FleetioModel","FleetioType","FleetioLastSync"],
  "drivers":["SageHrId","SageEmployeeNumber","SageEmploymentStatus","SageEmail","SageMobile","SageLastSync"],
  "geofences":["SamsaraId","SamsaraName","SamsaraFormattedAddress","SamsaraLatitude","SamsaraLongitude","SamsaraAddressTypes","SamsaraLastSync"],
- "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"],\n "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"]}
+ "log":["Source","Status","StartedAt","FinishedAt","Matched","CreatedCount","UpdatedCount","Ambiguous","ErrorCount","Details"],
+ "leave":["SageEmployeeId","EmployeeNumber","DriverName","LeaveDate","LeaveEndDate","LeaveType","LeaveDetails","IsPartDay","Hours","SageLastSync"]}
 
 def ensure_columns(g,key):
     existing={c["displayName"]:c["name"] for c in g.columns(LISTS[key])}
