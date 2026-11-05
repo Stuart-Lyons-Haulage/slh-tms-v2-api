@@ -2,7 +2,7 @@ name: Deploy isolated SLH SharePoint sync Function
 on:
   workflow_dispatch:
   push:
-    branches: [slh-sharepoint-sync-preflight-20261028]
+    branches: [slh-master-drivers-function-live]
     paths:
       - 'slh-sharepoint-sync/**'
       - '.github/workflows/slh-sharepoint-sync-deploy.yml'
@@ -27,18 +27,26 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Configure dedicated Function
         run: |
-          az functionapp config appsettings set -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --settings \
-            KEY_VAULT_URL=https://slhtmskvprod32190.vault.azure.net/ \
+          az functionapp config appsettings set -g slh-tms-prod-rg -n slh-master-drivers-sync --settings \
+            KEY_VAULT_URL=https://kv-slh-tms-v3.vault.azure.net/ \
+            SLH_SYNC_MODE=live \
+            SAGE_SYNC_ENABLED=true \
+            TACHO_SYNC_ENABLED=true \
+            ROADTECH_SYNC_ENABLED=false \
+            SAMSARA_SYNC_ENABLED=false \
+            TACHO_BASE_URL=${{ vars.TACHO_BASE_URL }} \
+            ROADTECH_BASE_URL=${{ vars.ROADTECH_BASE_URL }} \
+            ROADTECH_COMPANY_CODE=${{ vars.ROADTECH_COMPANY_CODE }} \
+            DRIVERS_LIST_ID=c8d1d700-a1ce-4920-b349-f2a3a6e09982 \
+            SYNC_LOG_LIST_ID=b681f046-d299-4a1b-8a33-653f600752b8 \
             SHAREPOINT_SITE_ID=stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f \
             VEHICLES_LIST_ID=8d96865a-b7dc-40c0-9947-468542800bd4 \
-            TRAILERS_LIST_ID=a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c \
-            DRIVERS_LIST_ID=2b89c3fc-d83e-424b-81b9-8e2546fabb78 \
-            SYNC_LOG_LIST_ID=ff965828-ca04-4374-aec9-b8b500e234b1 -o none
+            TRAILERS_LIST_ID=a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c -o none
       - name: Package and deploy
         run: |
           cd slh-sharepoint-sync
           zip -r ../slh-function.zip function_app.py host.json requirements.txt
-          az functionapp deployment source config-zip -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --src ../slh-function.zip --build-remote true
+          az functionapp deployment source config-zip -g slh-tms-prod-rg -n slh-master-drivers-sync --src ../slh-function.zip --build-remote true
       - name: Verify registered functions
         run: |
           az functionapp function list -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --query '[].name' -o json
