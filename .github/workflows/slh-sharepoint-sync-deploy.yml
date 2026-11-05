@@ -43,6 +43,7 @@ jobs:
             VEHICLES_LIST_ID=8d96865a-b7dc-40c0-9947-468542800bd4 \
             TRAILERS_LIST_ID=a2fb1103-b9fe-48a8-90fd-9f6fcdd2d74c \
             SITES_LIST_ID=362ecad6-71a2-45dd-8d8c-0af30d3dc945 \
+            LEAVE_LIST_ID=c2ac0d5c-8337-44ff-bbbc-ea55f9133e31 \
              -o none
       - name: Package and deploy
         run: |
