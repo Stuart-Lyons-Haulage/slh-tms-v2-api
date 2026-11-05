@@ -1,0 +1,40 @@
+name: SLH SharePoint sync - Azure access and preflight
+on:
+  push:
+    branches:
+      - slh-sharepoint-sync-preflight-20261028
+    paths:
+      - 'slh-sharepoint-sync/**'
+      - '.github/workflows/slh-sharepoint-sync-preflight.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: slh-sharepoint-sync
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate Python and deployment files
+        run: |
+          python -m py_compile function_app.py
+          python -m json.tool host.json >/dev/null
+          test -s requirements.txt
+          echo "Isolated preflight package passed syntax checks; zero SharePoint writes"
+      - name: Azure login via existing OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify dedicated hosting options without changing Azure
+        run: |
+          az account show --query '{subscription:name,tenant:tenantId}' -o json
+          az functionapp list --query "[?name=='slh-driver-register-sync'].{name:name,state:state,resourceGroup:resourceGroup}" -o json
+          echo 'Preflight complete. No resources created or deployed.'
