@@ -34,9 +34,9 @@ jobs:
             TACHO_SYNC_ENABLED=true \
             ROADTECH_SYNC_ENABLED=false \
             SAMSARA_SYNC_ENABLED=false \
-            TACHO_BASE_URL=${{ vars.TACHO_BASE_URL }} \
-            ROADTECH_BASE_URL=${{ vars.ROADTECH_BASE_URL }} \
-            ROADTECH_COMPANY_CODE=${{ vars.ROADTECH_COMPANY_CODE }} \
+            TACHO_BASE_URL=https://api-v1.roadtech.co.uk \
+            ROADTECH_BASE_URL=https://api-v1.roadtech.co.uk \
+            ROADTECH_COMPANY_CODE=STUARTLB \
             DRIVERS_LIST_ID=c8d1d700-a1ce-4920-b349-f2a3a6e09982 \
             SYNC_LOG_LIST_ID=b681f046-d299-4a1b-8a33-653f600752b8 \
             SHAREPOINT_SITE_ID=stuartlyonshaulage.sharepoint.com,e350e872-0b2b-43a1-8569-270045690fa5,b94ef994-16aa-443b-888b-419b014bbd1f \
@@ -49,4 +49,4 @@ jobs:
           az functionapp deployment source config-zip -g slh-tms-prod-rg -n slh-master-drivers-sync --src ../slh-function.zip --build-remote true
       - name: Verify registered functions
         run: |
-          az functionapp function list -g slh-driver-register-sync-rg -n slh-sharepoint-sync-prod --query '[].name' -o json
+          az functionapp function list -g slh-tms-prod-rg -n slh-master-drivers-sync --query '[].name' -o json
